@@ -1,0 +1,7 @@
+{
+  "name": "Meu corte - 7.0 - Multi-staff",
+  "description": "App de agendamento de barbearia com interface amigável e gestão interna.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

@@ -1,0 +1,52 @@
+1983:                    {completedAppointments.map((apt) => {
+1984-                        const isExpanded = expandedCompletedId === apt.id;
+1985-                        const isNoShow = apt.status === 'no-show';
+1986-                        const isRevertOpen = activeRevertMenu === apt.id;
+1987-
+1988-                        return (
+1989-                            <div 
+1990-                                key={apt.id}
+1991-                                className={`border rounded-[12px] shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden transition-all duration-300 border-l-[3px] border-l-[#10B981] ${
+1992-                                    isExpanded 
+1993-                                        ? 'bg-green-50 (16,185,129,0.08)] border-[rgba(16,185,129,0.2)] opacity-100' 
+1994-                                        : 'bg-green-50 (16,185,129,0.08)] border-[rgba(16,185,129,0.2)] opacity-70'
+1995-                                }`}
+1996-                            >
+1997-                                {/* Accordion Header */}
+1998-                                <div 
+1999-                                    onClick={() => setExpandedCompletedId(isExpanded ? null : apt.id)}
+2000-                                    className="h-[48px] px-4 flex items-center justify-between cursor-pointer hover:bg-primary/40/30 :bg-surface/30 transition-colors"
+2001-                                >
+2002-                                    <div className="flex items-center gap-2.5 min-w-0">
+2003-                                        <span className={`text-xs font-bold line-through shrink-0 ${isExpanded ? 'text-title' : 'text-white  opacity-70'}`}>
+2004-                                            {apt.time}
+2005-                                        </span>
+2006-                                        <div className="flex items-center gap-1.5 min-w-0">
+2007-                                            <span className={`text-sm font-semibold truncate ${isExpanded ? 'text-white ' : 'text-white  opacity-70'}`}>
+2008-                                                {capitalizeName(apt.clientName)}
+2009-                                                <span className="text-xs font-normal text-title ml-1">
+2010-                                                    ({apt.service})
+2011-                                                </span>
+2012-                                            </span>
+2013-                                            {!isNoShow && <Check size={14} className="text-green-500 shrink-0" />}
+2014-                                        </div>
+2015-                                        {isNoShow && (
+2016-                                            <span className="text-[7px] font-black px-1.5 py-0.5 rounded-md bg-amber-50 text-amber-600 border border-amber-100 uppercase tracking-widest shrink-0">
+2017-                                                FALTA
+2018-                                            </span>
+2019-                                        )}
+2020-                                    </div>
+2021-                                    <ChevronRight 
+2022-                                        size={16} 
+2023-                                        className={`text-[#10B981] transition-transform duration-300 ${isExpanded ? 'rotate-90' : ''}`} 
+2024-                                    />
+2025-                                </div>
+2026-
+2027-                                {/* Accordion Content */}
+2028-                                <AnimatePresence>
+2029-                                    {isExpanded && (
+2030-                                        <motion.div
+2031-                                            initial={{ height: 0, opacity: 0 }}
+2032-                                            animate={{ height: 'auto', opacity: 1 }}
+2033-                                            exit={{ height: 0, opacity: 0 }}
+

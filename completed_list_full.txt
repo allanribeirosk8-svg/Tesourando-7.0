@@ -1,0 +1,101 @@
+1933-                                        exit={{ opacity: 0, scale: 0.95 }}
+1934-                                        className="menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 z-10 px-3"
+1935-                                    >
+1936-                                        <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Retornar atendimento?</p>
+1937-                                        <div className="flex gap-2">
+1938-                                            <button 
+1939-                                                onClick={() => { 
+1940-                                                    revertAppointment(apt.id); 
+1941-                                                    setActiveRevertMenu(null); 
+1942-                                                    onSuccess?.('Atendimento retornado com sucesso!');
+1943-                                                }}
+1944-                                                className="h-8 px-4 bg-secondary text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
+1945-                                            >
+1946-                                                Sim
+1947-                                            </button>
+1948-                                            <button 
+1949-                                                onClick={() => setActiveRevertMenu(null)}
+1950-                                                className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+1951-                                            >
+1952-                                                Não
+1953-                                            </button>
+1954-                                        </div>
+1955-                                    </motion.div>
+1956-                                )}
+1957-                            </AnimatePresence>
+1958-                        </motion.div>
+1959-                    );
+1960-                })}
+1961-            </div>
+1962-        )}
+1963-
+1964-        {/* Exceptional Slot - Compact Style */}
+1965-        <div className="mt-6">
+1966-            <div 
+1967-                onClick={() => onAddInSlot(selectedDate, '', true)}
+1968-                className="bg-amber-50  border-2 border-dashed border-amber-500/40 h-[52px] px-4 rounded-2xl flex items-center gap-3 transition-all hover:opacity-80 cursor-pointer group"
+1969-            >
+1970-                <Zap size={18} className="text-amber-500 fill-amber-500 shrink-0" />
+1971-                <div className="text-amber-600  font-black text-[11px] uppercase tracking-widest">
+1972-                    AGENDAR FORA DO EXPEDIENTE
+1973-                </div>
+1974-            </div>
+1975-        </div>
+1976-
+1977-        {/* Completed Section */}
+1978-        {completedAppointments.length > 0 && (
+1979-            <div className="mt-8 space-y-4">
+1980-                <SectionHeader title="Concluídos" count={completedAppointments.length} accent="green" />
+1981-
+1982-                <div className="space-y-1.5">
+1983:                    {completedAppointments.map((apt) => {
+1984-                        const isExpanded = expandedCompletedId === apt.id;
+1985-                        const isNoShow = apt.status === 'no-show';
+1986-                        const isRevertOpen = activeRevertMenu === apt.id;
+1987-
+1988-                        return (
+1989-                            <div 
+1990-                                key={apt.id}
+1991-                                className={`border rounded-[12px] shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden transition-all duration-300 border-l-[3px] border-l-[#10B981] ${
+1992-                                    isExpanded 
+1993-                                        ? 'bg-green-50 (16,185,129,0.08)] border-[rgba(16,185,129,0.2)] opacity-100' 
+1994-                                        : 'bg-green-50 (16,185,129,0.08)] border-[rgba(16,185,129,0.2)] opacity-70'
+1995-                                }`}
+1996-                            >
+1997-                                {/* Accordion Header */}
+1998-                                <div 
+1999-                                    onClick={() => setExpandedCompletedId(isExpanded ? null : apt.id)}
+2000-                                    className="h-[48px] px-4 flex items-center justify-between cursor-pointer hover:bg-primary/40/30 :bg-surface/30 transition-colors"
+2001-                                >
+2002-                                    <div className="flex items-center gap-2.5 min-w-0">
+2003-                                        <span className={`text-xs font-bold line-through shrink-0 ${isExpanded ? 'text-title' : 'text-white  opacity-70'}`}>
+2004-                                            {apt.time}
+2005-                                        </span>
+2006-                                        <div className="flex items-center gap-1.5 min-w-0">
+2007-                                            <span className={`text-sm font-semibold truncate ${isExpanded ? 'text-white ' : 'text-white  opacity-70'}`}>
+2008-                                                {capitalizeName(apt.clientName)}
+2009-                                                <span className="text-xs font-normal text-title ml-1">
+2010-                                                    ({apt.service})
+2011-                                                </span>
+2012-                                            </span>
+2013-                                            {!isNoShow && <Check size={14} className="text-green-500 shrink-0" />}
+2014-                                        </div>
+2015-                                        {isNoShow && (
+2016-                                            <span className="text-[7px] font-black px-1.5 py-0.5 rounded-md bg-amber-50 text-amber-600 border border-amber-100 uppercase tracking-widest shrink-0">
+2017-                                                FALTA
+2018-                                            </span>
+2019-                                        )}
+2020-                                    </div>
+2021-                                    <ChevronRight 
+2022-                                        size={16} 
+2023-                                        className={`text-[#10B981] transition-transform duration-300 ${isExpanded ? 'rotate-90' : ''}`} 
+2024-                                    />
+2025-                                </div>
+2026-
+2027-                                {/* Accordion Content */}
+2028-                                <AnimatePresence>
+2029-                                    {isExpanded && (
+2030-                                        <motion.div
+2031-                                            initial={{ height: 0, opacity: 0 }}
+2032-                                            animate={{ height: 'auto', opacity: 1 }}
+2033-                                            exit={{ height: 0, opacity: 0 }}
