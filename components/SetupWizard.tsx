@@ -154,7 +154,94 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       console.log('[ONBOARDING] localServices a salvar:', JSON.stringify(localServices, null, 2));
       console.log('[ONBOARDING] quantidade de serviços:', localServices.length);
 
-      // 1. Salvar perfil
+      // Obter o auth.uid() do usuário logado
+      const userId = await supabaseService.getUserId();
+      if (!userId) {
+        throw new Error('Não foi possível obter o ID do usuário logado no onboarding.');
+      }
+      console.log('[ONBOARDING] 1. ID do usuário obtido:', userId);
+
+      // Criar/obter barbearia de forma idempotente
+      console.log('[ONBOARDING] 2. Verificando existência de barbearia para o owner:', userId);
+      const { data: existingShops, error: checkShopErr } = await supabase
+        .from('barbershops')
+        .select('*')
+        .eq('owner_id', userId);
+
+      if (checkShopErr) {
+        console.error('[ONBOARDING] Erro ao buscar barbearia existente:', checkShopErr.message);
+      }
+
+      let barbershopId = '';
+      if (existingShops && existingShops.length > 0) {
+        barbershopId = existingShops[0].id;
+        console.log('[ONBOARDING] Barbearia existente encontrada para o usuário. ID:', barbershopId, '| Nome:', existingShops[0].name);
+      } else {
+        console.log('[ONBOARDING] Nenhuma barbearia própria encontrada. Criando nova barbearia...', {
+          owner_id: userId,
+          name: profileData.shopName,
+          slug: handle
+        });
+        const { data: newShop, error: createShopErr } = await supabase
+          .from('barbershops')
+          .insert({
+            owner_id: userId,
+            name: profileData.shopName,
+            slug: handle
+          })
+          .select()
+          .single();
+
+        if (createShopErr) {
+          console.error('[ONBOARDING] Erro crítico ao criar barbearia:', createShopErr.message);
+          throw createShopErr;
+        }
+
+        if (newShop) {
+          barbershopId = newShop.id;
+          console.log('[ONBOARDING] Nova barbearia criada com sucesso! ID:', barbershopId, '| Nome:', newShop.name, '| Slug:', newShop.slug);
+        }
+      }
+
+      // Criar/obter membership de forma idempotente
+      if (barbershopId) {
+        console.log('[ONBOARDING] 3. Verificando se já existe associação de owner em barbershop_members...');
+        const { data: existingMembers, error: checkMemberErr } = await supabase
+          .from('barbershop_members')
+          .select('*')
+          .eq('barbershop_id', barbershopId)
+          .eq('user_id', userId);
+
+        if (checkMemberErr) {
+          console.error('[ONBOARDING] Erro ao buscar associação existente em barbershop_members:', checkMemberErr.message);
+        }
+
+        if (existingMembers && existingMembers.length > 0) {
+          console.log('[ONBOARDING] Associação de owner já existe para o usuário. Role:', existingMembers[0].role);
+        } else {
+          console.log('[ONBOARDING] Associação não encontrada. Criando linha em barbershop_members...', {
+            barbershop_id: barbershopId,
+            user_id: userId,
+            role: 'owner'
+          });
+          const { error: createMemberErr } = await supabase
+            .from('barbershop_members')
+            .insert({
+              barbershop_id: barbershopId,
+              user_id: userId,
+              role: 'owner'
+            });
+
+          if (createMemberErr) {
+            console.error('[ONBOARDING] Erro ao associar owner em barbershop_members:', createMemberErr.message);
+          } else {
+            console.log('[ONBOARDING] Associação de owner criada com sucesso na tabela barbershop_members!');
+          }
+        }
+      }
+
+      // 4. Salvar perfil de barbeiro (mantendo preservado o fluxo atual)
+      console.log('[ONBOARDING] 4. Atualizando perfil profissional (updateBarberProfile)...');
       await updateBarberProfile({
         ...profileData,
         slug: handle,
@@ -166,40 +253,37 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
       console.log('[ONBOARDING] ► iniciando limpeza dos serviços antigos...');
 
-      // 2. Substituir serviços
-      const userId = await supabaseService.getUserId();
-      if (userId) {
-        // Deleta todos os serviços existentes do usuário
-        await supabase.from('services').delete().eq('user_id', userId);
-        console.log('[ONBOARDING] removeService/delete chamado para todos os serviços do user');
-        
-        // Insere os novos serviços diretamente
-        const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-        const payload = localServices.map((s, index) => {
-          console.log('[ONBOARDING] addService chamado para:', s.name, '| resultado esperado no banco');
-          return {
-            id: isUUID(s.id) ? s.id : crypto.randomUUID(),
-            user_id: userId,
-            name: s.name,
-            price: s.price,
-            duration: s.duration,
-            order_index: index
-          };
-        });
-        
-        const { data: inserted, error: insertErr } = await supabase.from('services').insert(payload).select();
-        console.log('[ONBOARDING] ✅ Serviços inseridos diretamente:', inserted);
-        console.log('[ONBOARDING] ❌ Erro ao inserir:', insertErr);
+      // 5. Substituir serviços (mantendo preservado o fluxo atual)
+      // Deleta todos os serviços existentes do usuário
+      await supabase.from('services').delete().eq('user_id', userId);
+      console.log('[ONBOARDING] removeService/delete chamado para todos os serviços do user');
+      
+      // Insere os novos serviços diretamente
+      const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+      const payload = localServices.map((s, index) => {
+        console.log('[ONBOARDING] addService chamado para:', s.name, '| resultado esperado no banco');
+        return {
+          id: isUUID(s.id) ? s.id : crypto.randomUUID(),
+          user_id: userId,
+          name: s.name,
+          price: s.price,
+          duration: s.duration,
+          order_index: index
+        };
+      });
+      
+      const { data: inserted, error: insertErr } = await supabase.from('services').insert(payload).select();
+      console.log('[ONBOARDING] ✅ Serviços inseridos diretamente:', inserted);
+      console.log('[ONBOARDING] ❌ Erro ao inserir:', insertErr);
 
-        const { data: checkServ, error: checkErr } = await supabase
-          .from('services')
-          .select('id, name, user_id')
-          .eq('user_id', userId);
-        console.log('[ONBOARDING] ✅ Verificação direta no banco após salvar:', checkServ);
-        console.log('[ONBOARDING] ❌ Erro na verificação:', checkErr);
-      }
+      const { data: checkServ, error: checkErr } = await supabase
+        .from('services')
+        .select('id, name, user_id')
+        .eq('user_id', userId);
+      console.log('[ONBOARDING] ✅ Verificação direta no banco após salvar:', checkServ);
+      console.log('[ONBOARDING] ❌ Erro na verificação:', checkErr);
 
-      // 3. Salvar horários
+      // 6. Salvar horários (mantendo preservado o fluxo atual)
       console.group('[DEBUG-AGENDA] SetupWizard - Configuração Inicial');
       const dayMap: Record<number, string> = { 0: 'DOM', 1: 'SEG', 2: 'TER', 3: 'QUA', 4: 'QUI', 5: 'SEX', 6: 'SAB' };
       for (let day = 0; day <= 6; day++) {
@@ -235,8 +319,10 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       }, 2500);
 
     } catch (err) {
-      console.error(err);
+      console.error('[ONBOARDING] Erro capturado no fluxo handleComplete:', err);
       setIsFinishing(false);
+    } finally {
+      console.groupEnd();
     }
   };
 

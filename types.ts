@@ -174,6 +174,15 @@ export interface AppState {
   selectedStaffId: string | 'all';
   setSelectedStaffId: (id: string | 'all') => void;
   addStaff: (s: Omit<Staff, 'id' | 'tenantId'>) => Promise<void>;
+  createStaffDirectly: (params: {
+    email: string;
+    password?: string;
+    role: 'staff' | 'admin';
+    name: string;
+    phone?: string;
+    commissionRate?: number;
+    barbershopId?: string;
+  }) => Promise<any>;
   updateStaff: (id: string, updates: Partial<Staff>) => Promise<void>;
   deleteStaff: (id: string) => Promise<void>;
   getStaffAvailability: (staffId: string) => Promise<StaffAvailability[]>;
@@ -210,6 +219,44 @@ export interface AppState {
   markNotificationAsRead: (id: string) => Promise<void>;
   markAllNotificationsAsRead: () => Promise<void>;
   deleteNotification: (id: string) => Promise<void>;
+
+  // Barbershop management state and operations
+  barbershop: Barbershop | null;
+  barbershopMembers: BarbershopMember[];
+  barbershopInvites: BarbershopInvite[];
+  createBarbershop: (name: string) => Promise<void>;
+  createInvite: (email: string, role?: 'staff' | 'admin') => Promise<void>;
+  acceptInvite: (token: string) => Promise<void>;
+}
+
+export interface Barbershop {
+  id: string;
+  ownerId: string;
+  name: string;
+  slug: string;
+  createdAt: string;
+}
+
+export interface BarbershopMember {
+  barbershopId: string;
+  userId: string;
+  role: 'owner' | 'staff' | 'admin';
+  joinedAt?: string;
+  name?: string;
+  phone?: string;
+  photo?: string;
+}
+
+export interface BarbershopInvite {
+  id: string;
+  barbershopId: string;
+  email: string;
+  role: 'staff' | 'admin';
+  token: string;
+  expiresAt: string;
+  acceptedAt?: string | null;
+  invitedBy: string;
+  createdAt: string;
 }
 
 export interface AppNotification {

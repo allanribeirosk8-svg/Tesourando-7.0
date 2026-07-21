@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft, Calendar, Coffee, ArrowLeft } from 'lucide-react';
+import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft, Calendar, Coffee, ArrowLeft, Mail, Lock, Shield } from 'lucide-react';
 import { useStore } from '../context/Store';
 import { Staff, StaffAvailability } from '../types';
 
@@ -19,7 +19,7 @@ const DIAS_SEMANA = [
 ];
 
 export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) => {
-  const { staff, addStaff, updateStaff, deleteStaff, getStaffAvailability, saveStaffAvailability, weeklySchedule, userRole, session } = useStore();
+  const { staff, addStaff, createStaffDirectly, updateStaff, deleteStaff, getStaffAvailability, saveStaffAvailability, weeklySchedule, userRole, session } = useStore();
   
   // Telas internas: 'list' | 'edit_form' | 'availability_form'
   const [view, setView] = useState<'list' | 'edit_form' | 'availability_form'>('list');
@@ -32,6 +32,12 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
   const [phone, setPhone] = useState('');
   const [commission, setCommission] = useState('30');
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
+  
+  // Novos campos para criação direta com email e senha
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [role, setRole] = useState<'staff' | 'admin'>('staff');
+  
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Estados da configuração de disponibilidade do profissional
@@ -54,11 +60,17 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
       setPhone(member.phone);
       setCommission(String(member.commissionRate || 0));
       setStatus(member.status || 'active');
+      setEmail('');
+      setPassword('');
+      setRole('staff');
     } else {
       setName('');
       setPhone('');
       setCommission('30');
       setStatus('active');
+      setEmail('');
+      setPassword('');
+      setRole('staff');
     }
     setView('edit_form');
   };
@@ -67,6 +79,18 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
     e.preventDefault();
     if (!name.trim()) return;
     setIsSubmitting(true);
+    
+    // Log [CREATE_STAFF_UI_01]
+    console.log('[CREATE_STAFF_UI_01] Iniciando envio do formulário de criação/edição de profissional:', {
+      isEditing: !!selectedStaffMember,
+      email: email.trim() || undefined,
+      role,
+      name: name.trim(),
+      phone: phone.trim(),
+      commissionRate: parseFloat(commission) || 0,
+      hasPassword: !!password.trim()
+    });
+
     try {
       const commRate = parseFloat(commission) || 0;
       if (selectedStaffMember) {
@@ -77,16 +101,38 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
           status: status
         });
       } else {
-        await addStaff({
-          name: name.trim(),
-          phone: phone.trim(),
-          commissionRate: commRate,
-          status: 'active'
-        });
+        // Se preencheu e-mail, cria direto com e-mail e senha!
+        if (email.trim()) {
+          console.log('[CREATE_STAFF_UI_01a] Acionando createStaffDirectly via Edge Function...');
+          await createStaffDirectly({
+            email: email.trim(),
+            password: password.trim() || undefined,
+            role: role,
+            name: name.trim(),
+            phone: phone.trim(),
+            commissionRate: commRate
+          });
+        } else {
+          // Fallback se não preencheu e-mail
+          console.log('[CREATE_STAFF_UI_01b] Acionando addStaff (método local padrão sem conta de usuário)...');
+          await addStaff({
+            name: name.trim(),
+            phone: phone.trim(),
+            commissionRate: commRate,
+            status: 'active'
+          });
+        }
       }
+      console.log('[CREATE_STAFF_UI_01c] Fluxo de salvar concluído com sucesso!');
       setView('list');
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      // Log [CREATE_STAFF_UI_02]
+      console.error('[CREATE_STAFF_UI_02] Erro capturado na UI durante a criação de profissional:', {
+        message: err?.message || String(err),
+        stack: err?.stack || 'Sem stack disponível',
+        errorObject: err
+      });
+      alert(err?.message || 'Erro ao salvar profissional. Verifique os dados e tente novamente.');
     } finally {
       setIsSubmitting(false);
     }
@@ -403,6 +449,78 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                   />
                 </div>
               </div>
+
+              {!selectedStaffMember && (
+                <div className="pt-2 mt-2 border-t border-white/5 space-y-4">
+                  <div className="text-xs font-black text-secondary uppercase tracking-widest flex items-center gap-1.5">
+                    <Shield size={12} className="text-primary" />
+                    Acesso ao Sistema (Opcional)
+                  </div>
+                  <p className="text-[11px] text-title leading-relaxed">
+                    Preencha o e-mail e a senha abaixo se quiser criar uma conta de acesso para que o profissional faça login no aplicativo. Se deixado em branco, ele será cadastrado apenas localmente/para fins de agenda.
+                  </p>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-title uppercase tracking-wider">E-mail do Profissional</label>
+                    <div className="relative">
+                      <Mail size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-title" />
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="Ex: profissional@email.com"
+                        className="w-full bg-black/20 text-white rounded-xl py-3 pl-11 pr-4 border border-white/10 focus:border-primary focus:outline-none text-sm transition-colors"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-title uppercase tracking-wider">Senha Provisória</label>
+                    <div className="relative">
+                      <Lock size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-title" />
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Min. 6 caracteres (Ex: Mudar@123)"
+                        className="w-full bg-black/20 text-white rounded-xl py-3 pl-11 pr-4 border border-white/10 focus:border-primary focus:outline-none text-sm transition-colors"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-title uppercase tracking-wider">Nível de Acesso (Cargo)</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setRole('staff')}
+                        className={`py-3 rounded-xl font-bold text-xs border transition-all ${
+                          role === 'staff'
+                            ? 'bg-primary/20 border-primary text-white'
+                            : 'bg-black/10 border-white/5 text-title hover:bg-black/20'
+                        }`}
+                      >
+                        Profissional (Staff)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRole('admin')}
+                        className={`py-3 rounded-xl font-bold text-xs border transition-all ${
+                          role === 'admin'
+                            ? 'bg-secondary/20 border-secondary text-white'
+                            : 'bg-black/10 border-white/5 text-title hover:bg-black/20'
+                        }`}
+                      >
+                        Administrador (Admin)
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-title leading-relaxed">
+                      * <strong>Staff</strong>: Pode visualizar e agendar apenas seus próprios horários.<br />
+                      * <strong>Admin</strong>: Pode gerenciar toda a barbearia, caixa, comissões e equipe.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {selectedStaffMember && (
                 <div className="space-y-2">

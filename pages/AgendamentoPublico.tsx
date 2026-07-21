@@ -182,7 +182,7 @@ export default function AgendamentoPublico() {
 
         // Fetch active staff members for this tenant
         const { data: dbStaff, error: staffErr } = await supabase
-          .from('staff')
+          .from('staff_profiles')
           .select('*')
           .eq('tenant_id', prof.id)
           .eq('status', 'active');

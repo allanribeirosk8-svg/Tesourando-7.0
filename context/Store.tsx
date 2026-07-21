@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
-import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification } from '../types';
+import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite } from '../types';
 import { normalizePhone } from '../utils/helpers';
 import { supabaseService } from '../services/supabaseService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
@@ -84,6 +84,10 @@ export const AppProvider: React.FC<{
   const [staff, setStaff] = useState<any[]>([]);
   const [userRole, setUserRole] = useState<'admin_owner' | 'staff' | 'client' | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+
+  const [barbershop, setBarbershop] = useState<Barbershop | null>(null);
+  const [barbershopMembers, setBarbershopMembers] = useState<BarbershopMember[]>([]);
+  const [barbershopInvites, setBarbershopInvites] = useState<BarbershopInvite[]>([]);
 
   const permissions = useMemo(() => {
     const isAdmin = userRole === 'admin_owner';
@@ -181,7 +185,57 @@ export const AppProvider: React.FC<{
     setUserRole(null);
     setSelectedStaffId('all');
     setIsLoading(true);
+    setBarbershop(null);
+    setBarbershopMembers([]);
+    setBarbershopInvites([]);
   }, []);
+
+  const loadBarbershopData = useCallback(async () => {
+    try {
+      if (!isSupabaseConfigured() || !sessionRef.current) return;
+      const [bs, members, invites] = await Promise.all([
+        supabaseService.getBarbershop(),
+        supabaseService.getBarbershopMembers(),
+        supabaseService.getInvites()
+      ]);
+      setBarbershop(bs);
+      setBarbershopMembers(members);
+      setBarbershopInvites(invites);
+    } catch (err) {
+      console.error('[loadBarbershopData] Error loading barbershop data:', err);
+    }
+  }, []);
+
+  const createBarbershop = useCallback(async (name: string) => {
+    try {
+      const bs = await supabaseService.createBarbershop(name);
+      setBarbershop(bs);
+      await loadBarbershopData();
+    } catch (err) {
+      console.error('[createBarbershop] Error:', err);
+      throw err;
+    }
+  }, [loadBarbershopData]);
+
+  const createInvite = useCallback(async (email: string, role: 'staff' | 'admin' = 'staff') => {
+    try {
+      await supabaseService.createInvite(email, role);
+      await loadBarbershopData();
+    } catch (err) {
+      console.error('[createInvite] Error:', err);
+      throw err;
+    }
+  }, [loadBarbershopData]);
+
+  const acceptInvite = useCallback(async (token: string) => {
+    try {
+      await supabaseService.acceptInvite(token);
+      await loadBarbershopData();
+    } catch (err) {
+      console.error('[acceptInvite] Error:', err);
+      throw err;
+    }
+  }, [loadBarbershopData]);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
@@ -381,6 +435,10 @@ export const AppProvider: React.FC<{
           setCustomers({});
           setServices(DEFAULT_SERVICES);
           setBarberProfile(DEFAULT_PROFILE);
+        }
+
+        if (isSupabaseConfigured() && currentSession) {
+          await loadBarbershopData();
         }
       } else {
         loadFromLocalStorage();
@@ -1608,6 +1666,81 @@ export const AppProvider: React.FC<{
     }
   }, [barberId]);
 
+  const createStaffDirectly = useCallback(async (params: {
+    email: string;
+    password?: string;
+    role: 'staff' | 'admin';
+    name: string;
+    phone?: string;
+    commissionRate?: number;
+    barbershopId?: string;
+  }) => {
+    // Log [CREATE_STAFF_STORE_01]
+    console.log('[CREATE_STAFF_STORE_01] Entrada no callback createStaffDirectly do Store:', {
+      paramsWithoutPassword: {
+        email: params.email,
+        role: params.role,
+        name: params.name,
+        phone: params.phone,
+        commissionRate: params.commissionRate,
+        barbershopIdParam: params.barbershopId
+      },
+      currentContextBarbershopState: barbershop ? {
+        id: barbershop.id,
+        name: barbershop.name,
+        slug: barbershop.slug
+      } : null
+    });
+
+    try {
+      const targetBarbershopId = params.barbershopId || barbershop?.id || undefined;
+      
+      // Log [CREATE_STAFF_STORE_02]
+      console.log('[CREATE_STAFF_STORE_02] Resolvendo barbershopId a ser enviado para o serviço:', {
+        targetBarbershopId
+      });
+
+      const res = await supabaseService.createStaffDirectly({
+        ...params,
+        barbershopId: targetBarbershopId
+      });
+      
+      // Log [CREATE_STAFF_STORE_03]
+      console.log('[CREATE_STAFF_STORE_03] Sucesso ao invocar o serviço createStaffDirectly. Resposta recebida:', res);
+
+      if (res && res.staff) {
+        setStaff(prev => [...prev, {
+          id: res.staff.id,
+          tenantId: res.staff.tenant_id,
+          userId: res.staff.user_id,
+          name: res.staff.name,
+          phone: res.staff.phone,
+          photo: res.staff.photo || undefined,
+          status: res.staff.status || 'active',
+          commissionRate: res.staff.commission_rate || 0
+        }]);
+
+        setBarbershopMembers(prev => [...prev, {
+          barbershopId: res.staff.tenant_id,
+          userId: res.user_id,
+          role: params.role,
+          joinedAt: new Date().toISOString(),
+          name: params.name,
+          phone: params.phone || ''
+        }]);
+      }
+      return res;
+    } catch (err: any) {
+      // Log [CREATE_STAFF_STORE_04]
+      console.error('[CREATE_STAFF_STORE_04] Erro capturado no callback createStaffDirectly do Store:', {
+        message: err?.message || String(err),
+        stack: err?.stack || 'Sem stack disponível',
+        errorObject: err
+      });
+      throw err;
+    }
+  }, [barbershop]);
+
   const updateStaff = useCallback(async (id: string, updates: Partial<Staff>) => {
     try {
       const existing = staff.find(s => s.id === id);
@@ -1669,10 +1802,19 @@ export const AppProvider: React.FC<{
       selectedStaffId,
       setSelectedStaffId,
       addStaff,
+      createStaffDirectly,
       updateStaff,
       deleteStaff,
       getStaffAvailability,
       saveStaffAvailability,
+
+      // Barbershop management
+      barbershop,
+      barbershopMembers,
+      barbershopInvites,
+      createBarbershop,
+      createInvite,
+      acceptInvite,
 
       // Notifications exports
       notifications,
