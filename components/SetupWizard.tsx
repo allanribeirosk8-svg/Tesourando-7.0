@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Store, User, Phone, PhoneCall, MapPin, Instagram, Scissors, List, Trash2, Clock, CheckCircle, CheckCircle2, XCircle, Loader2, ChevronLeft } from 'lucide-react';
+import { Store, User, Phone, PhoneCall, MapPin, Instagram, Scissors, List, Trash2, Clock, CheckCircle, CheckCircle2, XCircle, Loader2, ChevronLeft, AlertCircle } from 'lucide-react';
 import { useStore } from '../context/Store';
 import { ServiceItem, DaySchedule } from '../types';
-import { supabaseService } from '../services/supabaseService';
+import { supabaseService, normalizeRequestedSlug, generateSlug } from '../services/supabaseService';
 import { supabase } from '../lib/supabase';
 
 const generateBreakSlots = (breakStart: string, breakEnd: string): string[] => {
@@ -23,6 +23,7 @@ const generateBreakSlots = (breakStart: string, breakEnd: string): string[] => {
 
 interface SetupWizardProps {
   onComplete: () => void;
+  initialStep?: number;
 }
 
 const DEFAULT_SCHEDULE: Record<string, DaySchedule> = {
@@ -63,9 +64,9 @@ const generateDurationOptions = () => {
   return options;
 };
 
-export function SetupWizard({ onComplete }: SetupWizardProps) {
-  const { updateBarberProfile, addService, updateDayConfig, services, removeService } = useStore();
-  const [step, setStep] = useState(1);
+export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
+  const { updateBarberProfile, addService, updateDayConfig, services, removeService, barberProfile, barbershop, onboardingState, checkOnboardingState } = useStore();
+  const [step, setStep] = useState(initialStep || 1);
   const [isFinishing, setIsFinishing] = useState(false);
   const [isFinished, setIsFinished] = useState(false);
 
@@ -93,21 +94,103 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
     'idle' | 'checking' | 'available' | 'taken' | 'invalid'
   >('idle');
 
+  // Carregar dados existentes para retomar de onde parou sem perda de progresso
+  React.useEffect(() => {
+    const loadExistingProgress = async () => {
+      try {
+        const userId = await supabaseService.getUserId();
+        if (!userId) return;
+
+        const currentProf = await supabaseService.getCurrentProfile(userId);
+        const ownedShop = await supabaseService.getOwnedBarbershop(userId);
+
+        if (currentProf || ownedShop) {
+          setProfileData(prev => ({
+            ...prev,
+            name: (currentProf?.name && currentProf.name !== 'Barbeiro') ? currentProf.name : (prev.name || ''),
+            shopName: ownedShop?.name || currentProf?.shopName || prev.shopName || '',
+            personalPhone: currentProf?.personalPhone || prev.personalPhone || '',
+            businessPhone: currentProf?.businessPhone || prev.businessPhone || '',
+            address: currentProf?.address || prev.address || '',
+            instagram: currentProf?.instagram || prev.instagram || '',
+            description: currentProf?.description || prev.description || '',
+          }));
+
+          const activeSlug = ownedShop?.slug || currentProf?.slug;
+          if (activeSlug) {
+            setHandle(activeSlug);
+            setHandleStatus('available');
+          }
+        }
+
+        const { data: dbServices } = await supabase
+          .from('services')
+          .select('*')
+          .eq('user_id', userId);
+
+        if (dbServices && dbServices.length > 0) {
+          setLocalServices(dbServices.map((s: any) => ({
+            id: s.id,
+            name: s.name,
+            price: Number(s.price),
+            duration: Number(s.duration)
+          })));
+        }
+      } catch (err) {
+        console.warn('[SetupWizard] Erro ao carregar dados prévios para retomada:', err);
+      }
+    };
+
+    loadExistingProgress();
+
+    if (initialStep && initialStep >= 1 && initialStep <= 4) {
+      setStep(initialStep);
+    } else if (onboardingState?.step) {
+      setStep(onboardingState.step);
+    }
+  }, [initialStep, onboardingState?.step]);
   const checkHandleAvailability = async (value: string) => {
-    if (value.length < 3 || /[^a-z0-9-]/.test(value)) return;
+    const normalized = normalizeRequestedSlug(value);
+    if (normalized.length < 3) {
+      setHandleStatus('invalid');
+      return;
+    }
     setHandleStatus('checking');
-    const { data } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('slug', value)
-      .limit(1);
-    setHandleStatus(data && data.length > 0 ? 'taken' : 'available');
+    try {
+      const userId = await supabaseService.getUserId();
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('slug', normalized)
+        .limit(1);
+
+      if (profs && profs.length > 0 && profs[0].id !== userId) {
+        setHandleStatus('taken');
+        return;
+      }
+
+      const { data: shops } = await supabase
+        .from('barbershops')
+        .select('owner_id')
+        .eq('slug', normalized)
+        .limit(1);
+
+      if (shops && shops.length > 0 && shops[0].owner_id !== userId) {
+        setHandleStatus('taken');
+        return;
+      }
+
+      setHandleStatus('available');
+    } catch {
+      setHandleStatus('idle');
+    }
   };
 
   const handleHandleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
+    const val = e.target.value.toLowerCase().replace(/\s+/g, '-');
     setHandle(val);
-    if (/[^a-z0-9-]/.test(val)) {
+    const normalized = normalizeRequestedSlug(val);
+    if (normalized.length < 3) {
       setHandleStatus('invalid');
     } else {
       setHandleStatus('idle');
@@ -118,6 +201,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   const isBusinessPhoneValid = commDigits.length === 0 || validatePhone(profileData.businessPhone);
   const isStep1Valid = profileData.name.trim() !== '' && validatePhone(profileData.personalPhone) && isBusinessPhoneValid && handleStatus === 'available';
   const isStep2Valid = profileData.shopName.trim() !== '';
+  const isStep3Valid = localServices.length > 0 && localServices.every(s => s.name.trim() !== '' && typeof s.price === 'number' && !isNaN(s.price) && s.price > 0);
 
   const handleNext = () => {
     if (step === 1) {
@@ -140,6 +224,11 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       setErrors([]);
       setStep(3);
     } else if (step === 3) {
+      if (!isStep3Valid) {
+        setErrors(['services']);
+        return;
+      }
+      setErrors([]);
       setStep(4);
     } else if (step === 4) {
       handleComplete();
@@ -151,43 +240,61 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
     try {
       console.group('[ONBOARDING] handleComplete iniciado');
-      console.log('[ONBOARDING] localServices a salvar:', JSON.stringify(localServices, null, 2));
-      console.log('[ONBOARDING] quantidade de serviços:', localServices.length);
 
-      // Obter o auth.uid() do usuário logado
       const userId = await supabaseService.getUserId();
       if (!userId) {
         throw new Error('Não foi possível obter o ID do usuário logado no onboarding.');
       }
       console.log('[ONBOARDING] 1. ID do usuário obtido:', userId);
 
-      // Criar/obter barbearia de forma idempotente
-      console.log('[ONBOARDING] 2. Verificando existência de barbearia para o owner:', userId);
-      const { data: existingShops, error: checkShopErr } = await supabase
-        .from('barbershops')
-        .select('*')
-        .eq('owner_id', userId);
+      // 1. Log slug solicitado pelo usuário
+      console.log('[onboarding] requested profile slug:', handle);
 
-      if (checkShopErr) {
-        console.error('[ONBOARDING] Erro ao buscar barbearia existente:', checkShopErr.message);
+      // 2. Montar e salvar payload do perfil
+      const profilePayload = await supabaseService.buildProfilePayload(
+        {
+          ...profileData,
+          slug: handle,
+          logo: '',
+          photo: '',
+          website: '',
+          working_hours: schedule
+        },
+        userId
+      );
+
+      const { error: profileUpsertErr } = await supabase
+        .from('profiles')
+        .upsert(profilePayload);
+
+      if (profileUpsertErr) {
+        console.error('[ONBOARDING] Erro ao salvar profile:', profileUpsertErr.message);
+        throw profileUpsertErr;
       }
+      console.log('[onboarding] persisted profile payload:', profilePayload);
 
+      // 3. Garantir barbearia própria de forma idempotente
+      const existingShop = await supabaseService.getOwnedBarbershop(userId);
       let barbershopId = '';
-      if (existingShops && existingShops.length > 0) {
-        barbershopId = existingShops[0].id;
-        console.log('[ONBOARDING] Barbearia existente encontrada para o usuário. ID:', barbershopId, '| Nome:', existingShops[0].name);
+      let shopPayload: any = null;
+
+      if (existingShop) {
+        barbershopId = existingShop.id;
+        shopPayload = existingShop;
+        if (profileData.shopName && profileData.shopName !== existingShop.name) {
+          await supabase
+            .from('barbershops')
+            .update({ name: profileData.shopName })
+            .eq('id', existingShop.id);
+        }
       } else {
-        console.log('[ONBOARDING] Nenhuma barbearia própria encontrada. Criando nova barbearia...', {
-          owner_id: userId,
-          name: profileData.shopName,
-          slug: handle
-        });
+        const shopSlug = generateSlug(profileData.shopName || 'barbearia', userId);
         const { data: newShop, error: createShopErr } = await supabase
           .from('barbershops')
           .insert({
             owner_id: userId,
-            name: profileData.shopName,
-            slug: handle
+            name: profileData.shopName || 'Minha Barbearia',
+            slug: shopSlug
           })
           .select()
           .single();
@@ -197,94 +304,36 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           throw createShopErr;
         }
 
-        if (newShop) {
-          barbershopId = newShop.id;
-          console.log('[ONBOARDING] Nova barbearia criada com sucesso! ID:', barbershopId, '| Nome:', newShop.name, '| Slug:', newShop.slug);
-        }
+        barbershopId = newShop.id;
+        shopPayload = newShop;
       }
+      console.log('[onboarding] persisted barbershop payload:', shopPayload);
 
-      // Criar/obter membership de forma idempotente
-      if (barbershopId) {
-        console.log('[ONBOARDING] 3. Verificando se já existe associação de owner em barbershop_members...');
-        const { data: existingMembers, error: checkMemberErr } = await supabase
-          .from('barbershop_members')
-          .select('*')
-          .eq('barbershop_id', barbershopId)
-          .eq('user_id', userId);
+      // 4. Garantir owner membership
+      const ownerMember = await supabaseService.ensureOwnerMembership(barbershopId, userId);
+      console.log('[onboarding] owner membership status:', ownerMember);
 
-        if (checkMemberErr) {
-          console.error('[ONBOARDING] Erro ao buscar associação existente em barbershop_members:', checkMemberErr.message);
-        }
-
-        if (existingMembers && existingMembers.length > 0) {
-          console.log('[ONBOARDING] Associação de owner já existe para o usuário. Role:', existingMembers[0].role);
-        } else {
-          console.log('[ONBOARDING] Associação não encontrada. Criando linha em barbershop_members...', {
-            barbershop_id: barbershopId,
-            user_id: userId,
-            role: 'owner'
-          });
-          const { error: createMemberErr } = await supabase
-            .from('barbershop_members')
-            .insert({
-              barbershop_id: barbershopId,
-              user_id: userId,
-              role: 'owner'
-            });
-
-          if (createMemberErr) {
-            console.error('[ONBOARDING] Erro ao associar owner em barbershop_members:', createMemberErr.message);
-          } else {
-            console.log('[ONBOARDING] Associação de owner criada com sucesso na tabela barbershop_members!');
-          }
-        }
-      }
-
-      // 4. Salvar perfil de barbeiro (mantendo preservado o fluxo atual)
-      console.log('[ONBOARDING] 4. Atualizando perfil profissional (updateBarberProfile)...');
-      await updateBarberProfile({
-        ...profileData,
-        slug: handle,
-        logo: '',
-        photo: '',
-        website: '',
-        working_hours: schedule,
-      });
-
-      console.log('[ONBOARDING] ► iniciando limpeza dos serviços antigos...');
-
-      // 5. Substituir serviços (mantendo preservado o fluxo atual)
-      // Deleta todos os serviços existentes do usuário
+      // 5. Salvar serviços do usuário
       await supabase.from('services').delete().eq('user_id', userId);
-      console.log('[ONBOARDING] removeService/delete chamado para todos os serviços do user');
-      
-      // Insere os novos serviços diretamente
       const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-      const payload = localServices.map((s, index) => {
-        console.log('[ONBOARDING] addService chamado para:', s.name, '| resultado esperado no banco');
-        return {
-          id: isUUID(s.id) ? s.id : crypto.randomUUID(),
-          user_id: userId,
-          name: s.name,
-          price: s.price,
-          duration: s.duration,
-          order_index: index
-        };
-      });
-      
-      const { data: inserted, error: insertErr } = await supabase.from('services').insert(payload).select();
-      console.log('[ONBOARDING] ✅ Serviços inseridos diretamente:', inserted);
-      console.log('[ONBOARDING] ❌ Erro ao inserir:', insertErr);
+      const servicesPayload = localServices.map((s, index) => ({
+        id: isUUID(s.id) ? s.id : crypto.randomUUID(),
+        user_id: userId,
+        name: s.name,
+        price: s.price,
+        duration: s.duration,
+        order_index: index
+      }));
 
-      const { data: checkServ, error: checkErr } = await supabase
-        .from('services')
-        .select('id, name, user_id')
-        .eq('user_id', userId);
-      console.log('[ONBOARDING] ✅ Verificação direta no banco após salvar:', checkServ);
-      console.log('[ONBOARDING] ❌ Erro na verificação:', checkErr);
+      if (servicesPayload.length > 0) {
+        const { error: insertErr } = await supabase.from('services').insert(servicesPayload);
+        if (insertErr) {
+          console.error('[ONBOARDING] Erro ao salvar serviços:', insertErr.message);
+          throw insertErr;
+        }
+      }
 
-      // 6. Salvar horários (mantendo preservado o fluxo atual)
-      console.group('[DEBUG-AGENDA] SetupWizard - Configuração Inicial');
+      // 6. Salvar horários do salão
       const dayMap: Record<number, string> = { 0: 'DOM', 1: 'SEG', 2: 'TER', 3: 'QUA', 4: 'QUI', 5: 'SEX', 6: 'SAB' };
       for (let day = 0; day <= 6; day++) {
         const dayKey = dayMap[day];
@@ -293,13 +342,6 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
         if (daySched.breakStart && daySched.breakEnd) {
           breaks.push(...generateBreakSlots(daySched.breakStart, daySched.breakEnd));
         }
-        
-        console.log(`[DEBUG-AGENDA] Enviando Dia ${day} (${dayKey}):`, {
-          isOpen: daySched.enabled,
-          tipoIsOpen: typeof daySched.enabled,
-          start: daySched.open,
-          end: daySched.close
-        });
 
         await updateDayConfig(day, {
           isOpen: daySched.enabled,
@@ -308,18 +350,30 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           breaks: breaks,
         });
       }
-      console.groupEnd();
+
+      // 7. Forçar onboarding_seen no banco se necessário
+      await supabaseService.completeOwnerSetupIfPossible(userId);
+
+      // 8. Reler o estado real do banco de dados
+      const refreshState = await supabaseService.resolveOnboardingState(userId);
+      console.log('[onboarding] refresh state result:', refreshState);
+
+      const navTarget = refreshState.isComplete ? '/app' : `SetupWizard (Step ${refreshState.step})`;
+      console.log('[onboarding] final navigation target:', navTarget);
+
+      // 9. Atualizar Store
+      await checkOnboardingState();
 
       setIsFinishing(false);
       setIsFinished(true);
-      
-      await new Promise(resolve => setTimeout(resolve, 500)); // aguarda Supabase processar
+
       setTimeout(() => {
         onComplete();
-      }, 2500);
+      }, 1200);
 
-    } catch (err) {
-      console.error('[ONBOARDING] Erro capturado no fluxo handleComplete:', err);
+    } catch (err: any) {
+      console.error('[ONBOARDING] Erro capturado na finalização:', err);
+      alert(err?.message || 'Erro ao finalizar a configuração. Por favor, tente novamente.');
       setIsFinishing(false);
     } finally {
       console.groupEnd();
@@ -621,38 +675,46 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                         </div>
 
                         <div className="flex-1 overflow-y-auto min-h-0 flex flex-col pr-1">
-                          {localServices.map((service, index) => (
-                            <div key={service.id} className="bg-[#F5F5F8] rounded-[12px] p-2 flex flex-row items-center gap-2 mb-2 shrink-0">
-                              <span className="text-[#D1D5DB] cursor-grab shrink-0 w-4 text-center">⠿</span>
-                              <input
-                                type="text"
-                                value={service.name}
-                                onChange={(e) => updateLocalService(service.id, 'name', e.target.value)}
-                                className="flex-[3] w-0 bg-white border border-[#E0E0E0] rounded-[8px] px-2 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD]"
-                                placeholder="Nome do serviço"
-                              />
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                value={service.price || ''}
-                                onChange={(e) => updateLocalService(service.id, 'price', Number(e.target.value))}
-                                className="flex-[1.5] w-0 bg-white border border-[#E0E0E0] rounded-[8px] px-2 py-2 text-[14px] text-[#333] text-center focus:outline-none placeholder-[#BDBDBD]"
-                                placeholder="R$"
-                              />
-                              <select
-                                value={service.duration || ''}
-                                onChange={(e) => updateLocalService(service.id, 'duration', Number(e.target.value))}
-                                className="flex-[1.5] w-0 bg-white border border-[#E0E0E0] rounded-[8px] pl-1 pr-0 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD] text-center appearance-none"
-                              >
-                                {generateDurationOptions().map(opt => (
-                                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                ))}
-                              </select>
-                              <button onClick={() => removeLocalService(service.id)} className="w-8 flex items-center justify-center p-1 text-[#F44336] hover:bg-red-50 rounded shrink-0">
-                                <Trash2 size={18} />
-                              </button>
-                            </div>
-                          ))}
+                          {localServices.map((service) => {
+                            const isPriceMissing = !service.price || isNaN(service.price) || service.price <= 0;
+                            const isNameMissing = !service.name || service.name.trim() === '';
+                            return (
+                              <div key={service.id} className="bg-[#F5F5F8] rounded-[12px] p-2 flex flex-row items-center gap-2 mb-2 shrink-0">
+                                <span className="text-[#D1D5DB] cursor-grab shrink-0 w-4 text-center">⠿</span>
+                                <input
+                                  type="text"
+                                  value={service.name}
+                                  onChange={(e) => updateLocalService(service.id, 'name', e.target.value)}
+                                  className={`flex-[3] w-0 bg-white border rounded-[8px] px-2 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD] ${
+                                    isNameMissing ? 'border-red-400 focus:border-red-500' : 'border-[#E0E0E0] focus:border-[#F5A623]'
+                                  }`}
+                                  placeholder="Nome do serviço"
+                                />
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  value={service.price || ''}
+                                  onChange={(e) => updateLocalService(service.id, 'price', Number(e.target.value))}
+                                  className={`flex-[1.5] w-0 bg-white border rounded-[8px] px-2 py-2 text-[14px] text-[#333] text-center focus:outline-none placeholder-[#BDBDBD] ${
+                                    isPriceMissing ? 'border-red-400 focus:border-red-500' : 'border-[#E0E0E0] focus:border-[#F5A623]'
+                                  }`}
+                                  placeholder="R$"
+                                />
+                                <select
+                                  value={service.duration || ''}
+                                  onChange={(e) => updateLocalService(service.id, 'duration', Number(e.target.value))}
+                                  className="flex-[1.5] w-0 bg-white border border-[#E0E0E0] rounded-[8px] pl-1 pr-0 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD] text-center appearance-none"
+                                >
+                                  {generateDurationOptions().map(opt => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                  ))}
+                                </select>
+                                <button onClick={() => removeLocalService(service.id)} className="w-8 flex items-center justify-center p-1 text-[#F44336] hover:bg-red-50 rounded shrink-0">
+                                  <Trash2 size={18} />
+                                </button>
+                              </div>
+                            );
+                          })}
                           
                           <button
                             onClick={addLocalService}
@@ -660,6 +722,25 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                           >
                             + Adicionar serviço
                           </button>
+
+                          {localServices.length === 0 && (
+                            <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
+                              <AlertCircle size={16} className="text-red-500 shrink-0" />
+                              <span>Adicione pelo menos um serviço para continuar.</span>
+                            </div>
+                          )}
+                          {localServices.length > 0 && localServices.some(s => !s.price || isNaN(s.price) || s.price <= 0) && (
+                            <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
+                              <AlertCircle size={16} className="text-red-500 shrink-0" />
+                              <span>Informe um preço válido (maior que R$ 0) para todos os serviços.</span>
+                            </div>
+                          )}
+                          {localServices.length > 0 && !localServices.some(s => !s.price || isNaN(s.price) || s.price <= 0) && localServices.some(s => !s.name.trim()) && (
+                            <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
+                              <AlertCircle size={16} className="text-red-500 shrink-0" />
+                              <span>Informe o nome de todos os serviços cadastrados.</span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -739,8 +820,8 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                 <div className="flex flex-col gap-2 mt-auto">
                   <button
                     onClick={handleNext}
-                    disabled={(step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid)}
-                    className={`w-full bg-[#F5A623] text-white h-[48px] rounded-[12px] font-bold text-[16px] transition-all flex items-center justify-center gap-2 ${((step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid)) || isFinishing ? 'opacity-40' : 'hover:bg-[#E0901A]'}`}
+                    disabled={(step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid) || (step === 3 && !isStep3Valid) || isFinishing}
+                    className={`w-full bg-[#F5A623] text-white h-[48px] rounded-[12px] font-bold text-[16px] transition-all flex items-center justify-center gap-2 ${((step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid) || (step === 3 && !isStep3Valid)) || isFinishing ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[#E0901A]'}`}
                   >
                     {isFinishing ? (
                       <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>

@@ -28,6 +28,7 @@ export interface Staff {
   photo?: string;
   status: 'active' | 'inactive';
   commissionRate: number; // e.g. 50 for 50%
+  role?: 'admin' | 'admin_owner' | 'staff';
   createdAt?: string;
 }
 
@@ -74,6 +75,7 @@ export interface Appointment {
   id: string;
   tenantId?: string; // Multi-tenant link
   staffId?: string;   // Staff assigned
+  userId?: string;    // Auth user ID or owner ID
   clientName: string;
   phone: string; // Used as unique ID for customer tracking
   date: string; // YYYY-MM-DD
@@ -131,6 +133,20 @@ export interface BarberProfile {
   slug?: string;
 }
 
+export interface OnboardingState {
+  userId: string;
+  isAuthenticated: boolean;
+  hasProfile: boolean;
+  profile: BarberProfile | null;
+  hasBarbershop: boolean;
+  barbershop: Barbershop | null;
+  hasOwnerMembership: boolean;
+  isStaffMember: boolean;
+  status: 'no_session' | 'needs_profile' | 'needs_barbershop' | 'needs_membership' | 'needs_completion' | 'complete';
+  isComplete: boolean;
+  step: number;
+}
+
 export interface Transaction {
   id: string;
   tenantId?: string; // Multi-tenant link
@@ -156,6 +172,8 @@ export interface AppState {
   barberProfile: BarberProfile;
   session: Session | null;
   isLoading: boolean;
+  onboardingState: OnboardingState | null;
+  checkOnboardingState: () => Promise<OnboardingState>;
   
   // Multi-tenant & Multi-staff state extensions
   activeTenant: Tenant | null;

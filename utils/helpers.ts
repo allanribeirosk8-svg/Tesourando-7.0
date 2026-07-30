@@ -253,3 +253,16 @@ export function calcOccupancySlots(
 
   return { occupiedSlots, totalSlots };
 }
+
+/**
+ * Formata o nome de um profissional de forma compacta para mobile (Ex: "Allan Ribeiro" -> "Allan R.")
+ */
+export const formatProfessionalShortName = (name: string): string => {
+  if (!name) return '';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length <= 1) return parts[0] || '';
+  const firstName = parts[0];
+  const surnameInitial = parts[1].charAt(0).toUpperCase();
+  return `${firstName} ${surnameInitial}.`;
+};
+

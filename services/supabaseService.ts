@@ -1,8 +1,20 @@
 import { supabase } from '../lib/supabase';
-import { Appointment, BarberProfile, Customer, DayConfig, ServiceItem, Staff, Tenant, StaffAvailability, Barbershop, BarbershopMember, BarbershopInvite } from '../types';
+import { Appointment, BarberProfile, Customer, DayConfig, ServiceItem, Staff, Tenant, StaffAvailability, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState } from '../types';
 import { normalizePhone, normalizeTime } from '../utils/helpers';
 
-function generateSlug(shopName: string, userId: string): string {
+export function normalizeRequestedSlug(rawSlug: string): string {
+  if (!rawSlug) return '';
+  return rawSlug
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove acentos
+    .replace(/[^a-z0-9-]/g, '-')     // troca caracteres especiais por hífen
+    .replace(/-+/g, '-')             // hífens duplicados
+    .replace(/^-|-$/g, '');          // hífens nas pontas
+}
+
+export function generateSlug(shopName: string, userId: string): string {
   const base = shopName
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '') // remove acentos
@@ -97,7 +109,6 @@ export const supabaseService = {
           personalPhone: '',
           shopName: 'Meu Corte',
           businessPhone: '',
-          onboarding_seen: false,
           slug: ''
         } as BarberProfile;
       }
@@ -116,45 +127,104 @@ export const supabaseService = {
         description: d.description,
         instagram: d.instagram,
         website: d.website,
-        onboarding_seen: d.onboarding_seen,
         slug: d.slug
       } as BarberProfile;
     } catch (err: any) {
       return handleNetworkError('getProfile', err, null);
     }
   },
-  async updateProfile(profile: BarberProfile) {
-    const { role, userId } = await this.getUserRoleAndTenant();
-    if (role !== 'admin_owner' || !userId) {
-      throw new Error('Apenas o proprietário do salão (admin_owner) pode atualizar o perfil do tenant.');
-    }
+  async ensureUniqueProfileSlug(requestedSlug: string, userId: string): Promise<string> {
+    const normalized = normalizeRequestedSlug(requestedSlug);
+    if (!normalized) return '';
 
-    // Busca o slug atual para não sobrescrever
-    const { data: existing } = await supabase
+    // 1. Verifica em profiles se outro usuário já possui este slug
+    const { data: prof, error: profErr } = await supabase
       .from('profiles')
-      .select('slug')
-      .eq('id', userId)
+      .select('id')
+      .eq('slug', normalized)
       .maybeSingle();
 
-    const slug = (existing as any)?.slug || generateSlug(profile.shopName || profile.name || 'barbearia', userId);
+    if (profErr && profErr.code !== 'PGRST116') {
+      console.warn('[ensureUniqueProfileSlug] Erro ao verificar profile slug:', profErr.message);
+    }
 
-    const { error } = await supabase.from('profiles').upsert({
+    if (prof && prof.id !== userId) {
+      throw new Error(`O identificador (slug) "${normalized}" já está em uso por outro usuário. Por favor, escolha outro.`);
+    }
+
+    // 2. Verifica em barbershops se pertence a outro owner
+    const { data: shop, error: shopErr } = await supabase
+      .from('barbershops')
+      .select('owner_id')
+      .eq('slug', normalized)
+      .maybeSingle();
+
+    if (shopErr && shopErr.code !== 'PGRST116') {
+      console.warn('[ensureUniqueProfileSlug] Erro ao verificar barbershop slug:', shopErr.message);
+    }
+
+    if (shop && shop.owner_id !== userId) {
+      throw new Error(`O identificador (slug) "${normalized}" já está em uso por outra barbearia. Por favor, escolha outro.`);
+    }
+
+    return normalized;
+  },
+
+  async buildProfilePayload(profile: BarberProfile, userId: string): Promise<any> {
+    let finalSlug = '';
+    const requestedSlug = profile.slug ? normalizeRequestedSlug(profile.slug) : '';
+
+    console.log('[onboarding] requested profile slug:', profile.slug, '| normalized:', requestedSlug);
+
+    if (requestedSlug) {
+      finalSlug = await this.ensureUniqueProfileSlug(requestedSlug, userId);
+    } else {
+      const { data: existing } = await supabase
+        .from('profiles')
+        .select('slug')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (existing?.slug) {
+        finalSlug = existing.slug;
+      } else {
+        finalSlug = generateSlug(profile.shopName || profile.name || 'barbearia', userId);
+      }
+    }
+
+    const payload = {
       id: userId,
-      name: profile.name,
-      personal_phone: profile.personalPhone,
-      photo: profile.photo,
-      shop_name: profile.shopName,
-      business_phone: profile.businessPhone,
-      address: profile.address,
-      logo: profile.logo,
-      description: profile.description,
-      instagram: profile.instagram,
-      website: profile.website,
-      onboarding_seen: profile.onboarding_seen,
-      slug: slug,
+      name: profile.name || 'Barbeiro',
+      personal_phone: profile.personalPhone || '',
+      photo: profile.photo || '',
+      shop_name: profile.shopName || '',
+      business_phone: profile.businessPhone || '',
+      address: profile.address || '',
+      logo: profile.logo || '',
+      description: profile.description || '',
+      instagram: profile.instagram || '',
+      website: profile.website || '',
+      slug: finalSlug,
       updated_at: new Date().toISOString()
-    } as any);
-    if (error) throw error;
+    };
+
+    console.log('[onboarding] persisted profile payload:', payload);
+    return payload;
+  },
+
+  async updateProfile(profile: BarberProfile) {
+    const userId = await this.getUserId();
+    if (!userId) {
+      throw new Error('Usuário não autenticado para atualizar o perfil.');
+    }
+
+    const payload = await this.buildProfilePayload(profile, userId);
+
+    const { error } = await supabase.from('profiles').upsert(payload as any);
+    if (error) {
+      console.error('[updateProfile] Erro ao salvar perfil:', error.message);
+      throw error;
+    }
   },
 
   // Services
@@ -408,13 +478,28 @@ export const supabaseService = {
       const userId = targetUserId || await this.getUserId();
       if (!userId) return [];
 
-      const { data, error } = await supabase.from('appointments').select('*').eq('user_id', userId);
-      if (error) throw error;
-      if (!data) return [];
-      return (data as any[]).map(a => ({
+      const memberIds = await this.getTenantMemberIds(userId);
+      const { data, error } = await supabase
+        .from('appointments')
+        .select('*')
+        .or(`tenant_id.eq.${userId},user_id.in.(${memberIds.join(',')})`);
+
+      let rows = data;
+      if (error || !rows) {
+        const { data: fallbackData, error: fallbackErr } = await supabase
+          .from('appointments')
+          .select('*')
+          .in('user_id', memberIds);
+        if (fallbackErr) throw fallbackErr;
+        rows = fallbackData;
+      }
+
+      if (!rows) return [];
+      return (rows as any[]).map(a => ({
         id: a.id,
         tenantId: a.tenant_id || userId,
-        staffId: a.staff_id || userId,
+        staffId: a.staff_id || a.user_id || userId,
+        userId: a.user_id,
         date: a.date ? a.date.substring(0, 10) : '',
         time: normalizeTime(a.time),
         clientName: a.client_name,
@@ -430,16 +515,18 @@ export const supabaseService = {
       return handleNetworkError('getAppointments', err, []);
     }
   },
+
   async getAppointmentsByDate(date: string, targetUserId?: string) {
     if (isNetworkOffline) return [];
     try {
       const userId = targetUserId || await this.getUserId();
       if (!userId) return [];
 
+      const memberIds = await this.getTenantMemberIds(userId);
       const { data, error } = await supabase
         .from('appointments')
         .select('*')
-        .eq('user_id', userId)
+        .in('user_id', memberIds)
         .eq('date', date)
         .order('time', { ascending: true });
       
@@ -448,7 +535,8 @@ export const supabaseService = {
       return (data as any[]).map(a => ({
         id: a.id,
         tenantId: a.tenant_id || userId,
-        staffId: a.staff_id || userId,
+        staffId: a.staff_id || a.user_id || userId,
+        userId: a.user_id,
         date: a.date ? a.date.substring(0, 10) : '',
         time: normalizeTime(a.time),
         clientName: a.client_name,
@@ -464,6 +552,71 @@ export const supabaseService = {
       return handleNetworkError(`getAppointmentsByDate`, err, []);
     }
   },
+
+  async getMyAppointments(viewerUserId: string): Promise<Appointment[]> {
+    if (isNetworkOffline) return [];
+    try {
+      const { data, error } = await supabase
+        .from('appointments')
+        .select('*')
+        .or(`user_id.eq.${viewerUserId},staff_id.eq.${viewerUserId}`);
+
+      if (error) throw error;
+      return (data || []).map((a: any) => ({
+        id: a.id,
+        tenantId: a.tenant_id || viewerUserId,
+        staffId: a.staff_id || a.user_id || viewerUserId,
+        userId: a.user_id,
+        date: a.date ? a.date.substring(0, 10) : '',
+        time: normalizeTime(a.time),
+        clientName: a.client_name,
+        phone: a.phone,
+        service: a.service,
+        price: Number(a.price),
+        duration: a.duration,
+        status: a.status,
+        observation: a.observation,
+        createdAt: new Date(a.created_at).getTime()
+      })) as Appointment[];
+    } catch (err) {
+      return handleNetworkError('getMyAppointments', err, []);
+    }
+  },
+
+  async getTeamAppointments(tenantOwnerUserId: string): Promise<Appointment[]> {
+    return this.getAppointments(tenantOwnerUserId);
+  },
+
+  async getStaffAppointments(staffUserIdOrId: string, tenantOwnerUserId: string): Promise<Appointment[]> {
+    if (isNetworkOffline) return [];
+    try {
+      const { data, error } = await supabase
+        .from('appointments')
+        .select('*')
+        .or(`staff_id.eq.${staffUserIdOrId},user_id.eq.${staffUserIdOrId}`);
+
+      if (error) throw error;
+      return (data || []).map((a: any) => ({
+        id: a.id,
+        tenantId: a.tenant_id || tenantOwnerUserId,
+        staffId: a.staff_id || a.user_id || tenantOwnerUserId,
+        userId: a.user_id,
+        date: a.date ? a.date.substring(0, 10) : '',
+        time: normalizeTime(a.time),
+        clientName: a.client_name,
+        phone: a.phone,
+        service: a.service,
+        price: Number(a.price),
+        duration: a.duration,
+        status: a.status,
+        observation: a.observation,
+        createdAt: new Date(a.created_at).getTime()
+      })) as Appointment[];
+    } catch (err) {
+      return handleNetworkError('getStaffAppointments', err, []);
+    }
+  },
+
   async saveAppointment(appointment: Appointment, targetUserId?: string) {
     const userId = targetUserId || await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
@@ -471,7 +624,7 @@ export const supabaseService = {
     const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
     const dataToSave: any = {
-      user_id: userId,
+      user_id: appointment.userId || userId,
       date: appointment.date,
       time: normalizeTime(appointment.time),
       client_name: appointment.clientName,
@@ -498,8 +651,9 @@ export const supabaseService = {
         const a = data as any;
         return {
           id: a.id,
-          tenantId: a.tenant_id || userId,
-          staffId: a.staff_id || userId,
+          tenantId: a.tenant_id || appointment.tenantId || userId,
+          staffId: a.staff_id || appointment.staffId || userId,
+          userId: a.user_id || appointment.userId || userId,
           date: a.date,
           time: normalizeTime(a.time),
           clientName: a.client_name,
@@ -520,8 +674,9 @@ export const supabaseService = {
       const a = data as any;
       return {
         id: a.id,
-        tenantId: userId,
-        staffId: userId,
+        tenantId: appointment.tenantId || userId,
+        staffId: appointment.staffId || userId,
+        userId: a.user_id || appointment.userId || userId,
         date: a.date,
         time: normalizeTime(a.time),
         clientName: a.client_name,
@@ -539,7 +694,7 @@ export const supabaseService = {
     const userId = await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
 
-    const { error } = await supabase.from('appointments').delete().eq('id', id).eq('user_id', userId);
+    const { error } = await supabase.from('appointments').delete().eq('id', id);
     if (error) throw error;
   },
 
@@ -707,6 +862,19 @@ export const supabaseService = {
         .select('*')
         .eq('tenant_id', tenantId);
 
+      const profile = await this.getProfile(tenantId);
+      const ownerMember: Staff = {
+        id: tenantId,
+        tenantId: tenantId,
+        userId: tenantId,
+        name: profile?.name || 'Administrador',
+        phone: profile?.personalPhone || '',
+        photo: profile?.photo || undefined,
+        status: 'active',
+        commissionRate: 100,
+        role: 'admin'
+      };
+
       if (error) {
         // If staff table does not exist or has RLS error, fall back to localStorage/virtual staff
         if (
@@ -719,57 +887,18 @@ export const supabaseService = {
           try {
             const stored = localStorage.getItem(localKey);
             if (stored) {
-              return JSON.parse(stored) as Staff[];
+              const list = JSON.parse(stored) as Staff[];
+              const hasOwner = list.some(s => s.id === tenantId || s.userId === tenantId);
+              return hasOwner ? list : [ownerMember, ...list];
             }
           } catch {}
 
-          const profile = await this.getProfile(tenantId);
-          return [{
-            id: tenantId,
-            tenantId: tenantId,
-            userId: tenantId,
-            name: profile?.name || 'Profissional',
-            phone: profile?.personalPhone || '',
-            photo: profile?.photo || undefined,
-            status: 'active',
-            commissionRate: 100
-          }];
+          return [ownerMember];
         }
         throw error;
       }
 
-      // Update local storage cache
-      const localKey = `meucorte_staff_${tenantId}`;
-      try {
-        const mappedList = (data || []).map((s: any) => ({
-          id: s.id,
-          tenantId: s.tenant_id,
-          userId: s.user_id,
-          name: s.name,
-          phone: s.phone,
-          photo: s.photo || undefined,
-          status: s.status || 'active',
-          commissionRate: Number(s.commission_rate || 0)
-        }));
-        localStorage.setItem(localKey, JSON.stringify(mappedList));
-      } catch {}
-
-      if (!data || data.length === 0) {
-        // Fallback to profile as virtual staff
-        const profile = await this.getProfile(tenantId);
-        return [{
-          id: tenantId,
-          tenantId: tenantId,
-          userId: tenantId,
-          name: profile?.name || 'Profissional',
-          phone: profile?.personalPhone || '',
-          photo: profile?.photo || undefined,
-          status: 'active',
-          commissionRate: 100
-        }];
-      }
-
-      return (data as any[]).map(s => ({
+      const staffMembers: Staff[] = (data || []).map((s: any) => ({
         id: s.id,
         tenantId: s.tenant_id,
         userId: s.user_id,
@@ -777,34 +906,51 @@ export const supabaseService = {
         phone: s.phone,
         photo: s.photo || undefined,
         status: s.status || 'active',
-        commissionRate: Number(s.commission_rate || 0)
+        commissionRate: Number(s.commission_rate || 0),
+        role: (s.role === 'admin' ? 'admin' : 'staff') as 'admin' | 'staff'
       }));
+
+      const hasOwner = staffMembers.some(s => s.id === tenantId || s.userId === tenantId);
+      const fullList = hasOwner ? staffMembers : [ownerMember, ...staffMembers];
+
+      // Update local storage cache
+      const localKey = `meucorte_staff_${tenantId}`;
+      try {
+        localStorage.setItem(localKey, JSON.stringify(fullList));
+      } catch {}
+
+      return fullList;
     } catch (err) {
       console.warn('[getStaff] Falling back to virtual/local staff on error:', err);
       
+      const profile = await this.getProfile(tenantId);
+      const ownerMember: Staff = {
+        id: tenantId,
+        tenantId: tenantId,
+        userId: tenantId,
+        name: profile?.name || 'Administrador',
+        phone: profile?.personalPhone || '',
+        photo: profile?.photo || undefined,
+        status: 'active',
+        commissionRate: 100,
+        role: 'admin'
+      };
+
       const localKey = `meucorte_staff_${tenantId}`;
       try {
         const stored = localStorage.getItem(localKey);
         if (stored) {
-          return JSON.parse(stored) as Staff[];
+          const list = JSON.parse(stored) as Staff[];
+          const hasOwner = list.some(s => s.id === tenantId || s.userId === tenantId);
+          return hasOwner ? list : [ownerMember, ...list];
         }
       } catch {}
 
-      const profile = await this.getProfile(tenantId);
-      return [{
-        id: tenantId,
-        tenantId: tenantId,
-        userId: tenantId,
-        name: profile?.name || 'Profissional',
-        phone: profile?.personalPhone || '',
-        photo: profile?.photo || undefined,
-        status: 'active',
-        commissionRate: 100
-      }];
+      return [ownerMember];
     }
   },
 
-  async saveStaff(staff: Omit<Staff, 'id' | 'tenantId'> & { id?: string; tenantId?: string }) {
+  async saveStaff(staff: Omit<Staff, 'id' | 'tenantId'> & { id?: string; tenantId?: string; role?: 'admin' | 'staff' | 'admin_owner' }) {
     const { role } = await this.getUserRoleAndTenant();
     if (role !== 'admin_owner') {
       throw new Error('Apenas o proprietário do salão (admin_owner) pode gerenciar ou salvar equipe.');
@@ -814,6 +960,8 @@ export const supabaseService = {
     if (!tenantId) throw new Error('Tenant ID not authenticated');
 
     const id = staff.id || crypto.randomUUID();
+    const staffRole = staff.role === 'admin' || staff.role === 'admin_owner' ? 'admin' : 'staff';
+
     const payload = {
       id: id,
       tenant_id: tenantId,
@@ -822,12 +970,26 @@ export const supabaseService = {
       phone: staff.phone,
       photo: staff.photo || null,
       status: staff.status || 'active',
-      commission_rate: staff.commissionRate || 0
+      commission_rate: staff.commissionRate || 0,
+      role: staffRole
     };
 
     try {
       const { data, error } = await supabase.from('staff_profiles').upsert(payload).select().single();
       if (error) throw error;
+
+      // Update role in barbershop_members if user_id is linked
+      if (staff.userId) {
+        try {
+          await supabase
+            .from('barbershop_members')
+            .update({ role: staffRole })
+            .eq('barbershop_id', tenantId)
+            .eq('user_id', staff.userId);
+        } catch (memberErr) {
+          console.warn('[saveStaff] Warning updating barbershop_members role:', memberErr);
+        }
+      }
 
       // Update local storage cache
       const localKey = `meucorte_staff_${tenantId}`;
@@ -842,7 +1004,8 @@ export const supabaseService = {
           phone: data.phone,
           photo: data.photo || undefined,
           status: data.status || 'active',
-          commissionRate: data.commission_rate || 0
+          commissionRate: data.commission_rate || 0,
+          role: (data.role === 'admin' ? 'admin' : 'staff') as 'admin' | 'staff'
         };
         const index = list.findIndex((s: any) => s.id === id);
         if (index > -1) {
@@ -876,7 +1039,8 @@ export const supabaseService = {
             phone: staff.phone,
             photo: staff.photo || undefined,
             status: staff.status as any || 'active',
-            commissionRate: staff.commissionRate || 0
+            commissionRate: staff.commissionRate || 0,
+            role: staffRole
           };
           
           const index = list.findIndex((s: any) => s.id === id);
@@ -896,7 +1060,8 @@ export const supabaseService = {
             phone: staff.phone,
             photo: staff.photo || null,
             status: staff.status || 'active',
-            commission_rate: staff.commissionRate || 0
+            commission_rate: staff.commissionRate || 0,
+            role: staffRole
           };
         } catch (localErr) {
           console.warn('[saveStaff] Failed to write fallback to localStorage:', localErr);
@@ -918,7 +1083,8 @@ export const supabaseService = {
           phone: staff.phone,
           photo: staff.photo || undefined,
           status: staff.status as any || 'active',
-          commissionRate: staff.commissionRate || 0
+          commissionRate: staff.commissionRate || 0,
+          role: staffRole
         };
         const index = list.findIndex((s: any) => s.id === id);
         if (index > -1) {
@@ -937,7 +1103,8 @@ export const supabaseService = {
         phone: staff.phone,
         photo: staff.photo || null,
         status: staff.status || 'active',
-        commission_rate: staff.commissionRate || 0
+        commission_rate: staff.commissionRate || 0,
+        role: staffRole
       };
     }
   },
@@ -1022,6 +1189,130 @@ export const supabaseService = {
     } catch (err) {
       console.warn('[getTenantIdForUser] Erro ao buscar tenant para o usuário:', err);
       return userId;
+    }
+  },
+
+  async resolveTenantContext(targetUserId?: string): Promise<{
+    barbershopId: string | null;
+    tenantOwnerId: string;
+    userId: string;
+    role: 'admin_owner' | 'staff' | 'client';
+    memberUserIds: string[];
+  }> {
+    try {
+      const userId = targetUserId || await this.getUserId();
+      if (!userId) {
+        return { barbershopId: null, tenantOwnerId: '', userId: '', role: 'client', memberUserIds: [] };
+      }
+
+      // 1. Tenta buscar em barbershop_members
+      const { data: members, error: memberError } = await supabase
+        .from('barbershop_members')
+        .select('barbershop_id, role, barbershops(id, owner_id)')
+        .eq('user_id', userId);
+
+      if (!memberError && members && members.length > 0) {
+        const member = members[0] as any;
+        const barbershopId = member.barbershop_id;
+        const ownerId = member.barbershops?.owner_id || userId;
+        const role = member.role === 'owner' ? 'admin_owner' : 'staff';
+
+        const { data: allMembers } = await supabase
+          .from('barbershop_members')
+          .select('user_id')
+          .eq('barbershop_id', barbershopId);
+
+        const memberUserIds = Array.from(new Set([
+          ...(allMembers || []).map((m: any) => m.user_id).filter(Boolean),
+          ownerId,
+          userId
+        ]));
+
+        return {
+          barbershopId,
+          tenantOwnerId: ownerId,
+          userId,
+          role,
+          memberUserIds
+        };
+      }
+
+      // 2. Se for dono direto na tabela barbershops
+      const { data: barbershop } = await supabase
+        .from('barbershops')
+        .select('id, owner_id')
+        .eq('owner_id', userId)
+        .maybeSingle();
+
+      if (barbershop) {
+        const barbershopId = (barbershop as any).id;
+        const { data: allMembers } = await supabase
+          .from('barbershop_members')
+          .select('user_id')
+          .eq('barbershop_id', barbershopId);
+
+        const memberUserIds = Array.from(new Set([
+          ...(allMembers || []).map((m: any) => m.user_id).filter(Boolean),
+          userId
+        ]));
+
+        return {
+          barbershopId,
+          tenantOwnerId: userId,
+          userId,
+          role: 'admin_owner',
+          memberUserIds
+        };
+      }
+
+      // Fallback
+      return {
+        barbershopId: null,
+        tenantOwnerId: userId,
+        userId,
+        role: 'admin_owner',
+        memberUserIds: [userId]
+      };
+    } catch (err) {
+      console.warn('[resolveTenantContext] Erro ao resolver contexto:', err);
+      return {
+        barbershopId: null,
+        tenantOwnerId: targetUserId || '',
+        userId: targetUserId || '',
+        role: 'admin_owner',
+        memberUserIds: targetUserId ? [targetUserId] : []
+      };
+    }
+  },
+
+  async getTenantMemberIds(tenantOwnerUserId: string): Promise<string[]> {
+    try {
+      const ctx = await this.resolveTenantContext(tenantOwnerUserId);
+      if (ctx.memberUserIds && ctx.memberUserIds.length > 0) {
+        return ctx.memberUserIds;
+      }
+      
+      const { data: barbershop } = await supabase
+        .from('barbershops')
+        .select('id')
+        .eq('owner_id', tenantOwnerUserId)
+        .maybeSingle();
+
+      if (!barbershop) return [tenantOwnerUserId];
+
+      const { data: members } = await supabase
+        .from('barbershop_members')
+        .select('user_id')
+        .eq('barbershop_id', (barbershop as any).id);
+
+      const ids: string[] = (members || [])
+        .map((m: any) => m.user_id)
+        .filter(Boolean);
+
+      if (!ids.includes(tenantOwnerUserId)) ids.push(tenantOwnerUserId);
+      return ids;
+    } catch {
+      return [tenantOwnerUserId];
     }
   },
 
@@ -1493,22 +1784,293 @@ export const supabaseService = {
     }
   },
 
-  async createBarbershop(name: string): Promise<Barbershop> {
-    const userId = await this.getUserId();
-    if (!userId) throw new Error('User not authenticated');
+  async getCurrentProfile(targetUserId?: string): Promise<BarberProfile | null> {
+    const userId = targetUserId || await this.getUserId();
+    if (!userId) return null;
 
-    const slug = generateSlug(name, userId);
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    const d = data as any;
+    return {
+      name: d.name || '',
+      personalPhone: d.personal_phone || '',
+      photo: d.photo || '',
+      shopName: d.shop_name || '',
+      businessPhone: d.business_phone || '',
+      address: d.address || '',
+      logo: d.logo || '',
+      description: d.description || '',
+      instagram: d.instagram || '',
+      website: d.website || '',
+      onboarding_seen: !!d.onboarding_seen,
+      slug: d.slug || ''
+    } as BarberProfile;
+  },
+
+  async getOwnedBarbershop(targetUserId?: string): Promise<Barbershop | null> {
+    const userId = targetUserId || await this.getUserId();
+    if (!userId) return null;
+
     const { data, error } = await supabase
       .from('barbershops')
+      .select('*')
+      .eq('owner_id', userId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    return {
+      id: data.id,
+      ownerId: data.owner_id,
+      name: data.name,
+      slug: data.slug,
+      createdAt: data.created_at
+    };
+  },
+
+  async getOwnerMembership(barbershopId: string, userId: string): Promise<BarbershopMember | null> {
+    if (!barbershopId || !userId) return null;
+
+    const { data, error } = await supabase
+      .from('barbershop_members')
+      .select('*')
+      .eq('barbershop_id', barbershopId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    return {
+      barbershopId: data.barbershop_id,
+      userId: data.user_id,
+      role: data.role,
+      joinedAt: data.joined_at
+    };
+  },
+
+  async ensureOwnerMembership(barbershopId: string, userId: string): Promise<BarbershopMember> {
+    if (!barbershopId || !userId) {
+      throw new Error('Barbershop ID e User ID são obrigatórios para garantir membership.');
+    }
+
+    const existing = await this.getOwnerMembership(barbershopId, userId);
+    if (existing) {
+      if (existing.role !== 'owner') {
+        const { data, error } = await supabase
+          .from('barbershop_members')
+          .update({ role: 'owner' })
+          .eq('barbershop_id', barbershopId)
+          .eq('user_id', userId)
+          .select()
+          .single();
+
+        if (error) throw error;
+        return {
+          barbershopId: data.barbershop_id,
+          userId: data.user_id,
+          role: data.role,
+          joinedAt: data.joined_at
+        };
+      }
+      return existing;
+    }
+
+    const { data, error } = await supabase
+      .from('barbershop_members')
       .insert({
-        owner_id: userId,
-        name,
-        slug
+        barbershop_id: barbershopId,
+        user_id: userId,
+        role: 'owner'
       })
       .select()
       .single();
 
     if (error) throw error;
+
+    return {
+      barbershopId: data.barbershop_id,
+      userId: data.user_id,
+      role: data.role,
+      joinedAt: data.joined_at
+    };
+  },
+
+  async resolveOnboardingState(targetUserId?: string): Promise<OnboardingState> {
+    const userId = targetUserId || await this.getUserId();
+    if (!userId) {
+      return {
+        userId: '',
+        isAuthenticated: false,
+        hasProfile: false,
+        profile: null,
+        hasBarbershop: false,
+        barbershop: null,
+        hasOwnerMembership: false,
+        isStaffMember: false,
+        status: 'no_session',
+        isComplete: false,
+        step: 1
+      };
+    }
+
+    // 1. Ver se o usuário é colaborador de alguma barbearia de outro owner
+    const { data: memberRows, error: memberErr } = await supabase
+      .from('barbershop_members')
+      .select('barbershop_id, role, barbershops(owner_id)')
+      .eq('user_id', userId);
+
+    if (memberErr) {
+      console.warn('[resolveOnboardingState] Erro ao consultar membros da barbearia:', memberErr);
+    }
+
+    const isStaff = memberRows && memberRows.some((m: any) => m.role === 'staff' || (m.role === 'admin' && m.barbershops?.owner_id !== userId));
+
+    if (isStaff) {
+      const profile = await this.getCurrentProfile(userId);
+      return {
+        userId,
+        isAuthenticated: true,
+        hasProfile: true,
+        profile,
+        hasBarbershop: true,
+        barbershop: null,
+        hasOwnerMembership: false,
+        isStaffMember: true,
+        status: 'complete',
+        isComplete: true,
+        step: 4
+      };
+    }
+
+    // 2. Fluxo Owner: buscar perfil e barbearia própria
+    const profile = await this.getCurrentProfile(userId);
+    const ownedBarbershop = await this.getOwnedBarbershop(userId);
+
+    const hasProfile = !!(profile && profile.name && profile.name.trim() !== '' && profile.personalPhone && profile.personalPhone.trim() !== '');
+
+    if (!hasProfile) {
+      return {
+        userId,
+        isAuthenticated: true,
+        hasProfile: false,
+        profile,
+        hasBarbershop: !!ownedBarbershop,
+        barbershop: ownedBarbershop,
+        hasOwnerMembership: false,
+        isStaffMember: false,
+        status: 'needs_profile',
+        isComplete: false,
+        step: 1
+      };
+    }
+
+    if (!ownedBarbershop) {
+      return {
+        userId,
+        isAuthenticated: true,
+        hasProfile: true,
+        profile,
+        hasBarbershop: false,
+        barbershop: null,
+        hasOwnerMembership: false,
+        isStaffMember: false,
+        status: 'needs_barbershop',
+        isComplete: false,
+        step: 2
+      };
+    }
+
+    // 3. Barbearia existe -> garantir membership owner de forma idempotente
+    let ownerMembership = await this.getOwnerMembership(ownedBarbershop.id, userId);
+    if (!ownerMembership) {
+      try {
+        ownerMembership = await this.ensureOwnerMembership(ownedBarbershop.id, userId);
+      } catch (err) {
+        console.error('[resolveOnboardingState] Erro ao garantir membership owner:', err);
+        throw err; // Repassa erro literal do backend sem mascaramento
+      }
+    }
+
+    const hasOwnerMembership = !!ownerMembership;
+
+    // 4. Verificação de onboarding concluído
+    // Se possui perfil preenchido, barbearia cadastrada e associação de owner -> estrutura mínima completa!
+    if (hasProfile && ownedBarbershop && hasOwnerMembership) {
+      return {
+        userId,
+        isAuthenticated: true,
+        hasProfile: true,
+        profile,
+        hasBarbershop: true,
+        barbershop: ownedBarbershop,
+        hasOwnerMembership: true,
+        isStaffMember: false,
+        status: 'complete',
+        isComplete: true,
+        step: 4
+      };
+    }
+
+    return {
+      userId,
+      isAuthenticated: true,
+      hasProfile: true,
+      profile,
+      hasBarbershop: true,
+      barbershop: ownedBarbershop,
+      hasOwnerMembership: true,
+      isStaffMember: false,
+      status: 'needs_completion',
+      isComplete: false,
+      step: 3
+    };
+  },
+
+  async completeOwnerSetupIfPossible(targetUserId?: string): Promise<OnboardingState> {
+    return await this.resolveOnboardingState(targetUserId);
+  },
+
+  async createBarbershop(name: string, requestedSlug?: string): Promise<Barbershop> {
+    const userId = await this.getUserId();
+    if (!userId) throw new Error('User not authenticated');
+
+    // Idempotency: Se a barbearia já existe para o usuário, retorna a existente
+    const existing = await this.getOwnedBarbershop(userId);
+    if (existing) {
+      await this.ensureOwnerMembership(existing.id, userId);
+      return existing;
+    }
+
+    const normalizedSlug = requestedSlug ? normalizeRequestedSlug(requestedSlug) : '';
+    let shopSlug = '';
+    if (normalizedSlug) {
+      shopSlug = await this.ensureUniqueProfileSlug(normalizedSlug, userId);
+    } else {
+      shopSlug = generateSlug(name, userId);
+    }
+
+    const { data, error } = await supabase
+      .from('barbershops')
+      .insert({
+        owner_id: userId,
+        name,
+        slug: shopSlug
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    await this.ensureOwnerMembership(data.id, userId);
 
     return {
       id: data.id,

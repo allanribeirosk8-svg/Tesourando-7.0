@@ -28,7 +28,11 @@ import {
   Clock,
   Ban,
   Activity,
-  Info
+  Info,
+  Building2,
+  User,
+  Shield,
+  Calendar
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -47,6 +51,13 @@ import { LancamentoModal } from '../components/LancamentoModal';
 import { formatCurrency, getAvatarColor, getInitials } from '../utils/helpers';
 import { Transaction } from '../types';
 import { useSwipe } from '../hooks/useSwipe';
+
+const formatShortName = (fullName: string): string => {
+  if (!fullName) return '';
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0];
+  return `${parts[0]} ${parts[parts.length - 1].charAt(0)}.`;
+};
 
 export const CaixaView: React.FC = () => {
   const { 
@@ -67,7 +78,8 @@ export const CaixaView: React.FC = () => {
     markNoShow
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'resumo'|'extrato'|'comissoes'|'relatorios'|'clientes'|'servicos'|'agenda'>('resumo');
+  const [activeTab, setActiveTab] = useState<'resumo' | 'extrato' | 'equipe' | 'relatorios'>('resumo');
+  const [relatoriosSubTab, setRelatoriosSubTab] = useState<'diagnostico' | 'clientes' | 'servicos' | 'agenda'>('diagnostico');
   const [selectedStaffForCommission, setSelectedStaffForCommission] = useState<any | null>(null);
   const [commissionPaymentSuccess, setCommissionPaymentSuccess] = useState<string | null>(null);
 
@@ -94,7 +106,7 @@ export const CaixaView: React.FC = () => {
         <AlertTriangle size={48} className="text-[#F97316] mb-4 animate-pulse" />
         <h3 className="text-xl font-bold uppercase tracking-widest text-white mb-2">Acesso Negado</h3>
         <p className="text-sm text-title max-w-xs">
-          Apenas o proprietário do salão (admin_owner) possui permissão para acessar o painel financeiro.
+          Apenas profissionais e administradores do estabelecimento possuem permissão para acessar o painel financeiro.
         </p>
       </div>
     );
@@ -106,6 +118,45 @@ export const CaixaView: React.FC = () => {
   const [showAllInativos, setShowAllInativos] = useState(false);
   const [entradasExpanded, setEntradasExpanded] = useState(false);
   const [filtroExtrato, setFiltroExtrato] = useState<'todas' | 'entradas' | 'saidas'>('todas');
+
+  // Controle de Nível e Escopo Financeiro
+  const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
+
+  const loggedInStaff = useMemo(() => {
+    if (!session?.user?.id) return null;
+    return staff.find(s => s.userId === session.user.id || s.id === session.user.id) || null;
+  }, [staff, session]);
+
+  const [financeScope, setFinanceScope] = useState<'shop' | 'staff'>(() => {
+    if (!isAdmin) return 'staff';
+    return 'shop';
+  });
+
+  const [selectedStaffScopeId, setSelectedStaffScopeId] = useState<string>(() => {
+    if (loggedInStaff?.id) return loggedInStaff.id;
+    const activeStaff = staff.filter(s => s.status === 'active');
+    return activeStaff[0]?.id || staff[0]?.id || '';
+  });
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setFinanceScope('staff');
+      if (loggedInStaff?.id) {
+        setSelectedStaffScopeId(loggedInStaff.id);
+      } else if (staff.length > 0) {
+        setSelectedStaffScopeId(staff[0].id);
+      }
+    } else {
+      if (!selectedStaffScopeId && staff.length > 0) {
+        const activeStaff = staff.filter(s => s.status === 'active');
+        setSelectedStaffScopeId(activeStaff[0]?.id || staff[0].id);
+      }
+    }
+  }, [isAdmin, loggedInStaff, staff]);
+
+  const selectedStaff = useMemo(() => {
+    return staff.find(s => s.id === selectedStaffScopeId || s.userId === selectedStaffScopeId) || null;
+  }, [staff, selectedStaffScopeId]);
 
   // Determine start/end of the current period
   const dateRange = useMemo(() => {
@@ -135,13 +186,6 @@ export const CaixaView: React.FC = () => {
       end.setHours(23, 59, 59, 999);
     }
 
-    console.log('[DATE_RANGE] periodo:', periodo);
-    console.log('[DATE_RANGE] selectedDate.toString():', selectedDate.toString());
-    console.log('[DATE_RANGE] start calculado:', start.toString());
-    console.log('[DATE_RANGE] end calculado:', end.toString());
-    console.log('[DATE_RANGE] start.toISOString():', start.toISOString());
-    console.log('[DATE_RANGE] end.toISOString():', end.toISOString());
-    
     const fmt = (d: Date) =>
       `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     return { start: fmt(start), end: fmt(end) };
@@ -169,27 +213,69 @@ export const CaixaView: React.FC = () => {
     setSelectedDate(d);
   };
 
-  const txNoPeriodo = useMemo(() => {
-    return transactions.filter(t => {
-      const txDate = (t.date || '').split('T')[0];
-      return txDate >= dateRange.start && txDate <= dateRange.end;
-    });
-  }, [transactions, dateRange]);
-
-  // Filter local state appointments for current period
-  const periodAppointments = useMemo(() => {
+  // Base sem filtro de escopo no período
+  const allPeriodAppointments = useMemo(() => {
     return appointments.filter(a => {
       const aptDate = a.date.split('T')[0];
       return aptDate >= dateRange.start && aptDate <= dateRange.end;
     });
   }, [appointments, dateRange]);
 
-  const completedApts = periodAppointments.filter(a => a.status === 'completed');
-  const noShowApts = periodAppointments.filter(a => a.status === 'no-show');
-  
+  const allTxNoPeriodo = useMemo(() => {
+    return transactions.filter(t => {
+      const txDate = (t.date || '').split('T')[0];
+      return txDate >= dateRange.start && txDate <= dateRange.end;
+    });
+  }, [transactions, dateRange]);
+
+  // Filtered appointments according to active scope (Shop vs Staff)
+  const periodAppointments = useMemo(() => {
+    if (financeScope === 'shop' || !selectedStaffScopeId) {
+      return allPeriodAppointments;
+    }
+    const s = selectedStaff;
+    const targetId = selectedStaffScopeId;
+    return allPeriodAppointments.filter(a => {
+      if (!a) return false;
+      if (a.staffId === targetId) return true;
+      if (s?.userId && (a.staffId === s.userId || a.userId === s.userId)) return true;
+      if (s?.id && (a.staffId === s.id || a.barberId === s.id)) return true;
+      return false;
+    });
+  }, [allPeriodAppointments, financeScope, selectedStaffScopeId, selectedStaff]);
+
+  // Filtered transactions according to active scope (Shop vs Staff)
+  const txNoPeriodo = useMemo(() => {
+    if (financeScope === 'shop' || !selectedStaffScopeId) {
+      return allTxNoPeriodo;
+    }
+    const s = selectedStaff;
+    const targetId = selectedStaffScopeId;
+
+    const staffAptIds = new Set(
+      allPeriodAppointments
+        .filter(a => {
+          if (a.staffId === targetId) return true;
+          if (s?.userId && (a.staffId === s.userId || a.userId === s.userId)) return true;
+          if (s?.id && (a.staffId === s.id || a.barberId === s.id)) return true;
+          return false;
+        })
+        .map(a => a.id)
+    );
+
+    return allTxNoPeriodo.filter(t => {
+      if (t.staffId === targetId || (s?.userId && t.staffId === s.userId)) return true;
+      if ((t as any).linkedAppointmentId && staffAptIds.has((t as any).linkedAppointmentId)) return true;
+      if (t.category === 'commission' && (t.description?.includes(s?.name || '') || t.staffId === targetId)) return true;
+      return false;
+    });
+  }, [allTxNoPeriodo, allPeriodAppointments, financeScope, selectedStaffScopeId, selectedStaff]);
+
+  const completedApts = useMemo(() => periodAppointments.filter(a => a.status === 'completed'), [periodAppointments]);
+  const noShowApts = useMemo(() => periodAppointments.filter(a => a.status === 'no-show'), [periodAppointments]);
+
   // KPI Calculations
   const aptIncome = completedApts.reduce((sum, a) => sum + (a.price || 0), 0);
-  // Entradas manuais: todas as income que NÃO têm linkedAppointmentId preenchido
   const manualIncome = txNoPeriodo
     .filter(t => t.type === 'income' && !(t as any).linkedAppointmentId)
     .reduce((sum, t) => sum + t.amount, 0);
@@ -1507,8 +1593,10 @@ export const CaixaView: React.FC = () => {
   };
 
   const renderComissoes = () => {
-    // Filtramos os profissionais ativos do tenant
-    const activeStaff = staff.filter(s => s.status === 'active');
+    // Filtramos os profissionais ativos do tenant (respeitando escopo)
+    const activeStaff = financeScope === 'staff' && selectedStaff
+      ? [selectedStaff]
+      : staff.filter(s => s.status === 'active');
     
     // Calcula comissões de cada staff no período selecionado
     const staffCommissions = activeStaff.map(s => {
@@ -1781,7 +1869,7 @@ export const CaixaView: React.FC = () => {
     );
   };
 
-  const renderRelatorios = () => {
+  const renderDiagnosticoRelatorios = () => {
     const activeStaff = staff.filter(s => s.status === 'active');
     
     // Agendamentos por status no período
@@ -2480,6 +2568,46 @@ export const CaixaView: React.FC = () => {
     );
   };
 
+  const renderRelatorios = () => {
+    return (
+      <div className="space-y-4 pb-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
+        {/* Sub-navegação interna de Relatórios */}
+        <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-md">
+          {[
+            { id: 'diagnostico', label: 'Diagnóstico', icon: Activity },
+            { id: 'clientes', label: 'Clientes', icon: Users },
+            { id: 'servicos', label: 'Serviços', icon: Scissors },
+            { id: 'agenda', label: 'Ocupação', icon: Calendar },
+          ].map(sub => {
+            const Icon = sub.icon;
+            const isActive = relatoriosSubTab === sub.id;
+            return (
+              <button
+                key={sub.id}
+                type="button"
+                onClick={() => setRelatoriosSubTab(sub.id as any)}
+                className={`py-1.5 px-1 rounded-xl text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-all cursor-pointer border-none ${
+                  isActive
+                    ? 'bg-secondary text-white shadow-sm font-black'
+                    : 'text-title hover:text-white bg-transparent'
+                }`}
+              >
+                <Icon size={12} className={isActive ? 'text-white' : 'text-title'} />
+                <span className="truncate">{sub.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Conteúdo da sub-aba ativa */}
+        {relatoriosSubTab === 'diagnostico' && renderDiagnosticoRelatorios()}
+        {relatoriosSubTab === 'clientes' && renderClientes()}
+        {relatoriosSubTab === 'servicos' && renderServicos()}
+        {relatoriosSubTab === 'agenda' && renderAgenda()}
+      </div>
+    );
+  };
+
   const getPeriodLabel = () => {
     const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
     if (periodo === 'dia') {
@@ -2501,11 +2629,98 @@ export const CaixaView: React.FC = () => {
 
   return (
     <div className="w-full h-full flex flex-col bg-[#1E1B4B]">
-      {/* Period Selector & Navigator */}
-      <div className="px-4 py-4 sticky top-0 bg-[#1E1B4B] z-30">
-        <div className="flex gap-2 items-center">
-          {/* Dropdown de período */}
-          <div className="relative">
+      {/* Scope, Period & Navigation Top Header */}
+      <div className="px-4 pt-3.5 pb-2.5 sticky top-0 bg-[#1E1B4B] z-40 border-b border-white/10 space-y-2.5 shadow-lg">
+        
+        {/* LINHA 1: SELETOR DE ESCOPO (QUEM - Categoria) */}
+        <div>
+          {isAdmin ? (
+            <div className="grid grid-cols-2 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
+              <button
+                type="button"
+                onClick={() => {
+                  setFinanceScope('shop');
+                  setSelectedStaffForCommission(null);
+                }}
+                className={`py-2 px-2 rounded-xl text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer border-none ${
+                  financeScope === 'shop'
+                    ? 'bg-secondary text-white shadow-md'
+                    : 'bg-transparent text-title hover:text-white'
+                }`}
+              >
+                <Building2 size={15} className="shrink-0" />
+                <span className="truncate">Barbearia Inteira</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setFinanceScope('staff');
+                  if (!selectedStaffScopeId && staff.length > 0) {
+                    const activeStaff = staff.filter(s => s.status === 'active');
+                    setSelectedStaffScopeId(activeStaff[0]?.id || staff[0].id);
+                  }
+                }}
+                className={`py-2 px-2 rounded-xl text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer border-none ${
+                  financeScope === 'staff'
+                    ? 'bg-secondary text-white shadow-md'
+                    : 'bg-transparent text-title hover:text-white'
+                }`}
+              >
+                <User size={15} className="shrink-0" />
+                <span className="truncate">Por Profissional</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2.5 bg-blue-500/10 border border-blue-500/20 px-3.5 py-2 rounded-2xl w-full">
+              <Shield size={16} className="text-blue-400 shrink-0" />
+              <span className="text-xs font-bold text-blue-200">
+                Painel Financeiro Individual
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* LINHA 2: SELETOR DE PROFISSIONAL (QUEM - Sujeito Específico) */}
+        {financeScope === 'staff' && (
+          <div className="w-full">
+            {isAdmin ? (
+              <div className="relative w-full">
+                <select
+                  value={selectedStaffScopeId}
+                  onChange={(e) => {
+                    setSelectedStaffScopeId(e.target.value);
+                    setSelectedStaffForCommission(null);
+                  }}
+                  className="w-full appearance-none bg-surface border border-secondary/50 rounded-2xl pl-9 pr-8 h-10 text-xs font-bold text-white focus:outline-none focus:border-secondary shadow-md cursor-pointer truncate"
+                >
+                  {staff.filter(s => s.status === 'active').map(s => {
+                    const isSelf = s.userId === session?.user?.id;
+                    return (
+                      <option key={s.id} value={s.id} className="bg-[#1E1B4B] text-white">
+                        {s.name} {isSelf ? '(Você)' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+                <User size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-secondary pointer-events-none" />
+                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-title pointer-events-none" />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2.5 bg-surface border border-white/10 rounded-2xl px-3.5 h-10 w-full">
+                <User size={15} className="text-secondary shrink-0" />
+                <span className="text-xs font-bold text-white truncate">
+                  Profissional: {selectedStaff ? formatShortName(selectedStaff.name) : 'Seu Perfil'}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* LINHA 3: CONTROLES DE TEMPO E PERÍODO (QUANDO) */}
+        <div className="flex items-center gap-2 w-full">
+          {/* Select de período */}
+          <div className="relative shrink-0 w-28">
             <select
               value={periodo}
               onChange={e => {
@@ -2523,50 +2738,78 @@ export const CaixaView: React.FC = () => {
                 }
                 setSelectedDate(new Date(d));
               }}
-              className="appearance-none bg-surface border border-title/30 rounded-2xl pl-3 pr-7 h-10 text-[10px] font-black uppercase tracking-wider text-white shadow-[0_4px_16px_rgba(0,0,0,0.3)] focus:outline-none cursor-pointer text-center"
+              className="w-full appearance-none bg-surface border border-title/30 rounded-2xl pl-3 pr-7 h-10 text-[11px] font-black uppercase tracking-wider text-white shadow-md focus:outline-none cursor-pointer text-center"
             >
               <option value="dia">Dia</option>
               <option value="semana">Semana</option>
               <option value="mes">Mês</option>
               <option value="ano">Ano</option>
             </select>
-            <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-title pointer-events-none" />
+            <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-title pointer-events-none" />
           </div>
 
           {/* Navegador de data */}
-          <div className="flex-1 flex items-center justify-between bg-surface rounded-2xl px-2 h-10 shadow-[0_4px_16px_rgba(0,0,0,0.3)] border border-title/30 flex-shrink min-w-0">
-            <button onClick={handlePrev} className="p-1 text-title hover:text-secondary flex-shrink-0">
+          <div className="flex-1 flex items-center justify-between bg-surface rounded-2xl px-2 h-10 shadow-md border border-title/30 min-w-0">
+            <button 
+              onClick={handlePrev} 
+              className="p-1.5 text-title hover:text-white hover:bg-white/5 rounded-xl transition-colors shrink-0 border-none bg-transparent cursor-pointer"
+              aria-label="Período anterior"
+            >
               <ChevronLeft size={16} />
             </button>
-            <span className="text-[10px] font-bold text-white uppercase min-w-0 truncate text-center">{getPeriodLabel()}</span>
-            <button onClick={handleNext} className="p-1 text-title hover:text-secondary flex-shrink-0">
+            <span className="text-[11px] font-bold text-white uppercase truncate text-center px-1 tracking-tight">
+              {getPeriodLabel()}
+            </span>
+            <button 
+              onClick={handleNext} 
+              className="p-1.5 text-title hover:text-white hover:bg-white/5 rounded-xl transition-colors shrink-0 border-none bg-transparent cursor-pointer"
+              aria-label="Próximo período"
+            >
               <ChevronRight size={16} />
             </button>
           </div>
         </div>
+
+        {/* LINHA 4: CONFIRMAÇÃO LEVE DE CONTEXTO */}
+        <div className="flex items-center justify-between px-1 pt-0.5 text-[11px]">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${financeScope === 'shop' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            <span className="text-title/80 font-medium truncate">
+              Visualizando:{' '}
+              <strong className="text-white font-bold">
+                {financeScope === 'shop'
+                  ? 'Barbearia inteira'
+                  : selectedStaff ? formatShortName(selectedStaff.name) : 'Profissional'}
+              </strong>
+            </span>
+          </div>
+          <span className="text-[10px] font-bold text-title/60 uppercase tracking-wider shrink-0">
+            {financeScope === 'shop' ? 'Consolidado' : 'Recorte Individual'}
+          </span>
+        </div>
       </div>
 
-      {/* Tabs */}
-      <div className="px-4 pb-3 sticky top-[64px] bg-[#1E1B4B] z-30">
-        <div className="flex gap-2 w-full">
-          {(['resumo','extrato','comissoes','relatorios','clientes','servicos','agenda'] as const).map(t => (
+      {/* Navegação Principal do Financeiro (4 Abas Primárias Fixo, Sem Scroll) */}
+      <div className="px-4 pt-1 pb-2 bg-[#1E1B4B] z-30">
+        <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
+          {(['resumo', 'extrato', 'equipe', 'relatorios'] as const).map(t => (
             <button
               key={t}
+              type="button"
               onClick={() => {
                 setActiveTab(t);
                 setSelectedStaffForCommission(null);
               }}
-              className={`flex-1 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors ${
-                activeTab === t ? 'bg-secondary text-white shadow-md' : 'bg-surface text-title'
+              className={`py-2 px-1 rounded-xl text-[10px] sm:text-[11px] font-black uppercase tracking-wider transition-all text-center cursor-pointer border-none ${
+                activeTab === t
+                  ? 'bg-secondary text-white shadow-md'
+                  : 'bg-transparent text-title hover:text-white'
               }`}
             >
               {t === 'resumo' ? 'Resumo'
                 : t === 'extrato' ? 'Extrato'
-                : t === 'comissoes' ? 'Comissões'
-                : t === 'relatorios' ? 'Relatórios'
-                : t === 'clientes' ? 'Clientes'
-                : t === 'servicos' ? 'Serviços'
-                : 'Agenda'}
+                : t === 'equipe' ? 'Equipe'
+                : 'Relatórios'}
             </button>
           ))}
         </div>
@@ -2576,11 +2819,8 @@ export const CaixaView: React.FC = () => {
       <div className="flex-1 overflow-y-auto px-4 w-full max-w-full overflow-x-hidden pt-2 pb-[160px] min-h-full bg-[#1E1B4B]">
         {activeTab === 'resumo' && renderResumo()}
         {activeTab === 'extrato' && renderExtrato()}
-        {activeTab === 'comissoes' && renderComissoes()}
+        {activeTab === 'equipe' && renderComissoes()}
         {activeTab === 'relatorios' && renderRelatorios()}
-        {activeTab === 'clientes' && renderClientes()}
-        {activeTab === 'servicos' && renderServicos()}
-        {activeTab === 'agenda' && renderAgenda()}
       </div>
 
       {(activeTab === 'resumo' || activeTab === 'extrato') && (

@@ -4,13 +4,13 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { supabaseService } from '../services/supabaseService';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
-import { compressImage, formatDate, getTodayString, generateTimeSlots, formatCurrency, formatPhone, getOccupiedSlots, normalizePhone, normalizeTime, formatDateLong, capitalizeName, getInitials, getAvatarColor , calcOccupancySlots } from '../utils/helpers';
+import { compressImage, formatDate, getTodayString, generateTimeSlots, formatCurrency, formatPhone, getOccupiedSlots, normalizePhone, normalizeTime, formatDateLong, capitalizeName, getInitials, getAvatarColor , calcOccupancySlots, formatProfessionalShortName } from '../utils/helpers';
 import { useSwipe } from '../hooks/useSwipe';
 import { Onboarding } from '../components/Onboarding';
 import { SetupWizard } from '../components/SetupWizard';
 import { LoadingScreen } from '../components/LoadingScreen';
 import { StaffConfigModal } from '../components/StaffConfigModal';
-import { Customer, ServiceItem, Appointment, BarberProfile } from '../types';
+import { Customer, ServiceItem, Appointment, BarberProfile, Staff } from '../types';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence, Reorder } from 'motion/react';
 import confetti from 'canvas-confetti';
@@ -779,7 +779,8 @@ export const AdminApp: React.FC = () => {
     notifications,
     markNotificationAsRead,
     markAllNotificationsAsRead,
-    deleteNotification
+    deleteNotification,
+    onboardingState
   } = useStore();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'servicos' | 'caixa' | 'configuracoes'>('agenda');
@@ -979,6 +980,18 @@ export const AdminApp: React.FC = () => {
 
   if (isLoading) {
     return <div className="fixed inset-0 bg-[#363062]" />;
+  }
+
+  // Se o onboarding está incompleto para o usuário autenticado (ex: fechou o app e voltou), abre o SetupWizard direto
+  if (onboardingState && !onboardingState.isComplete) {
+    return (
+      <SetupWizard 
+        initialStep={onboardingState.step} 
+        onComplete={async () => {
+          await reloadData();
+        }} 
+      />
+    );
   }
 
   return (
@@ -1322,7 +1335,7 @@ const AgendaView: React.FC<{
     onSuccess?: (msg: string) => void;
     onNavigateToCaixa?: () => void;
 }> = ({ selectedDate, setSelectedDate, onOpenCustomer, showWeeklyModal, setShowWeeklyModal, onReschedule, onAddInSlot, handleCameraClick, onSuccess, onNavigateToCaixa }) => {
-  const { appointments, finishAppointment, revertAppointment, deleteAppointment, blockedSlots, unblockedSlots, toggleSlotAvailability, toggleSlotUnblock, weeklySchedule, markNoShow, toggleWeeklyBreak, fetchAppointmentsByDate, staff, selectedStaffId, setSelectedStaffId } = useStore();
+  const { appointments, finishAppointment, revertAppointment, deleteAppointment, blockedSlots, unblockedSlots, toggleSlotAvailability, toggleSlotUnblock, weeklySchedule, markNoShow, toggleWeeklyBreak, fetchAppointmentsByDate, staff, selectedStaffId, setSelectedStaffId, barberProfile, activeTenant, session, userRole } = useStore();
   
   useEffect(() => {
     fetchAppointmentsByDate(selectedDate);
@@ -1338,6 +1351,107 @@ const AgendaView: React.FC<{
   const [expandedCompletedId, setExpandedCompletedId] = useState<string | null>(null);
   const [finishingId, setFinishingId] = useState<string | null>(null);
   const [weeklyUnlockSlot, setWeeklyUnlockSlot] = useState<string | null>(null);
+
+  // Context Switcher State (Minha agenda vs Equipe)
+  const [agendaContext, setAgendaContext] = useState<'mine' | 'team'>('mine');
+  const [teamFilter, setTeamFilter] = useState<'all' | string>('all');
+  const [showTeamFilterModal, setShowTeamFilterModal] = useState(false);
+
+  const fullStaffList = useMemo(() => {
+    const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
+    const hasOwner = staff.some(s => s.id === tenantOwnerId || s.userId === tenantOwnerId || s.role === 'admin' || s.role === 'admin_owner');
+    
+    if (!hasOwner && tenantOwnerId) {
+      const ownerMember: Staff = {
+        id: tenantOwnerId,
+        tenantId: tenantOwnerId,
+        userId: tenantOwnerId,
+        name: barberProfile?.name || session?.user?.user_metadata?.name || 'Administrador',
+        phone: barberProfile?.personalPhone || '',
+        photo: barberProfile?.photo,
+        status: 'active',
+        commissionRate: 100,
+        role: 'admin'
+      };
+      return [ownerMember, ...staff];
+    }
+    return staff;
+  }, [staff, activeTenant?.id, barberProfile, session?.user]);
+
+  const totalTeamCount = useMemo(() => fullStaffList.length, [fullStaffList]);
+
+  const selectedTeamMember = useMemo(() => {
+    if (teamFilter === 'all') return null;
+    return fullStaffList.find(s => s.id === teamFilter || s.userId === teamFilter) || null;
+  }, [teamFilter, fullStaffList]);
+
+  useEffect(() => {
+    if (userRole && userRole !== 'admin_owner') {
+      if (agendaContext !== 'mine') {
+        setAgendaContext('mine');
+      }
+    }
+    if (totalTeamCount < 2 && agendaContext !== 'mine') {
+      setAgendaContext('mine');
+    }
+  }, [userRole, agendaContext, totalTeamCount]);
+
+  const isAppointmentForContext = useCallback((a: Appointment) => {
+    const viewerUserId = session?.user?.id;
+    const isOwner = userRole === 'admin_owner';
+    const ownerUserId = activeTenant?.id || barberProfile?.id || viewerUserId;
+
+    // Find viewer's staff profile if present
+    const viewerStaff = staff.find(s => s.userId === viewerUserId || s.id === viewerUserId);
+    const viewerStaffId = viewerStaff?.id;
+
+    if (!isOwner) {
+      // Common employee (role !== 'admin_owner'): ALWAYS sees only their own agenda
+      return (
+        a.userId === viewerUserId ||
+        a.staffId === viewerUserId ||
+        (!!viewerStaffId && a.staffId === viewerStaffId) ||
+        (!!viewerStaffId && a.userId === viewerStaffId)
+      );
+    }
+
+    // Owner mode (userRole === 'admin_owner')
+    if (agendaContext === 'mine') {
+      // "Minha agenda" of owner: ONLY appointments assigned to or created by owner
+      // Must NOT be an appointment belonging to another staff member
+      const isForOwner = (
+        a.staffId === ownerUserId ||
+        a.userId === ownerUserId ||
+        (!!viewerStaffId && a.staffId === viewerStaffId)
+      );
+
+      // Check if it explicitly belongs to another staff member
+      const belongsToOtherStaff = staff.some(s => 
+        s.userId !== ownerUserId && s.id !== ownerUserId &&
+        (s.id === a.staffId || s.userId === a.staffId || (a.userId && s.userId === a.userId && s.userId !== ownerUserId))
+      );
+
+      return isForOwner && !belongsToOtherStaff;
+    }
+
+    // agendaContext === 'team'
+    if (teamFilter === 'all') {
+      // "Equipe > Todos": Consolidated barbershop agenda
+      return true;
+    }
+
+    // "Equipe > [specific staff]"
+    const targetStaff = staff.find(s => s.id === teamFilter || s.userId === teamFilter);
+    const targetStaffId = targetStaff?.id || teamFilter;
+    const targetStaffUserId = targetStaff?.userId || teamFilter;
+
+    return (
+      a.staffId === targetStaffId ||
+      a.staffId === targetStaffUserId ||
+      a.userId === targetStaffUserId ||
+      a.userId === targetStaffId
+    );
+  }, [agendaContext, teamFilter, userRole, session?.user?.id, activeTenant?.id, barberProfile?.id, staff]);
 
   // Inline Calendar States
   const [isCalendarExpanded, setIsCalendarExpanded] = useState(false);
@@ -1363,8 +1477,18 @@ const AgendaView: React.FC<{
     return () => el.removeEventListener('scroll', handleScroll);
   }, []);
 
+  useEffect(() => {
+    if (showTeamFilterModal) {
+      const originalStyle = window.getComputedStyle(document.body).overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = originalStyle;
+      };
+    }
+  }, [showTeamFilterModal]);
+
   const getAppointmentsCount = (dateStr: string) => {
-    return appointments.filter(a => a.date === dateStr && a.status === 'pending').length;
+    return appointments.filter(a => a.date === dateStr && a.status === 'pending' && isAppointmentForContext(a)).length;
   };
 
   const formatMonthYear = (date: Date) => {
@@ -1386,17 +1510,17 @@ const AgendaView: React.FC<{
       const dayOfWeek = d.getDay();
       const dayLabel = ["DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SAB"][dayOfWeek];
       const dayNum = d.getDate().toString().padStart(2, '0');
-      const hasAppointments = appointments.some(a => a.date === dateStr);
+      const hasAppointments = appointments.some(a => a.date === dateStr && isAppointmentForContext(a));
       const isOpen = weeklySchedule[dayOfWeek]?.isOpen;
       return { dateStr, dayLabel, dayNum, hasAppointments, isOpen };
     });
-  }, [selectedDate, appointments, weeklySchedule]);
+  }, [selectedDate, appointments, weeklySchedule, isAppointmentForContext]);
 
   const stats = useMemo(() => {
     const today = getTodayString();
     
     // Day stats for selectedDate
-    const dayApts = appointments.filter(a => a.date === selectedDate && a.status === 'completed');
+    const dayApts = appointments.filter(a => a.date === selectedDate && a.status === 'completed' && isAppointmentForContext(a));
     const dayRevenue = dayApts.reduce((sum, a) => sum + (a.price || 0), 0);
     
     // Week stats based on selectedDate's week
@@ -1410,7 +1534,7 @@ const AgendaView: React.FC<{
     const mondayStr = monday.toISOString().split('T')[0];
     const sundayStr = sunday.toISOString().split('T')[0];
     
-    const weekApts = appointments.filter(a => a.date >= mondayStr && a.date <= sundayStr && a.status === 'completed');
+    const weekApts = appointments.filter(a => a.date >= mondayStr && a.date <= sundayStr && a.status === 'completed' && isAppointmentForContext(a));
     const weekRevenue = weekApts.reduce((sum, a) => sum + (a.price || 0), 0);
 
     // Labels
@@ -1435,7 +1559,7 @@ const AgendaView: React.FC<{
       dayLabel,
       weekLabel
     };
-  }, [appointments, selectedDate]);
+  }, [appointments, selectedDate, isAppointmentForContext]);
 
   const navigateWeek = (direction: 'prev' | 'next') => {
     setSlideDirection(direction === 'next' ? 1 : -1);
@@ -1520,10 +1644,9 @@ const AgendaView: React.FC<{
     return appointments.filter(a => {
       const isDateMatch = a.date === selectedDate;
       if (!isDateMatch) return false;
-      if (selectedStaffId === 'all') return true;
-      return a.staffId === selectedStaffId;
+      return isAppointmentForContext(a);
     });
-  }, [appointments, selectedDate, selectedStaffId]);
+  }, [appointments, selectedDate, isAppointmentForContext]);
 
   const generatedSlots = useMemo(() => {
     if (!dayConfig) return [];
@@ -1845,6 +1968,174 @@ const AgendaView: React.FC<{
             </button>
           </div>
         )}
+
+        {/* Context Control Switcher: Minha agenda | Equipe - Only for admin_owner when at least 2 professionals exist (owner + 1) */}
+        {userRole === 'admin_owner' && totalTeamCount >= 2 && (
+          <div className="flex items-center justify-center mx-0 mt-3 p-1 rounded-2xl bg-white/[0.08] border border-white/10">
+            <button
+              onClick={() => {
+                setAgendaContext('mine');
+              }}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                agendaContext === 'mine'
+                  ? 'bg-[#F99417] text-white shadow-md shadow-[#F99417]/20 scale-[1.02]'
+                  : 'text-white/60 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <User size={15} />
+              <span>Minha agenda</span>
+            </button>
+            <button
+              onClick={() => {
+                setAgendaContext('team');
+                setTeamFilter('all');
+              }}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                agendaContext === 'team'
+                  ? 'bg-[#F99417] text-white shadow-md shadow-[#F99417]/20 scale-[1.02]'
+                  : 'text-white/60 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Users size={15} />
+              <span>Equipe</span>
+            </button>
+          </div>
+        )}
+
+        {/* Staff Filter Selector - Visible ONLY in 'team' mode for admin_owner when team >= 2 */}
+        <AnimatePresence>
+          {userRole === 'admin_owner' && totalTeamCount >= 2 && agendaContext === 'team' && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.25 }}
+              className="overflow-hidden mt-2.5"
+            >
+              {/* MOBILE SELECTOR BAR (sm:hidden) */}
+              <div className="flex sm:hidden items-center gap-2 w-full">
+                {/* 'Todos' Button */}
+                <button
+                  onClick={() => setTeamFilter('all')}
+                  className={`px-3.5 py-2.5 rounded-2xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 min-h-[44px] active:scale-95 ${
+                    teamFilter === 'all'
+                      ? 'bg-[#F99417] text-white shadow-lg shadow-[#F99417]/25 ring-2 ring-[#F99417]/50'
+                      : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'
+                  }`}
+                >
+                  <Users size={15} />
+                  <span>Todos ({fullStaffList.length})</span>
+                </button>
+
+                {/* Select Professional Dropdown Button */}
+                <button
+                  onClick={() => setShowTeamFilterModal(true)}
+                  className={`flex-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold tracking-wider transition-all flex items-center justify-between gap-2 min-h-[44px] border active:scale-95 min-w-0 ${
+                    teamFilter !== 'all'
+                      ? 'bg-[#1E1B4B] border-[#F99417] text-white shadow-lg shadow-[#1E1B4B]/50 ring-1 ring-[#F99417]'
+                      : 'bg-white/10 border-white/10 text-white/90 hover:bg-white/20'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0 truncate">
+                    {selectedTeamMember ? (
+                      <>
+                        {(() => {
+                          const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
+                          const isSelf = (
+                            selectedTeamMember.id === session?.user?.id ||
+                            selectedTeamMember.userId === session?.user?.id ||
+                            selectedTeamMember.id === tenantOwnerId ||
+                            selectedTeamMember.userId === tenantOwnerId ||
+                            (userRole === 'admin_owner' && (selectedTeamMember.role === 'admin' || selectedTeamMember.role === 'admin_owner'))
+                          );
+                          const memberPhoto = selectedTeamMember.photo || (isSelf ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+                          return (
+                            <>
+                              {memberPhoto ? (
+                                <img src={memberPhoto} alt={selectedTeamMember.name} className="w-5 h-5 rounded-full object-cover shrink-0 border border-white/20" referrerPolicy="no-referrer" />
+                              ) : (
+                                <div className="w-5 h-5 rounded-full bg-[#F99417] text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                                  {selectedTeamMember.name.charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              <span className="truncate text-left text-xs font-extrabold text-white">
+                                {formatProfessionalShortName(selectedTeamMember.name)}
+                                {isSelf && <span className="ml-1 text-[#F99417] font-black text-[10px]">(Você)</span>}
+                              </span>
+                            </>
+                          );
+                        })()}
+                      </>
+                    ) : (
+                      <>
+                        <User size={15} className="text-[#F99417] shrink-0" />
+                        <span className="truncate text-left font-bold text-white">
+                          Profissional
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <ChevronDown size={16} className="text-[#F99417] shrink-0" />
+                </button>
+              </div>
+
+              {/* DESKTOP CHIPS CAROUSEL (hidden sm:flex) */}
+              <div className="hidden sm:flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+                {/* 'Todos' Pill */}
+                <button
+                  onClick={() => setTeamFilter('all')}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider whitespace-nowrap transition-all flex items-center gap-1.5 shrink-0 ${
+                    teamFilter === 'all'
+                      ? 'bg-white text-[#1E1B4B] shadow-md ring-2 ring-[#F99417]'
+                      : 'bg-white/10 text-white/80 hover:bg-white/20'
+                  }`}
+                >
+                  <Users size={14} />
+                  <span>Todos ({fullStaffList.length})</span>
+                </button>
+
+                {/* Staff Members List */}
+                {fullStaffList.map((member) => {
+                  const isSelected = teamFilter === member.id || teamFilter === member.userId;
+                  const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
+                  const isSelf = (
+                    member.id === session?.user?.id ||
+                    member.userId === session?.user?.id ||
+                    member.id === tenantOwnerId ||
+                    member.userId === tenantOwnerId ||
+                    (userRole === 'admin_owner' && (member.role === 'admin' || member.role === 'admin_owner'))
+                  );
+
+                  const memberPhoto = member.photo || (isSelf ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+
+                  return (
+                    <button
+                      key={member.id}
+                      onClick={() => setTeamFilter(member.id)}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold tracking-wider whitespace-nowrap transition-all flex items-center gap-2 shrink-0 ${
+                        isSelected
+                          ? 'bg-[#1E1B4B] text-white shadow-md ring-2 ring-[#F99417]'
+                          : 'bg-white/10 text-white/80 hover:bg-white/20'
+                      }`}
+                    >
+                      {memberPhoto ? (
+                        <img src={memberPhoto} alt={member.name} className="w-4 h-4 rounded-full object-cover" referrerPolicy="no-referrer" />
+                      ) : (
+                        <div className="w-4 h-4 rounded-full bg-[#F99417] text-white text-[9px] font-bold flex items-center justify-center">
+                          {member.name.charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      <span>
+                        {member.name}
+                        {isSelf && <span className="ml-1 text-[#F99417] font-black text-[10px]">(Você)</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Summary Cards */}
@@ -1918,27 +2209,14 @@ const AgendaView: React.FC<{
         <div className="space-y-4 animate-in fade-in slide-in-from-top-4 duration-500">
         <div className={`sticky top-0 z-20 bg-[#F5F5F8] pt-5 pb-2 -mx-4 px-4 flex items-center relative justify-between gap-2`}>
           {activeFilter !== 'concluidos' && (
-            <SectionHeader title="Grade do Dia" count={currentDayAppointments.filter(a => a.status === 'pending').length} accent="blue" />
+            <SectionHeader 
+              title={agendaContext === 'mine' ? 'Minha Agenda' : teamFilter === 'all' ? 'Agenda da Equipe' : `Agenda — ${fullStaffList.find(s => s.id === teamFilter || s.userId === teamFilter)?.name || 'Profissional'}`} 
+              count={currentDayAppointments.filter(a => a.status === 'pending').length} 
+              accent="blue" 
+            />
           )}
           
           <div className="flex items-center gap-2 ml-auto">
-            {/* Professional Dropdown */}
-            {staff.length > 1 && (
-              <div className="relative">
-                <select
-                  value={selectedStaffId}
-                  onChange={(e) => setSelectedStaffId(e.target.value)}
-                  className="appearance-none bg-white border border-[#1E1B4B]/10 rounded-full px-3 pr-8 h-7 text-[10px] font-bold uppercase tracking-widest text-[#1E1B4B] focus:outline-none focus:ring-1 focus:ring-[#F99417] shadow-sm cursor-pointer"
-                >
-                  <option value="all">Todos Profissionais</option>
-                  {staff.map((s: any) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-                <ChevronDown size={11} className="absolute right-2.5 top-2 pointer-events-none text-[#1E1B4B]/60" />
-              </div>
-            )}
-
             <button
               onClick={() => setShowFilterMenu(!showFilterMenu)}
               className={`flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-bold uppercase tracking-widest transition-all ${
@@ -2628,6 +2906,152 @@ const AgendaView: React.FC<{
             </motion.div>
           </div>
         )}
+
+        {showTeamFilterModal && (
+          <div 
+            className="fixed inset-0 z-[300] flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm p-0 sm:p-4"
+            onClick={() => setShowTeamFilterModal(false)}
+          >
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 28, stiffness: 300 }}
+              className="w-full max-w-md bg-[#1B1B2F] border-t sm:border border-white/15 rounded-t-3xl sm:rounded-3xl shadow-2xl flex flex-col max-h-[85vh] sm:max-h-[80vh] overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Mobile handle indicator */}
+              <div className="w-12 h-1 bg-white/20 rounded-full mx-auto mt-2.5 mb-0.5 sm:hidden shrink-0" />
+
+              {/* Modal Handle Header */}
+              <div className="p-4 sm:p-5 pb-3 border-b border-white/10 flex items-center justify-between bg-black/20 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-[#F99417]/20 text-[#F99417] flex items-center justify-center font-bold shrink-0">
+                    <Users size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-white">Selecionar Profissional</h3>
+                    <p className="text-[11px] text-white/60">Filtre a agenda da equipe por membro</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowTeamFilterModal(false)}
+                  className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-white/70 hover:text-white flex items-center justify-center transition-colors shrink-0"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Members Content - Scrollable container with flex-1 min-h-0 and generous bottom padding */}
+              <div className="p-4 space-y-3 overflow-y-auto flex-1 min-h-0 touch-pan-y overscroll-contain pb-20">
+                {/* Option: Todos os Profissionais (Full Width) */}
+                <button
+                  onClick={() => {
+                    setTeamFilter('all');
+                    setShowTeamFilterModal(false);
+                  }}
+                  className={`w-full p-3.5 rounded-2xl flex items-center justify-between gap-3 text-left transition-all min-h-[52px] active:scale-[0.98] border ${
+                    teamFilter === 'all'
+                      ? 'bg-[#F99417] text-white font-bold shadow-lg shadow-[#F99417]/20 ring-1 ring-[#F99417] border-[#F99417]'
+                      : 'bg-white/5 hover:bg-white/10 text-white/90 border-white/10'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 ${
+                      teamFilter === 'all' ? 'bg-white/20 text-white' : 'bg-white/10 text-[#F99417]'
+                    }`}>
+                      <Users size={18} />
+                    </div>
+                    <div>
+                      <span className="font-extrabold text-sm block">Todos os Profissionais</span>
+                      <span className={`text-[11px] block ${teamFilter === 'all' ? 'text-white/80' : 'text-white/50'}`}>
+                        Visualizar agenda completa ({fullStaffList.length})
+                      </span>
+                    </div>
+                  </div>
+                  {teamFilter === 'all' && (
+                    <div className="w-6 h-6 rounded-full bg-white text-[#F99417] flex items-center justify-center shrink-0 shadow">
+                      <Check size={14} strokeWidth={3} />
+                    </div>
+                  )}
+                </button>
+
+                {/* Section Header */}
+                <div className="pt-1">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-white/40 px-1">
+                    Equipe ({fullStaffList.length})
+                  </span>
+                </div>
+
+                {/* Compact 2-Column Grid for Mobile Professionals */}
+                <div className="grid grid-cols-2 gap-2.5">
+                  {fullStaffList.map((member) => {
+                    const isSelected = teamFilter === member.id || teamFilter === member.userId;
+                    const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
+                    const isSelf = (
+                      member.id === session?.user?.id ||
+                      member.userId === session?.user?.id ||
+                      member.id === tenantOwnerId ||
+                      member.userId === tenantOwnerId ||
+                      (userRole === 'admin_owner' && (member.role === 'admin' || member.role === 'admin_owner'))
+                    );
+                    const memberPhoto = member.photo || (isSelf ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+                    const shortName = formatProfessionalShortName(member.name);
+
+                    return (
+                      <button
+                        key={member.id}
+                        onClick={() => {
+                          setTeamFilter(member.id);
+                          setShowTeamFilterModal(false);
+                        }}
+                        className={`relative p-3 rounded-2xl flex items-center gap-2.5 text-left transition-all min-h-[60px] active:scale-[0.97] border ${
+                          isSelected
+                            ? 'bg-[#1E1B4B] border-[#F99417] text-white shadow-lg shadow-[#F99417]/15 ring-1 ring-[#F99417]'
+                            : 'bg-white/5 hover:bg-white/10 text-white/90 border-white/10'
+                        }`}
+                      >
+                        {/* Avatar */}
+                        <div className="w-9 h-9 rounded-xl overflow-hidden bg-white/10 flex items-center justify-center shrink-0 border border-white/10">
+                          {memberPhoto ? (
+                            <img src={memberPhoto} alt={member.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                          ) : (
+                            <div className="w-full h-full bg-[#F99417] text-white text-xs font-black flex items-center justify-center">
+                              {member.name.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Professional Name Info */}
+                        <div className="min-w-0 flex-1 pr-3">
+                          <span className="font-extrabold text-xs text-white block truncate leading-tight">
+                            {shortName}
+                          </span>
+                          {isSelf ? (
+                            <span className="text-[10px] font-black uppercase text-[#F99417] tracking-wider block truncate mt-0.5">
+                              Você
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-white/50 block truncate mt-0.5">
+                              {member.role === 'admin' || member.role === 'admin_owner' ? 'Admin' : 'Equipe'}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Selected Indicator Checkmark */}
+                        {isSelected && (
+                          <div className="absolute top-2 right-2 w-4 h-4 rounded-full bg-[#F99417] text-white flex items-center justify-center shrink-0 shadow">
+                            <Check size={11} strokeWidth={3.5} />
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
     </div>
   );
@@ -2777,7 +3201,7 @@ const AddAppointmentModal: React.FC<{
   onSuccess?: () => void;
 }> = ({ selectedDate: initialDate, selectedTime: initialTime, prefilledCustomer, isExceptional = false, onClose, onSuccess }) => {
   useLockBodyScroll();
-  const { addAppointment, appointments, weeklySchedule, services, customers, addCustomer, staff, selectedStaffId, activeTenant } = useStore();
+  const { addAppointment, appointments, weeklySchedule, services, customers, addCustomer, staff, selectedStaffId, activeTenant, userRole, session } = useStore();
 
   const getRoundedCurrentTime = () => {
     const now = new Date();
@@ -2788,6 +3212,17 @@ const AddAppointmentModal: React.FC<{
     d.setSeconds(0);
     return d.toTimeString().substring(0, 5);
   };
+
+  const myStaff = useMemo(() => staff.find(s => s.userId === session?.user?.id || s.id === session?.user?.id), [staff, session?.user?.id]);
+  const initialStaffId = useMemo(() => {
+    if (userRole === 'staff') {
+      return myStaff?.id || session?.user?.id || '';
+    }
+    if (selectedStaffId && selectedStaffId !== 'all') {
+      return selectedStaffId;
+    }
+    return staff[0]?.id || session?.user?.id || '';
+  }, [userRole, myStaff, session?.user?.id, selectedStaffId, staff]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(prefilledCustomer || null);
@@ -2802,7 +3237,7 @@ const AddAppointmentModal: React.FC<{
     time: isExceptional ? getRoundedCurrentTime() : (initialTime || ''),
     serviceIds: [] as string[],
     observation: '',
-    staffId: selectedStaffId !== 'all' ? selectedStaffId : (staff[0]?.id || '')
+    staffId: initialStaffId
   });
 
   const [duplicateCustomer, setDuplicateCustomer] = useState<Customer | null>(null);
@@ -4325,11 +4760,14 @@ const CustomerDetail: React.FC<{
       const session = result?.data?.session;
       if (!session) return;
 
+      const tenantId = await supabaseService.getTenantIdForUser(session.user.id);
+      const memberIds = await supabaseService.getTenantMemberIds(tenantId);
+
       // Fetch history (completed and no-show appointments)
       const { data: appointmentsData, error: aptError } = await supabase
         .from('appointments')
         .select('*')
-        .eq('user_id', session.user.id)
+        .in('user_id', memberIds)
         .eq('phone', customer.phone)
         .in('status', ['completed', 'no-show'])
         .order('date', { ascending: false });
@@ -4349,7 +4787,7 @@ const CustomerDetail: React.FC<{
       const { data: photosData, error: photoError } = await supabase
         .from('customer_photos')
         .select('*')
-        .eq('user_id', session.user.id)
+        .in('user_id', memberIds)
         .eq('customer_phone', customer.phone)
         .order('date', { ascending: false });
 
@@ -4474,7 +4912,8 @@ const CustomerDetail: React.FC<{
                 <input 
                   type="tel" 
                   value={editPhone} 
-                  onChange={e => setEditPhone(e.target.value)}
+                  onChange={e => setEditPhone(formatPhone(e.target.value))}
+                  maxLength={15}
                   className="w-full bg-primary/40 border-none rounded-xl p-2 text-sm text-title"
                   placeholder="Telefone"
                 />

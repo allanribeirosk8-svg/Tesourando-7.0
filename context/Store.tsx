@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
-import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite } from '../types';
+import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState } from '../types';
 import { normalizePhone } from '../utils/helpers';
 import { supabaseService } from '../services/supabaseService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
@@ -88,15 +88,40 @@ export const AppProvider: React.FC<{
   const [barbershop, setBarbershop] = useState<Barbershop | null>(null);
   const [barbershopMembers, setBarbershopMembers] = useState<BarbershopMember[]>([]);
   const [barbershopInvites, setBarbershopInvites] = useState<BarbershopInvite[]>([]);
+  const [onboardingState, setOnboardingState] = useState<OnboardingState | null>(null);
+
+  const checkOnboardingState = useCallback(async (): Promise<OnboardingState> => {
+    if (!isSupabaseConfigured() || !sessionRef.current?.user?.id) {
+      const defaultState: OnboardingState = {
+        userId: '',
+        isAuthenticated: false,
+        hasProfile: false,
+        profile: null,
+        hasBarbershop: false,
+        barbershop: null,
+        hasOwnerMembership: false,
+        isStaffMember: false,
+        status: 'no_session',
+        isComplete: false,
+        step: 1
+      };
+      setOnboardingState(defaultState);
+      return defaultState;
+    }
+
+    const state = await supabaseService.resolveOnboardingState(sessionRef.current.user.id);
+    setOnboardingState(state);
+    return state;
+  }, []);
 
   const permissions = useMemo(() => {
-    const isAdmin = userRole === 'admin_owner';
+    const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
     const isStaff = userRole === 'staff';
     return {
       canManageStaff: isAdmin,
       canManageServices: isAdmin,
       canManageTenantProfile: isAdmin,
-      canViewCaixa: isAdmin,
+      canViewCaixa: isAdmin || isStaff,
       canManageCaixa: isAdmin,
       canManageWeeklySchedule: isAdmin,
       canManageAppointments: isAdmin || isStaff,
@@ -188,6 +213,7 @@ export const AppProvider: React.FC<{
     setBarbershop(null);
     setBarbershopMembers([]);
     setBarbershopInvites([]);
+    setOnboardingState(null);
   }, []);
 
   const loadBarbershopData = useCallback(async () => {
@@ -255,6 +281,12 @@ export const AppProvider: React.FC<{
         // Determine which user's data to fetch
         let targetId: string | null = null;
         if (currentSession?.user?.id) {
+          const onbState = await supabaseService.resolveOnboardingState(currentSession.user.id);
+          setOnboardingState(onbState);
+          if (onbState.profile) {
+            setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+          }
+
           targetId = await supabaseService.getTenantIdForUser(currentSession.user.id); // mapeia colaborador para o ID do tenant
         } else {
           // visitante: busca público
@@ -641,10 +673,11 @@ export const AppProvider: React.FC<{
     console.log('[LOAD_TRANSACTIONS] startDate:', startDate, '| endDate:', endDate);
     
     const resolvedTenantId = barberId || currentSession.user.id;
+    const memberIds = await supabaseService.getTenantMemberIds(resolvedTenantId);
     const { data, error } = await supabase
       .from('transactions')
       .select('*')
-      .eq('user_id', resolvedTenantId)
+      .in('user_id', memberIds)
       .gte('date', `${startDate}T00:00:00`)
       .lte('date', `${endDate}T23:59:59`)
       .order('date', { ascending: false });
@@ -896,14 +929,23 @@ export const AppProvider: React.FC<{
     }
 
     const resolvedTenantId = apt.tenantId || activeTenant?.id || barberId || '';
-    const resolvedStaffId = apt.staffId && apt.staffId !== '' ? apt.staffId : resolvedTenantId;
+    const currentUserId = sessionRef.current?.user?.id;
+    let resolvedStaffId = apt.staffId && apt.staffId !== '' ? apt.staffId : '';
+    if (!resolvedStaffId) {
+      if (userRole === 'staff' && currentUserId) {
+        resolvedStaffId = currentUserId;
+      } else {
+        resolvedStaffId = resolvedTenantId;
+      }
+    }
 
     const finalApt: Appointment = {
       ...apt,
       time: normalizedTimeValue,
       observation: finalObservation,
       tenantId: resolvedTenantId,
-      staffId: resolvedStaffId
+      staffId: resolvedStaffId,
+      userId: currentUserId || resolvedStaffId
     };
 
     // 3. Conflict validation (now scoped by staffId)
@@ -1743,15 +1785,58 @@ export const AppProvider: React.FC<{
 
   const updateStaff = useCallback(async (id: string, updates: Partial<Staff>) => {
     try {
-      const existing = staff.find(s => s.id === id);
-      if (!existing) return;
-      const payload = { ...existing, ...updates };
+      const targetId = sessionRef.current?.user?.id || barberId;
+      const existing = staff.find(s => s.id === id || s.userId === id);
+      
+      let payload: Staff;
+      if (existing) {
+        payload = { ...existing, ...updates };
+      } else {
+        payload = {
+          id: id,
+          tenantId: targetId || id,
+          userId: id,
+          name: updates.name || barberProfile?.name || 'Administrador',
+          phone: updates.phone || barberProfile?.personalPhone || '',
+          photo: updates.photo || barberProfile?.photo,
+          status: updates.status || 'active',
+          commissionRate: updates.commissionRate ?? 100,
+          role: updates.role || 'admin',
+          ...updates
+        };
+      }
+      
       await supabaseService.saveStaff(payload);
-      setStaff(prev => prev.map(s => s.id === id ? payload : s));
+      setStaff(prev => {
+        const index = prev.findIndex(s => s.id === id || s.userId === id);
+        if (index > -1) {
+          const next = [...prev];
+          next[index] = payload;
+          return next;
+        }
+        return [...prev, payload];
+      });
+
+      if (payload.userId || id) {
+        const targetUserId = payload.userId || id;
+        setBarbershopMembers(prev => {
+          return prev.map(m => {
+            if (m.userId === targetUserId) {
+              return {
+                ...m,
+                role: payload.role === 'admin' ? 'admin' : 'staff',
+                name: payload.name,
+                phone: payload.phone
+              };
+            }
+            return m;
+          });
+        });
+      }
     } catch (err) {
       console.error('Error updating staff member:', err);
     }
-  }, [staff]);
+  }, [staff, barberId, barberProfile]);
 
   const deleteStaff = useCallback(async (id: string) => {
     try {
@@ -1807,6 +1892,10 @@ export const AppProvider: React.FC<{
       deleteStaff,
       getStaffAvailability,
       saveStaffAvailability,
+
+      // Onboarding resolution
+      onboardingState,
+      checkOnboardingState,
 
       // Barbershop management
       barbershop,
