@@ -871,12 +871,23 @@ export const CaixaView: React.FC = () => {
     }
   };
 
-  const getCategoryLabel = (cat: string) => {
+  const getCategoryLabel = (cat: string, description?: string) => {
+    if (cat === 'commission' || description?.toLowerCase().includes('comissão') || description?.toLowerCase().includes('comissao')) {
+      return 'Comissão';
+    }
     const labels: Record<string, string> = {
-      tip: 'Gorjeta', product: 'Produto', walk_in: 'Serviço Avulso', rent: 'Aluguel',
-      supply: 'Insumos', equipment: 'Equipamento', fee: 'Taxa/Maquininha', other: 'Outro'
+      appointment: 'Atendimento',
+      tip: 'Gorjeta',
+      product: 'Produto',
+      walk_in: 'Serviço Avulso',
+      rent: 'Aluguel',
+      supply: 'Insumos',
+      equipment: 'Equipamento',
+      fee: 'Taxa/Maquininha',
+      commission: 'Comissão',
+      other: 'Outro'
     };
-    return labels[cat] || cat;
+    return labels[cat] || (cat === 'appointment' ? 'Atendimento' : (cat || 'Outro'));
   };
 
   const renderExtrato = () => {
@@ -891,6 +902,7 @@ export const CaixaView: React.FC = () => {
         date: a.date.split('T')[0],
         isAppointment: true,
         time: a.time,
+        staffId: a.staffId || a.barberId,
       }));
       // Transações manuais automáticas geradas por atendimentos
       const manualTx = txNoPeriodo
@@ -916,9 +928,9 @@ export const CaixaView: React.FC = () => {
 
     return (
       <div className="space-y-4 pb-20">
-        {/* Filtro de abas — fixo, não scrolla com a lista */}
-        <div className="sticky top-0 z-10 pb-3 -mx-4 px-4 pt-2 -mt-2 bg-[#1E1B4B]">
-          <div className="flex bg-primary/40 rounded-2xl p-1 gap-1">
+        {/* Filtro de abas — inline estável, sem conflito de sticky scroll */}
+        <div className="pb-1 bg-transparent">
+          <div className="flex bg-surface/90 rounded-2xl p-1 gap-1 border border-white/10 shadow-sm">
             {([
               { key: 'todas',    label: 'Todas'    },
               { key: 'entradas', label: 'Entradas' },
@@ -929,7 +941,7 @@ export const CaixaView: React.FC = () => {
 
               // Cor do fundo ativo por aba
               const activeBg =
-                key === 'todas'    ? 'bg-secondary' :   // cor principal
+                key === 'todas'    ? (financeScope === 'staff' ? 'bg-[#8B7CFF]' : 'bg-secondary') :   // cor principal do escopo
                 key === 'entradas' ? 'bg-[#34D399]' :   // verde — cor do valor de entrada
                                      'bg-[#F87171]';    // vermelho — cor do valor de saída
 
@@ -944,7 +956,7 @@ export const CaixaView: React.FC = () => {
                   key={key}
                   onClick={() => setFiltroExtrato(key)}
                   className={`
-                    flex-1 py-2 rounded-xl text-xs font-black transition-all duration-200
+                    flex-1 py-2 rounded-xl text-xs font-black transition-all duration-200 cursor-pointer
                     ${isActive
                       ? `${activeBg} ${activeText} shadow-[0_2px_8px_rgba(0,0,0,0.3)]`
                       : 'text-title hover:text-white'
@@ -985,6 +997,11 @@ export const CaixaView: React.FC = () => {
               iconBg = 'bg-[#34D399]/20 text-[#34D399]';
             }
 
+            const linkedStaff = item.staffId
+              ? (staff.find(s => s.id === item.staffId || s.userId === item.staffId) ||
+                 (session?.user?.id === item.staffId ? { id: session.user.id, name: 'Profissional' } : null))
+              : null;
+
             const Content = (
               <div className="bg-surface p-4 flex items-center gap-3 z-10 w-full">
                 <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${iconBg}`}>
@@ -992,15 +1009,42 @@ export const CaixaView: React.FC = () => {
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-bold text-white truncate">
-                    {item.description || getCategoryLabel(item.category)}
+                    {item.description || getCategoryLabel(item.category, item.description)}
                   </p>
-                  <p className="text-[11px] text-title font-medium">
-                    {item.date.split('-').reverse().join('/')}
-                    {item.isAppointment && item.time ? ` · ${item.time}` : ` · ${getCategoryLabel(item.category)}`}
+                  <p className="text-[11px] text-title font-medium flex items-center gap-1.5 flex-wrap">
+                    <span>{item.date.split('-').reverse().join('/')}</span>
+                    <span>·</span>
+                    <span>{getCategoryLabel(item.category, item.description)}</span>
+                    <span className={`inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-md font-bold ${
+                      linkedStaff
+                        ? 'bg-[#8B7CFF]/15 text-[#8B7CFF] border border-[#8B7CFF]/30'
+                        : 'bg-emerald-400/10 text-emerald-300 border border-emerald-400/20'
+                    }`}>
+                      {linkedStaff ? (
+                        <><User size={10} /> {formatShortName(linkedStaff.name)}</>
+                      ) : (
+                        <><Building2 size={10} /> Barbearia</>
+                      )}
+                    </span>
                   </p>
                 </div>
-                <div className={`text-sm font-black flex-shrink-0 ${item.type === 'income' ? 'text-[#34D399]' : 'text-[#F87171]'}`}>
-                  {item.type === 'income' ? '+' : '-'} {formatCurrency(item.amount)}
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <div className={`text-sm font-black ${item.type === 'income' ? 'text-[#34D399]' : 'text-[#F87171]'}`}>
+                    {item.type === 'income' ? '+' : '-'} {formatCurrency(item.amount)}
+                  </div>
+                  {!item.isAppointment && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteTransaction(item.id);
+                      }}
+                      className="p-1.5 text-title/60 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors cursor-pointer border-none"
+                      title="Excluir lançamento"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -1641,9 +1685,10 @@ export const CaixaView: React.FC = () => {
           await addTransaction({
             type: 'expense',
             amount: item.commissionAmount,
-            category: 'other',
+            category: 'commission' as any,
             description: `Comissão paga: ${item.staff.name} (${getPeriodLabel()})`,
             date: `${dateRange.end}T12:00:00`,
+            staffId: item.staff.id,
           });
           setCommissionPaymentSuccess(`Comissão de ${formatCurrency(item.commissionAmount)} paga para ${item.staff.name} registrada com sucesso!`);
           setTimeout(() => setCommissionPaymentSuccess(null), 4000);
@@ -2571,34 +2616,6 @@ export const CaixaView: React.FC = () => {
   const renderRelatorios = () => {
     return (
       <div className="space-y-4 pb-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-        {/* Sub-navegação interna de Relatórios */}
-        <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-md">
-          {[
-            { id: 'diagnostico', label: 'Diagnóstico', icon: Activity },
-            { id: 'clientes', label: 'Clientes', icon: Users },
-            { id: 'servicos', label: 'Serviços', icon: Scissors },
-            { id: 'agenda', label: 'Ocupação', icon: Calendar },
-          ].map(sub => {
-            const Icon = sub.icon;
-            const isActive = relatoriosSubTab === sub.id;
-            return (
-              <button
-                key={sub.id}
-                type="button"
-                onClick={() => setRelatoriosSubTab(sub.id as any)}
-                className={`py-1.5 px-1 rounded-xl text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-all cursor-pointer border-none ${
-                  isActive
-                    ? 'bg-secondary text-white shadow-sm font-black'
-                    : 'text-title hover:text-white bg-transparent'
-                }`}
-              >
-                <Icon size={12} className={isActive ? 'text-white' : 'text-title'} />
-                <span className="truncate">{sub.label}</span>
-              </button>
-            );
-          })}
-        </div>
-
         {/* Conteúdo da sub-aba ativa */}
         {relatoriosSubTab === 'diagnostico' && renderDiagnosticoRelatorios()}
         {relatoriosSubTab === 'clientes' && renderClientes()}
@@ -2629,13 +2646,17 @@ export const CaixaView: React.FC = () => {
 
   return (
     <div className="w-full h-full flex flex-col bg-[#1E1B4B]">
-      {/* Scope, Period & Navigation Top Header */}
-      <div className="px-4 pt-3.5 pb-2.5 sticky top-0 bg-[#1E1B4B] z-40 border-b border-white/10 space-y-2.5 shadow-lg">
+      {/* Scope, Period & Navigation Top Header (Unificado e Sticky) */}
+      <div className="px-4 pt-3 pb-2.5 sticky top-0 bg-[#1E1B4B] z-40 border-b border-white/10 space-y-2 shadow-lg">
         
         {/* LINHA 1: SELETOR DE ESCOPO (QUEM - Categoria) */}
         <div>
           {isAdmin ? (
-            <div className="grid grid-cols-2 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
+            <div className={`grid grid-cols-2 bg-surface rounded-2xl p-1 gap-1 border transition-all duration-200 ${
+              financeScope === 'staff'
+                ? 'border-[#8B7CFF]/30 shadow-[0_0_12px_rgba(139,124,255,0.12)]'
+                : 'border-white/10 shadow-inner'
+            }`}>
               <button
                 type="button"
                 onClick={() => {
@@ -2663,7 +2684,7 @@ export const CaixaView: React.FC = () => {
                 }}
                 className={`py-2 px-2 rounded-xl text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer border-none ${
                   financeScope === 'staff'
-                    ? 'bg-secondary text-white shadow-md'
+                    ? 'bg-[#8B7CFF] text-white shadow-md'
                     : 'bg-transparent text-title hover:text-white'
                 }`}
               >
@@ -2672,9 +2693,9 @@ export const CaixaView: React.FC = () => {
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-2.5 bg-blue-500/10 border border-blue-500/20 px-3.5 py-2 rounded-2xl w-full">
-              <Shield size={16} className="text-blue-400 shrink-0" />
-              <span className="text-xs font-bold text-blue-200">
+            <div className="flex items-center gap-2.5 bg-[#8B7CFF]/10 border border-[#8B7CFF]/25 px-3.5 py-2 rounded-2xl w-full">
+              <Shield size={16} className="text-[#8B7CFF] shrink-0" />
+              <span className="text-xs font-bold text-white">
                 Painel Financeiro Individual
               </span>
             </div>
@@ -2683,7 +2704,7 @@ export const CaixaView: React.FC = () => {
 
         {/* LINHA 2: SELETOR DE PROFISSIONAL (QUEM - Sujeito Específico) */}
         {financeScope === 'staff' && (
-          <div className="w-full">
+          <div className="w-full animate-in fade-in duration-200">
             {isAdmin ? (
               <div className="relative w-full">
                 <select
@@ -2692,7 +2713,7 @@ export const CaixaView: React.FC = () => {
                     setSelectedStaffScopeId(e.target.value);
                     setSelectedStaffForCommission(null);
                   }}
-                  className="w-full appearance-none bg-surface border border-secondary/50 rounded-2xl pl-9 pr-8 h-10 text-xs font-bold text-white focus:outline-none focus:border-secondary shadow-md cursor-pointer truncate"
+                  className="w-full appearance-none bg-surface border border-[#8B7CFF]/50 rounded-2xl pl-9 pr-8 h-10 text-xs font-bold text-white focus:outline-none focus:border-[#8B7CFF] shadow-md cursor-pointer truncate"
                 >
                   {staff.filter(s => s.status === 'active').map(s => {
                     const isSelf = s.userId === session?.user?.id;
@@ -2703,12 +2724,12 @@ export const CaixaView: React.FC = () => {
                     );
                   })}
                 </select>
-                <User size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-secondary pointer-events-none" />
+                <User size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8B7CFF] pointer-events-none" />
                 <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-title pointer-events-none" />
               </div>
             ) : (
-              <div className="flex items-center gap-2.5 bg-surface border border-white/10 rounded-2xl px-3.5 h-10 w-full">
-                <User size={15} className="text-secondary shrink-0" />
+              <div className="flex items-center gap-2.5 bg-surface border border-[#8B7CFF]/30 rounded-2xl px-3.5 h-10 w-full">
+                <User size={15} className="text-[#8B7CFF] shrink-0" />
                 <span className="text-xs font-bold text-white truncate">
                   Profissional: {selectedStaff ? formatShortName(selectedStaff.name) : 'Seu Perfil'}
                 </span>
@@ -2770,10 +2791,90 @@ export const CaixaView: React.FC = () => {
           </div>
         </div>
 
-        {/* LINHA 4: CONFIRMAÇÃO LEVE DE CONTEXTO */}
-        <div className="flex items-center justify-between px-1 pt-0.5 text-[11px]">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className={`w-2 h-2 rounded-full shrink-0 ${financeScope === 'shop' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+        {/* LINHA 4: NAVEGAÇÃO PRINCIPAL DO FINANCEIRO (4 Abas Primárias) */}
+        <div className="pt-1">
+          <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
+            {(['resumo', 'extrato', 'equipe', 'relatorios'] as const).map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => {
+                  setActiveTab(t);
+                  setSelectedStaffForCommission(null);
+                }}
+                className={`py-2 ${t === 'relatorios' ? 'pl-[1px] pr-1' : 'px-1'} rounded-xl font-black uppercase tracking-wider transition-all text-center cursor-pointer border-none flex items-center justify-center ${
+                  activeTab === t
+                    ? financeScope === 'staff'
+                      ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] text-white shadow-md'
+                      : 'bg-secondary text-white shadow-md'
+                    : 'bg-transparent text-title hover:text-white'
+                }`}
+                style={t === 'relatorios' ? { paddingLeft: '1px' } : undefined}
+              >
+                <span 
+                  className={
+                    t === 'relatorios' 
+                      ? 'text-[10px] leading-[15px]' 
+                      : t === 'equipe' 
+                      ? 'text-[10px]' 
+                      : 'text-[10px] sm:text-[11px]'
+                  }
+                  style={
+                    t === 'relatorios' 
+                      ? { fontSize: '10px', lineHeight: '15px' } 
+                      : t === 'equipe' 
+                      ? { fontSize: '10px' } 
+                      : undefined
+                  }
+                >
+                  {t === 'resumo' ? 'Resumo'
+                    : t === 'extrato' ? 'Extrato'
+                    : t === 'equipe' ? 'Equipe'
+                    : 'Relatórios'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* LINHA 5: SUBTABS DE RELATÓRIOS (Exibidas quando activeTab === 'relatorios') */}
+        {activeTab === 'relatorios' && (
+          <div className="pt-1 animate-in fade-in duration-200">
+            <div className="grid grid-cols-4 w-full bg-surface/90 rounded-xl p-1 gap-1 border border-white/10 shadow-sm">
+              {[
+                { id: 'diagnostico', label: 'Geral', icon: Activity },
+                { id: 'clientes', label: 'Clientes', icon: Users },
+                { id: 'servicos', label: 'Serviços', icon: Scissors },
+                { id: 'agenda', label: 'Ocupação', icon: Calendar },
+              ].map(sub => {
+                const Icon = sub.icon;
+                const isActive = relatoriosSubTab === sub.id;
+                return (
+                  <button
+                    key={sub.id}
+                    type="button"
+                    onClick={() => setRelatoriosSubTab(sub.id as any)}
+                    className={`w-full py-1.5 px-0.5 sm:px-2 rounded-lg text-[9px] min-[370px]:text-[9.5px] min-[400px]:text-[10px] sm:text-[11px] font-bold uppercase tracking-tight flex items-center justify-center gap-1 sm:gap-1.5 transition-all cursor-pointer border-none whitespace-nowrap ${
+                      isActive
+                        ? financeScope === 'staff'
+                          ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] text-white shadow-sm font-black'
+                          : 'bg-secondary text-white shadow-sm font-black'
+                        : 'text-title/80 hover:text-white bg-transparent'
+                    }`}
+                  >
+                    <Icon size={11} className={`shrink-0 ${isActive ? 'text-white' : 'text-title'}`} />
+                    <span className="whitespace-nowrap select-none">{sub.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* LINHA 6: CONFIRMAÇÃO LEVE DE CONTEXTO */}
+        <div className="flex items-center justify-between px-1 pt-0.5 text-[10px]">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className={`w-2 h-2 rounded-full shrink-0 transition-colors ${financeScope === 'shop' ? 'bg-secondary' : 'bg-[#8B7CFF]'}`} />
             <span className="text-title/80 font-medium truncate">
               Visualizando:{' '}
               <strong className="text-white font-bold">
@@ -2783,40 +2884,18 @@ export const CaixaView: React.FC = () => {
               </strong>
             </span>
           </div>
-          <span className="text-[10px] font-bold text-title/60 uppercase tracking-wider shrink-0">
+          <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded-md border transition-all ${
+            financeScope === 'shop'
+              ? 'text-title/60 border-transparent bg-transparent'
+              : 'text-[#8B7CFF] bg-[#8B7CFF]/15 border-[#8B7CFF]/30'
+          }`}>
             {financeScope === 'shop' ? 'Consolidado' : 'Recorte Individual'}
           </span>
         </div>
       </div>
 
-      {/* Navegação Principal do Financeiro (4 Abas Primárias Fixo, Sem Scroll) */}
-      <div className="px-4 pt-1 pb-2 bg-[#1E1B4B] z-30">
-        <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
-          {(['resumo', 'extrato', 'equipe', 'relatorios'] as const).map(t => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => {
-                setActiveTab(t);
-                setSelectedStaffForCommission(null);
-              }}
-              className={`py-2 px-1 rounded-xl text-[10px] sm:text-[11px] font-black uppercase tracking-wider transition-all text-center cursor-pointer border-none ${
-                activeTab === t
-                  ? 'bg-secondary text-white shadow-md'
-                  : 'bg-transparent text-title hover:text-white'
-              }`}
-            >
-              {t === 'resumo' ? 'Resumo'
-                : t === 'extrato' ? 'Extrato'
-                : t === 'equipe' ? 'Equipe'
-                : 'Relatórios'}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto px-4 w-full max-w-full overflow-x-hidden pt-2 pb-[160px] min-h-full bg-[#1E1B4B]">
+      {/* Content Container (SEM overflow-y-auto para evitar duplo scroll) */}
+      <div className="flex-1 px-4 w-full max-w-full overflow-x-hidden pt-3 pb-28 bg-[#1E1B4B]">
         {activeTab === 'resumo' && renderResumo()}
         {activeTab === 'extrato' && renderExtrato()}
         {activeTab === 'equipe' && renderComissoes()}
@@ -2854,7 +2933,11 @@ export const CaixaView: React.FC = () => {
           {/* Botão principal */}
           <motion.button animate={{rotate: fabOpen ? 45 : 0}} transition={{duration:0.2}}
             onClick={()=>setFabOpen(v=>!v)}
-            className="w-14 h-14 rounded-full bg-secondary text-white flex items-center justify-center shadow-xl opacity-[0.85]">
+            className={`w-14 h-14 rounded-full text-white flex items-center justify-center transition-all cursor-pointer border-none ${
+              financeScope === 'staff'
+                ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] shadow-[0_4px_20px_rgba(139,124,255,0.4)] opacity-[0.95]'
+                : 'bg-secondary hover:bg-secondary/90 shadow-xl opacity-[0.85]'
+            }`}>
             <Plus size={26}/>
           </motion.button>
         </div>
@@ -2866,6 +2949,8 @@ export const CaixaView: React.FC = () => {
         onClose={() => setShowLancamento(false)} 
         isDarkMode={isDarkMode} 
         defaultType={showLancamento || 'income'}
+        initialScope={financeScope}
+        initialStaffId={selectedStaffScopeId}
       />
 
       {/* Modal de Ação da Recomendação */}

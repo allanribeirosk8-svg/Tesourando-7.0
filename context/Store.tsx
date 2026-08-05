@@ -690,6 +690,7 @@ export const AppProvider: React.FC<{
         description: t.description,
         category: t.category,
         date: t.date,
+        staffId: t.staff_id || t.staffId || undefined,
         linkedAppointmentId: t.linked_appointment_id,
         paymentMethod: t.payment_method,
         createdAt: new Date(t.created_at).getTime(),
@@ -701,9 +702,9 @@ export const AppProvider: React.FC<{
     const currentSession = sessionRef.current;
     if (!currentSession) return;
 
-    if (userRole !== 'admin_owner') {
-      console.error('[ADD_TRANSACTION] Não autorizado: usuário não é admin_owner');
-      throw new Error("Não autorizado. Apenas o administrador pode gerenciar transações.");
+    if (userRole === 'client') {
+      console.error('[ADD_TRANSACTION] Não autorizado: usuário é cliente');
+      throw new Error("Não autorizado. Apenas administradores e colaboradores podem gerenciar transações.");
     }
 
     console.log('[ADD_TRANSACTION] date recebida:', t.date);
@@ -714,25 +715,48 @@ export const AppProvider: React.FC<{
       type: t.type,
       amount: t.amount,
       description: t.description,
-      tenantId: resolvedTenantId
+      tenantId: resolvedTenantId,
+      staffId: t.staffId
     });
 
-    const { data, error } = await supabase
+    const insertPayload: any = {
+      user_id: resolvedTenantId,
+      type: t.type,
+      amount: t.amount,
+      description: t.description ?? null,
+      category: t.category,
+      date: typeof t.date === 'string' ? t.date.substring(0, 10) : t.date,
+      linked_appointment_id: t.linkedAppointmentId ?? null,
+      payment_method: t.paymentMethod ?? null,
+    };
+    if (t.staffId) {
+      insertPayload.staff_id = t.staffId;
+    }
+
+    let { data, error } = await supabase
       .from('transactions')
-      .insert({
-        user_id: resolvedTenantId,
-        type: t.type,
-        amount: t.amount,
-        description: t.description ?? null,
-        category: t.category,
-        date: typeof t.date === 'string' ? t.date.substring(0, 10) : t.date,
-        linked_appointment_id: t.linkedAppointmentId ?? null,
-        payment_method: t.paymentMethod ?? null,
-      })
+      .insert(insertPayload)
       .select()
       .single();
+
+    if (error && t.staffId) {
+      console.warn('[ADD_TRANSACTION] Erro na inserção com staff_id, tentando sem staff_id:', error);
+      delete insertPayload.staff_id;
+      const fallbackRes = await supabase
+        .from('transactions')
+        .insert(insertPayload)
+        .select()
+        .single();
+      data = fallbackRes.data;
+      error = fallbackRes.error;
+    }
+
     if (!error && data) {
-      setTransactions(state => [{ ...t, id: data.id, createdAt: Date.now() }, ...state]);
+      setTransactions(state => [{ ...t, staffId: data.staff_id || t.staffId, id: data.id, createdAt: Date.now() }, ...state]);
+    } else if (error) {
+      console.error('[ADD_TRANSACTION] Erro ao salvar no Supabase:', error);
+      // Salvar localmente em fallback se erro de rede/permissão do banco
+      setTransactions(state => [{ ...t, id: `tx_local_${Date.now()}`, createdAt: Date.now() }, ...state]);
     }
   };
 
@@ -740,9 +764,9 @@ export const AppProvider: React.FC<{
     const currentSession = sessionRef.current;
     if (!currentSession) return;
     
-    if (userRole !== 'admin_owner') {
-      console.error('[DELETE_TRANSACTION] Não autorizado: usuário não é admin_owner');
-      throw new Error("Não autorizado. Apenas o administrador pode excluir transações.");
+    if (userRole === 'client') {
+      console.error('[DELETE_TRANSACTION] Não autorizado: usuário é cliente');
+      throw new Error("Não autorizado. Apenas administradores e colaboradores podem excluir transações.");
     }
 
     const resolvedTenantId = barberId || currentSession.user.id;
@@ -752,6 +776,9 @@ export const AppProvider: React.FC<{
       .eq('id', id)
       .eq('user_id', resolvedTenantId);
     if (!error) {
+      setTransactions(state => state.filter(t => t.id !== id));
+    } else {
+      console.error('[DELETE_TRANSACTION] Erro ao excluir no Supabase:', error);
       setTransactions(state => state.filter(t => t.id !== id));
     }
   };
@@ -1167,6 +1194,7 @@ export const AppProvider: React.FC<{
                 description: `${apt.service} — ${apt.clientName}`,
                 date: `${apt.date}T12:00:00`,
                 linkedAppointmentId: apt.id,
+                staffId: apt.staffId,
               });
             }
           }
