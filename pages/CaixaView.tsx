@@ -2791,56 +2791,59 @@ export const CaixaView: React.FC = () => {
           </div>
         </div>
 
-        {/* LINHA 4: NAVEGAÇÃO PRINCIPAL DO FINANCEIRO (4 Abas Primárias) */}
+        {/* LINHA 4: NAVEGAÇÃO PRINCIPAL DO FINANCEIRO (4 Abas Primárias - Nível 1) */}
         <div className="pt-1">
           <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
-            {(['resumo', 'extrato', 'equipe', 'relatorios'] as const).map(t => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => {
-                  setActiveTab(t);
-                  setSelectedStaffForCommission(null);
-                }}
-                className={`py-2 ${t === 'relatorios' ? 'pl-[1px] pr-1' : 'px-1'} rounded-xl font-black uppercase tracking-wider transition-all text-center cursor-pointer border-none flex items-center justify-center ${
-                  activeTab === t
-                    ? financeScope === 'staff'
-                      ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] text-white shadow-md'
-                      : 'bg-secondary text-white shadow-md'
-                    : 'bg-transparent text-title hover:text-white'
-                }`}
-                style={t === 'relatorios' ? { paddingLeft: '1px' } : undefined}
-              >
-                <span 
-                  className={
-                    t === 'relatorios' 
-                      ? 'text-[10px] leading-[15px]' 
-                      : t === 'equipe' 
-                      ? 'text-[10px]' 
-                      : 'text-[10px] sm:text-[11px]'
-                  }
-                  style={
-                    t === 'relatorios' 
-                      ? { fontSize: '10px', lineHeight: '15px' } 
-                      : t === 'equipe' 
-                      ? { fontSize: '10px' } 
-                      : undefined
-                  }
+            {(['resumo', 'extrato', 'equipe', 'relatorios'] as const).map(t => {
+              const isTabActive = activeTab === t;
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => {
+                    setActiveTab(t);
+                    setSelectedStaffForCommission(null);
+                  }}
+                  className={`py-2 ${t === 'relatorios' ? 'pl-[1px] pr-1' : 'px-1'} rounded-xl font-black uppercase tracking-wider transition-all duration-200 text-center cursor-pointer border-none flex items-center justify-center ${
+                    isTabActive
+                      ? financeScope === 'staff'
+                        ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] text-white shadow-[0_2px_10px_rgba(139,124,255,0.35)]'
+                        : 'bg-secondary hover:bg-secondary/90 text-white shadow-[0_2px_10px_rgba(245,158,11,0.3)]'
+                      : 'bg-transparent text-title hover:text-white hover:bg-white/[0.04]'
+                  }`}
+                  style={t === 'relatorios' ? { paddingLeft: '1px' } : undefined}
                 >
-                  {t === 'resumo' ? 'Resumo'
-                    : t === 'extrato' ? 'Extrato'
-                    : t === 'equipe' ? 'Equipe'
-                    : 'Relatórios'}
-                </span>
-              </button>
-            ))}
+                  <span 
+                    className={
+                      t === 'relatorios' 
+                        ? 'text-[10px] leading-[15px]' 
+                        : t === 'equipe' 
+                        ? 'text-[10px]' 
+                        : 'text-[10px] sm:text-[11px]'
+                    }
+                    style={
+                      t === 'relatorios' 
+                        ? { fontSize: '10px', lineHeight: '15px' } 
+                        : t === 'equipe' 
+                        ? { fontSize: '10px' } 
+                        : undefined
+                    }
+                  >
+                    {t === 'resumo' ? 'Resumo'
+                      : t === 'extrato' ? 'Extrato'
+                      : t === 'equipe' ? 'Equipe'
+                      : 'Relatórios'}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* LINHA 5: SUBTABS DE RELATÓRIOS (Exibidas quando activeTab === 'relatorios') */}
+        {/* LINHA 5: SUBTABS DE RELATÓRIOS (Subseções - Nível 2) */}
         {activeTab === 'relatorios' && (
           <div className="pt-1 animate-in fade-in duration-200">
-            <div className="grid grid-cols-4 w-full bg-surface/90 rounded-xl p-1 gap-1 border border-white/10 shadow-sm">
+            <div className="grid grid-cols-4 w-full bg-surface/50 rounded-xl p-1 gap-1 border border-white/5 shadow-inner">
               {[
                 { id: 'diagnostico', label: 'Geral', icon: Activity },
                 { id: 'clientes', label: 'Clientes', icon: Users },
@@ -2854,15 +2857,22 @@ export const CaixaView: React.FC = () => {
                     key={sub.id}
                     type="button"
                     onClick={() => setRelatoriosSubTab(sub.id as any)}
-                    className={`w-full py-1.5 px-0.5 sm:px-2 rounded-lg text-[9px] min-[370px]:text-[9.5px] min-[400px]:text-[10px] sm:text-[11px] font-bold uppercase tracking-tight flex items-center justify-center gap-1 sm:gap-1.5 transition-all cursor-pointer border-none whitespace-nowrap ${
+                    className={`w-full py-1.5 px-0.5 sm:px-2 rounded-lg text-[9px] min-[370px]:text-[9.5px] min-[400px]:text-[10px] sm:text-[11px] font-bold uppercase tracking-tight flex items-center justify-center gap-1 sm:gap-1.5 transition-all duration-150 cursor-pointer whitespace-nowrap border ${
                       isActive
                         ? financeScope === 'staff'
-                          ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] text-white shadow-sm font-black'
-                          : 'bg-secondary text-white shadow-sm font-black'
-                        : 'text-title/80 hover:text-white bg-transparent'
+                          ? 'bg-[#8B7CFF]/20 border-[#8B7CFF]/50 text-[#C4BCFF] font-black shadow-[0_0_8px_rgba(139,124,255,0.2)]'
+                          : 'bg-secondary/15 border-secondary/40 text-secondary font-black shadow-[0_0_8px_rgba(245,158,11,0.15)]'
+                        : 'bg-transparent border-transparent text-title/70 hover:text-white hover:bg-white/[0.04]'
                     }`}
                   >
-                    <Icon size={11} className={`shrink-0 ${isActive ? 'text-white' : 'text-title'}`} />
+                    <Icon 
+                      size={11} 
+                      className={`shrink-0 ${
+                        isActive 
+                          ? (financeScope === 'staff' ? 'text-[#C4BCFF]' : 'text-secondary')
+                          : 'text-title/60'
+                      }`} 
+                    />
                     <span className="whitespace-nowrap select-none">{sub.label}</span>
                   </button>
                 );
