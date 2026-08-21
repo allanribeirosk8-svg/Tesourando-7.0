@@ -249,9 +249,20 @@ const ConfiguracoesScreen: React.FC<{
   onOpenStaff: () => void;
   onLogout: () => void;
 }> = ({ onOpenProfile, onOpenWeekly, onOpenStaff, onLogout }) => {
-  const { barberProfile, permissions, userRole } = useStore();
+  const { barberProfile, permissions, userRole, currentStaff, session } = useStore();
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+
+  const isStaff = userRole === 'staff';
+  const displayName = isStaff
+    ? (currentStaff?.name || 'Profissional')
+    : (barberProfile?.name || 'Barbearia');
+  const displayPhoto = isStaff
+    ? (currentStaff?.photo || undefined)
+    : (barberProfile?.photo || barberProfile?.avatar || undefined);
+  const displaySubtitle = isStaff
+    ? (currentStaff?.phone ? formatPhone(currentStaff.phone) : 'Barbeiro')
+    : (barberProfile?.phone ? formatPhone(barberProfile.phone) : (barberProfile?.shopName || 'Barbeiro'));
 
   const shareUrl = barberProfile?.slug ? `${window.location.origin}/#/agendar/${barberProfile.slug}` : '';
 
@@ -268,11 +279,11 @@ const ConfiguracoesScreen: React.FC<{
       try {
         await navigator.share({
           title: 'Agende comigo!',
-          text: `Agende seu horário com ${barberProfile?.shop_name || barberProfile?.name || 'barbeiro'}`,
+          text: `Agende seu horário com ${barberProfile?.shopName || barberProfile?.shop_name || displayName}`,
           url: shareUrl
         });
       } catch (e) {
-        console.log('Share canceled or failed', e);
+        // user canceled share
       }
     } else {
       handleCopy();
@@ -288,15 +299,15 @@ const ConfiguracoesScreen: React.FC<{
           className="w-full bg-white/5 rounded-2xl p-4 flex items-center gap-4 text-left"
         >
           <div className="w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-xl shrink-0 overflow-hidden shadow-sm bg-primary">
-            {barberProfile?.avatar ? (
-              <img src={barberProfile.avatar} alt={barberProfile.name || 'Barbeiro'} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+            {displayPhoto ? (
+              <img src={displayPhoto} alt={displayName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
             ) : (
-              getInitials(barberProfile?.name || 'Barbeiro')
+              getInitials(displayName)
             )}
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-lg font-bold text-white truncate">{barberProfile?.name || 'Barbearia'}</h2>
-            <p className="text-sm text-title truncate">{barberProfile?.phone ? formatPhone(barberProfile.phone) : 'Barbeiro'}</p>
+            <h2 className="text-lg font-bold text-white truncate">{displayName}</h2>
+            <p className="text-sm text-title truncate">{displaySubtitle}</p>
           </div>
           <ChevronRight size={20} className="text-title shrink-0" />
         </button>
@@ -560,6 +571,7 @@ const AuthScreen: React.FC<{ onAuthenticated: () => void, initialView?: 'login' 
           password,
         });
         if (loginErr) throw loginErr;
+
         onAuthenticated();
       } else {
         if (!email || !password || !confirmPassword) throw new Error('Preencha todos os campos');
@@ -776,6 +788,7 @@ export const AdminApp: React.FC = () => {
     resetStore, 
     permissions, 
     userRole,
+    currentStaff,
     notifications,
     markNotificationAsRead,
     markAllNotificationsAsRead,
@@ -808,17 +821,21 @@ export const AdminApp: React.FC = () => {
     if (isAuthenticated && !isLoading) {
       const isNewUserFlag = localStorage.getItem('tesourando_new_user');
       if (isNewUserFlag === 'true') {
-        setShowSetup(true);
-        localStorage.removeItem('tesourando_new_user');
+        if (onboardingState?.isStaffMember || onboardingState?.isComplete || userRole === 'staff' || onboardingState?.status === 'network_error') {
+          localStorage.removeItem('tesourando_new_user');
+          setShowSetup(false);
+        } else if (onboardingState && !onboardingState.isStaffMember && !onboardingState.isComplete && onboardingState.status !== 'network_error') {
+          setShowSetup(true);
+          localStorage.removeItem('tesourando_new_user');
+        }
       }
     }
-  }, [isAuthenticated, isLoading]);
+  }, [isAuthenticated, isLoading, onboardingState, userRole]);
 
   const handleCompleteSetup = async () => {
     setShowSetup(false);
     await new Promise(r => setTimeout(r, 1000)); // aguarda banco processar
     await reloadData(); // força rebusca dos serviços recém-salvos
-    console.log('[ADMIN] reloadData após onboarding concluído');
   };
 
   useEffect(() => {
@@ -983,7 +1000,15 @@ export const AdminApp: React.FC = () => {
   }
 
   // Se o onboarding está incompleto para o usuário autenticado (ex: fechou o app e voltou), abre o SetupWizard direto
-  if (onboardingState && !onboardingState.isComplete) {
+  // REGRA OBRIGATÓRIA: Erro de rede (network_error) NUNCA deve abrir SetupWizard.
+  // Usuário com membership staff/admin e staff_profile válido NUNCA deve abrir SetupWizard.
+  const shouldOpenSetup = onboardingState && 
+    !onboardingState.isComplete && 
+    onboardingState.status !== 'network_error' && 
+    onboardingState.status !== 'no_session' && 
+    !onboardingState.isStaffMember;
+
+  if (shouldOpenSetup) {
     return (
       <SetupWizard 
         initialStep={onboardingState.step} 
@@ -1008,35 +1033,47 @@ export const AdminApp: React.FC = () => {
         {/* Left: Identity & Profile */}
         <div className="flex items-center gap-3">
           {activeTab === 'agenda' ? (
-            <div className="flex items-center gap-3">
-              {/* Foto de perfil — maior e com ring colorido */}
-              <button
-                onClick={() => setShowProfileModal(true)}
-                className="relative flex-shrink-0"
-              >
-                <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-secondary/30 shadow-md shadow-secondary/20 bg-surface/80 ">
-                  {barberProfile.photo ? (
-                    <img src={barberProfile.photo} alt={barberProfile.name}
-                      className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center">
-                      <User size={22} className="text-secondary" />
+            (() => {
+              const isStaffUser = userRole === 'staff';
+              const headerDisplayName = isStaffUser 
+                ? (currentStaff?.name || 'Profissional')
+                : (barberProfile.name || 'Barbeiro');
+              const headerDisplayPhoto = isStaffUser 
+                ? (currentStaff?.photo || undefined)
+                : (barberProfile.photo || undefined);
+
+              return (
+                <div className="flex items-center gap-3">
+                  {/* Foto de perfil — maior e com ring colorido */}
+                  <button
+                    onClick={() => setShowProfileModal(true)}
+                    className="relative flex-shrink-0"
+                  >
+                    <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-secondary/30 shadow-md shadow-secondary/20 bg-surface/80 ">
+                      {headerDisplayPhoto ? (
+                        <img src={headerDisplayPhoto} alt={headerDisplayName}
+                          className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <User size={22} className="text-secondary" />
+                        </div>
+                      )}
                     </div>
-                  )}
+                    {/* Dot de status online */}
+                    <span className="absolute bottom-0.5 right-0.5 w-3 h-3 bg-[#3CB878] rounded-full border-2 border-white " />
+                  </button>
+                  {/* Texto em 2 linhas */}
+                  <div className="flex flex-col leading-tight">
+                    <span className="text-[12px] font-normal text-white/65 uppercase tracking-[1.2px]">
+                      {getGreetingOnly()}
+                    </span>
+                    <span className="text-[20px] font-bold text-white leading-snug">
+                      {headerDisplayName} {getGreetingEmoji()}
+                    </span>
+                  </div>
                 </div>
-                {/* Dot de status online */}
-                <span className="absolute bottom-0.5 right-0.5 w-3 h-3 bg-[#3CB878] rounded-full border-2 border-white " />
-              </button>
-              {/* Texto em 2 linhas */}
-              <div className="flex flex-col leading-tight">
-                <span className="text-[12px] font-normal text-white/65 uppercase tracking-[1.2px]">
-                  {getGreetingOnly()}
-                </span>
-                <span className="text-[20px] font-bold text-white leading-snug">
-                  {barberProfile.name || 'Barbeiro'} {getGreetingEmoji()}
-                </span>
-              </div>
-            </div>
+              );
+            })()
           ) : (
             <button 
               onClick={() => setActiveTab('agenda')}
@@ -1142,7 +1179,7 @@ export const AdminApp: React.FC = () => {
 
       {/* Modais Globais */}
       <AnimatePresence>
-        {showSetup && (
+        {showSetup && !onboardingState?.isStaffMember && userRole !== 'staff' && (
           <SetupWizard onComplete={handleCompleteSetup} />
         )}
 
@@ -1335,7 +1372,7 @@ const AgendaView: React.FC<{
     onSuccess?: (msg: string) => void;
     onNavigateToCaixa?: () => void;
 }> = ({ selectedDate, setSelectedDate, onOpenCustomer, showWeeklyModal, setShowWeeklyModal, onReschedule, onAddInSlot, handleCameraClick, onSuccess, onNavigateToCaixa }) => {
-  const { appointments, finishAppointment, revertAppointment, deleteAppointment, blockedSlots, unblockedSlots, toggleSlotAvailability, toggleSlotUnblock, weeklySchedule, markNoShow, toggleWeeklyBreak, fetchAppointmentsByDate, staff, selectedStaffId, setSelectedStaffId, barberProfile, activeTenant, session, userRole } = useStore();
+  const { appointments, finishAppointment, revertAppointment, deleteAppointment, blockedSlots, unblockedSlots, toggleSlotAvailability, toggleSlotUnblock, weeklySchedule, markNoShow, toggleWeeklyBreak, fetchAppointmentsByDate, staff, currentStaff, selectedStaffId, setSelectedStaffId, barberProfile, activeTenant, session, userRole } = useStore();
   
   useEffect(() => {
     fetchAppointmentsByDate(selectedDate);
@@ -2043,12 +2080,15 @@ const AgendaView: React.FC<{
                           const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
                           const isSelf = (
                             selectedTeamMember.id === session?.user?.id ||
-                            selectedTeamMember.userId === session?.user?.id ||
-                            selectedTeamMember.id === tenantOwnerId ||
-                            selectedTeamMember.userId === tenantOwnerId ||
-                            (userRole === 'admin_owner' && (selectedTeamMember.role === 'admin' || selectedTeamMember.role === 'admin_owner'))
+                            selectedTeamMember.userId === session?.user?.id
                           );
-                          const memberPhoto = selectedTeamMember.photo || (isSelf ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+                          const isOwner = (
+                            selectedTeamMember.role === 'admin' || 
+                            selectedTeamMember.role === 'admin_owner' || 
+                            selectedTeamMember.id === tenantOwnerId || 
+                            selectedTeamMember.userId === tenantOwnerId
+                          );
+                          const memberPhoto = selectedTeamMember.photo || (isSelf ? currentStaff?.photo : undefined) || (isOwner ? barberProfile?.photo : undefined);
                           return (
                             <>
                               {memberPhoto ? (
@@ -2097,16 +2137,19 @@ const AgendaView: React.FC<{
                 {/* Staff Members List */}
                 {fullStaffList.map((member) => {
                   const isSelected = teamFilter === member.id || teamFilter === member.userId;
-                  const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
                   const isSelf = (
                     member.id === session?.user?.id ||
-                    member.userId === session?.user?.id ||
-                    member.id === tenantOwnerId ||
-                    member.userId === tenantOwnerId ||
-                    (userRole === 'admin_owner' && (member.role === 'admin' || member.role === 'admin_owner'))
+                    member.userId === session?.user?.id
+                  );
+                  const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
+                  const isOwner = (
+                    member.role === 'admin' || 
+                    member.role === 'admin_owner' || 
+                    member.id === tenantOwnerId || 
+                    member.userId === tenantOwnerId
                   );
 
-                  const memberPhoto = member.photo || (isSelf ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+                  const memberPhoto = member.photo || (isSelf ? currentStaff?.photo : undefined) || (isOwner ? barberProfile?.photo : undefined);
 
                   return (
                     <button
@@ -2987,15 +3030,18 @@ const AgendaView: React.FC<{
                 <div className="grid grid-cols-2 gap-2.5">
                   {fullStaffList.map((member) => {
                     const isSelected = teamFilter === member.id || teamFilter === member.userId;
-                    const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
                     const isSelf = (
                       member.id === session?.user?.id ||
-                      member.userId === session?.user?.id ||
-                      member.id === tenantOwnerId ||
-                      member.userId === tenantOwnerId ||
-                      (userRole === 'admin_owner' && (member.role === 'admin' || member.role === 'admin_owner'))
+                      member.userId === session?.user?.id
                     );
-                    const memberPhoto = member.photo || (isSelf ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+                    const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
+                    const isOwner = (
+                      member.role === 'admin' || 
+                      member.role === 'admin_owner' || 
+                      member.id === tenantOwnerId || 
+                      member.userId === tenantOwnerId
+                    );
+                    const memberPhoto = member.photo || (isSelf ? currentStaff?.photo : undefined) || (isOwner ? barberProfile?.photo : undefined);
                     const shortName = formatProfessionalShortName(member.name);
 
                     return (
@@ -4033,17 +4079,71 @@ const ProfileModal: React.FC<{
     onSuccess?: (msg: string) => void;
 }> = ({ onClose, onSuccess }) => {
     useLockBodyScroll();
-    const { barberProfile, updateBarberProfile } = useStore();
-    const [formData, setFormData] = useState<BarberProfile>(barberProfile);
+    const { barberProfile, updateBarberProfile, userRole, currentStaff, updateStaff, session } = useStore();
+    const isStaff = userRole === 'staff';
+
+    const initialName = isStaff
+      ? (currentStaff?.name || '')
+      : (barberProfile.name || '');
+    const initialPhone = isStaff
+      ? (currentStaff?.phone || '')
+      : (barberProfile.personalPhone || barberProfile.phone || '');
+    const initialPhoto = isStaff
+      ? (currentStaff?.photo || '')
+      : (barberProfile.photo || '');
+
+    const [formData, setFormData] = useState<BarberProfile>(() => {
+      if (isStaff) {
+        return {
+          name: initialName,
+          personalPhone: initialPhone,
+          phone: initialPhone,
+          photo: initialPhoto,
+          shopName: '',
+          businessPhone: '',
+          address: '',
+          logo: '',
+          description: '',
+          instagram: '',
+          website: '',
+          slug: ''
+        };
+      }
+      return {
+        ...barberProfile,
+        name: initialName,
+        personalPhone: initialPhone,
+        phone: initialPhone,
+        photo: initialPhoto
+      };
+    });
+
     const [modalTab, setModalTab] = useState<'personal' | 'business'>('personal');
     const logoInputRef = useRef<HTMLInputElement>(null);
     const photoInputRef = useRef<HTMLInputElement>(null);
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        updateBarberProfile(formData);
-        onSuccess?.('Perfil atualizado com sucesso!');
-        onClose();
+        try {
+          if (isStaff) {
+            const staffId = currentStaff?.id || session?.user?.id;
+            if (staffId) {
+              await updateStaff(staffId, {
+                name: formData.name,
+                phone: formData.personalPhone,
+                photo: formData.photo !== undefined ? formData.photo : null
+              });
+            }
+            onSuccess?.('Perfil atualizado com sucesso!');
+            onClose();
+          } else {
+            await updateBarberProfile(formData);
+            onSuccess?.('Perfil atualizado com sucesso!');
+            onClose();
+          }
+        } catch (err: any) {
+          console.error('[PROFILE_SUBMIT_ERROR]', err);
+        }
     };
 
     const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -4062,28 +4162,30 @@ const ProfileModal: React.FC<{
 
     return (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-surface/40 backdrop-blur-md animate-in fade-in">
-            <div className="bg-surface  w-full max-w-[95%] sm:max-w-sm rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] relative border border-title/30 ">
-                <header className="p-6 border-b border-title/30  flex justify-between items-center shrink-0 bg-surface  sticky top-0 z-10">
+            <div className="bg-surface w-full max-w-[95%] sm:max-w-sm rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] relative border border-title/30 ">
+                <header className="p-6 border-b border-title/30 flex justify-between items-center shrink-0 bg-surface sticky top-0 z-10">
                     <div>
-                        <h2 className="text-lg font-bold text-white  uppercase tracking-tight">Meu Perfil</h2>
-                        <p className="text-[10px] text-title font-medium uppercase tracking-widest">Personalize seu Aplicativo</p>
+                        <h2 className="text-lg font-bold text-white uppercase tracking-tight">Meu Perfil</h2>
+                        <p className="text-[10px] text-title font-medium uppercase tracking-widest">{isStaff ? 'Seus Dados de Acesso' : 'Personalize seu Aplicativo'}</p>
                     </div>
-                    <button onClick={onClose} className="w-10 h-10 rounded-full bg-primary/40  flex items-center justify-center text-title hover:bg-primary/40 :bg-surface transition-colors">
+                    <button onClick={onClose} className="w-10 h-10 rounded-full bg-primary/40 flex items-center justify-center text-title hover:bg-primary/40 :bg-surface transition-colors">
                       <X size={20} />
                     </button>
                 </header>
                 
-                <div className="flex border-b border-title/30  shrink-0 bg-surface  sticky top-[88px] z-10">
-                   <button onClick={() => setModalTab('personal')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-colors ${modalTab === 'personal' ? 'text-secondary border-b-2 border-secondary' : 'text-title'}`}>Pessoal</button>
-                   <button onClick={() => setModalTab('business')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-colors ${modalTab === 'business' ? 'text-secondary border-b-2 border-secondary' : 'text-title'}`}>Negócio</button>
-                </div>
+                {!isStaff && (
+                  <div className="flex border-b border-title/30 shrink-0 bg-surface sticky top-[88px] z-10">
+                     <button onClick={() => setModalTab('personal')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-colors ${modalTab === 'personal' ? 'text-secondary border-b-2 border-secondary' : 'text-title'}`}>Pessoal</button>
+                     <button onClick={() => setModalTab('business')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-colors ${modalTab === 'business' ? 'text-secondary border-b-2 border-secondary' : 'text-title'}`}>Negócio</button>
+                  </div>
+                )}
                 
                 <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
                   <div className="p-6 overflow-y-auto space-y-6 flex-1 min-h-0">
-                      {modalTab === 'personal' ? (
+                      {isStaff || modalTab === 'personal' ? (
                         <div className="space-y-4">
                           <div className="flex flex-col items-center gap-3">
-                              <div onClick={() => photoInputRef.current?.click()} className="w-20 h-20 rounded-full bg-primary/40  border-2 border-dashed border-title/30  flex items-center justify-center overflow-hidden cursor-pointer">
+                              <div onClick={() => photoInputRef.current?.click()} className="w-20 h-20 rounded-full bg-primary/40 border-2 border-dashed border-title/30 flex items-center justify-center overflow-hidden cursor-pointer">
                                   {formData.photo ? <img src={formData.photo} className="w-full h-full object-cover" alt="Foto" /> : <User size={32} className="text-title" />}
                               </div>
                               <input type="file" ref={photoInputRef} className="hidden" accept="image/*" onChange={handlePhotoUpload} />
@@ -4095,7 +4197,7 @@ const ProfileModal: React.FC<{
                       ) : (
                         <div className="space-y-4">
                           <div className="flex flex-col items-center gap-3">
-                              <div onClick={() => logoInputRef.current?.click()} className="w-20 h-20 rounded-2xl bg-primary/40  border-2 border-dashed border-title/30  flex items-center justify-center overflow-hidden cursor-pointer">
+                              <div onClick={() => logoInputRef.current?.click()} className="w-20 h-20 rounded-2xl bg-primary/40 border-2 border-dashed border-title/30 flex items-center justify-center overflow-hidden cursor-pointer">
                                   {formData.logo ? <img src={formData.logo} className="w-full h-full object-cover" alt="Logo" /> : <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-title" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>}
                               </div>
                               <input type="file" ref={logoInputRef} className="hidden" accept="image/*" onChange={handleLogoUpload} />
@@ -4113,7 +4215,7 @@ const ProfileModal: React.FC<{
                       )}
                   </div>
                   
-                  <footer className="p-6 border-t border-title/30  shrink-0 bg-surface  sticky bottom-0 z-10 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+                  <footer className="p-6 border-t border-title/30 shrink-0 bg-surface sticky bottom-0 z-10 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
                     <Button type="submit" fullWidth className="h-14 font-black uppercase tracking-widest shadow-xl shadow-secondary/20">
                       Salvar Perfil
                     </Button>
@@ -4523,10 +4625,6 @@ const WeeklyConfigModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               <button 
                 onClick={() => {
                   const newValue = !currentConfig?.isOpen;
-                  console.group(`[DEBUG-AGENDA] AdminApp - Alterando dia ${selectedDay}`);
-                  console.log(`[DEBUG-AGENDA] is_open alterado para:`, newValue);
-                  console.log(`[DEBUG-AGENDA] Tipo de is_open:`, typeof newValue);
-                  console.groupEnd();
                   updateDayConfig(selectedDay, { isOpen: newValue });
                 }} 
                 className={`w-12 h-7 rounded-full transition-colors relative ${currentConfig?.isOpen ? 'bg-green-500' : 'bg-title/30 '}`}
@@ -4779,7 +4877,6 @@ const CustomerDetail: React.FC<{
       const actualNoShowCount = (appointmentsData || []).filter(a => a.status === 'no-show').length;
 
       if (actualCutCount !== customer.cutCount || actualNoShowCount !== (customer.noShowCount || 0)) {
-        console.log(`Sincronizando contadores para ${customer.name}: Cortes ${customer.cutCount} -> ${actualCutCount}, Faltas ${customer.noShowCount || 0} -> ${actualNoShowCount}`);
         updateCustomer(customer.phone, { cutCount: actualCutCount, noShowCount: actualNoShowCount });
       }
 

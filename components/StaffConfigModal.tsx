@@ -126,13 +126,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
       setEmail('');
       setPassword('');
       setRole(currentRole);
-
-      console.log('[team] edit member open', {
-        id: member.id,
-        name: member.name,
-        isOwner
-      });
-      console.log('[team] current role loaded', { role: currentRole });
     } else {
       setName('');
       setPhone('');
@@ -150,16 +143,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
     e.preventDefault();
     if (!name.trim()) return;
     setIsSubmitting(true);
-    
-    console.log('[CREATE_STAFF_UI_01] Iniciando envio do formulário de criação/edição de profissional:', {
-      isEditing: !!selectedStaffMember,
-      email: email.trim() || undefined,
-      role,
-      name: name.trim(),
-      phone: phone.trim(),
-      commissionRate: parseFloat(commission) || 0,
-      hasPassword: !!password.trim()
-    });
 
     try {
       const commRate = parseFloat(commission) || 0;
@@ -167,23 +150,12 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
         const isOwner = isOwnerMember(selectedStaffMember);
         const finalRole = isOwner ? 'admin' : role;
 
-        console.log('[team] role change requested', {
-          memberId: selectedStaffMember.id,
-          oldRole: selectedStaffMember.role,
-          newRole: finalRole
-        });
-
         await updateStaff(selectedStaffMember.id, {
           name: name.trim(),
           phone: phone.trim(),
           commissionRate: commRate,
           status: status,
           photo: photo || undefined,
-          role: finalRole
-        });
-
-        console.log('[team] role persisted', {
-          memberId: selectedStaffMember.id,
           role: finalRole
         });
 
@@ -196,12 +168,9 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
             photo: photo || barberProfile.photo
           });
         }
-
-        console.log('[team] team state refreshed');
       } else {
         // Se preencheu e-mail, cria direto com e-mail e senha!
         if (email.trim()) {
-          console.log('[CREATE_STAFF_UI_01a] Acionando createStaffDirectly via Edge Function...');
           await createStaffDirectly({
             email: email.trim(),
             password: password.trim() || undefined,
@@ -212,7 +181,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
           });
         } else {
           // Fallback se não preencheu e-mail
-          console.log('[CREATE_STAFF_UI_01b] Acionando addStaff (método local padrão sem conta de usuário)...');
           await addStaff({
             name: name.trim(),
             phone: phone.trim(),
@@ -223,7 +191,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
           });
         }
       }
-      console.log('[CREATE_STAFF_UI_01c] Fluxo de salvar concluído com sucesso!');
       setView('list');
     } catch (err: any) {
       console.error('[CREATE_STAFF_UI_02] Erro capturado na UI durante a criação de profissional:', {
@@ -444,7 +411,7 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                   {staffListToRender.map((member) => {
                     const isOwner = isOwnerMember(member);
                     const showYou = isCurrentUser(member);
-                    const memberPhoto = member.photo || (isOwner ? (barberProfile?.photo || session?.user?.user_metadata?.avatar_url) : undefined);
+                    const memberPhoto = member.photo || (isOwner ? barberProfile?.photo : undefined);
                     
                     return (
                       <div 
@@ -670,10 +637,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                         onClick={() => {
                           if (role !== 'staff') {
                             setRole('staff');
-                            console.log('[team] role change requested', {
-                              memberId: selectedStaffMember?.id,
-                              newRole: 'staff'
-                            });
                           }
                         }}
                         className={`p-3.5 rounded-2xl font-bold text-xs border flex flex-col items-center gap-1.5 transition-all active:scale-95 ${
@@ -692,10 +655,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                         onClick={() => {
                           if (role !== 'admin') {
                             setRole('admin');
-                            console.log('[team] role change requested', {
-                              memberId: selectedStaffMember?.id,
-                              newRole: 'admin'
-                            });
                           }
                         }}
                         className={`p-3.5 rounded-2xl font-bold text-xs border flex flex-col items-center gap-1.5 transition-all active:scale-95 ${

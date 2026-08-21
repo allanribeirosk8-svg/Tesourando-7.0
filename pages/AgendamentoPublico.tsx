@@ -124,13 +124,8 @@ export default function AgendamentoPublico() {
 
   useEffect(() => {
     async function loadData() {
-      console.group('[AGENDAMENTO PUBLICO] loadData iniciado');
-      console.log('[AGENDAMENTO PUBLICO] slug recebido:', slug);
-
       if (!slug) {
-        console.warn('[AGENDAMENTO PUBLICO] ⚠️ slug está undefined/null');
         setStep(6);
-        console.groupEnd();
         return;
       }
       try {
@@ -139,9 +134,6 @@ export default function AgendamentoPublico() {
           .select('id, name, shop_name, description, photo, logo, instagram, slug')
           .eq('slug', slug)
           .single();
-          
-        console.log('[AGENDAMENTO PUBLICO] profile encontrado:', prof);
-        console.log('[AGENDAMENTO PUBLICO] erro no profile:', profErr);
 
         if (profErr || !prof) throw new Error('Barbeiro não encontrado');
         setProfile(prof);
@@ -151,17 +143,8 @@ export default function AgendamentoPublico() {
           .select('*')
           .eq('user_id', prof.id)
           .order('order_index');
-        
-        console.log('[AGENDAMENTO PUBLICO] prof.id usado para buscar serviços:', prof.id);
-        console.log('[AGENDAMENTO PUBLICO] serviços retornados:', serv);
-        console.log('[AGENDAMENTO PUBLICO] quantidade de serviços:', serv?.length ?? 0);
-        console.log('[AGENDAMENTO PUBLICO] erro nos serviços:', servErr);
 
         if (!servErr && serv) {
-          if (serv.length === 0) {
-            console.warn('[AGENDAMENTO PUBLICO] ⚠️ NENHUM SERVIÇO encontrado para user_id:', prof.id);
-            console.warn('[AGENDAMENTO PUBLICO] Verifique se os serviços foram salvos com este user_id no banco');
-          }
           setServices(serv);
           if (serv.length === 1) {
             setSelectedServices([serv[0]]);
@@ -174,9 +157,6 @@ export default function AgendamentoPublico() {
           .eq('user_id', prof.id);
         
         if (!schedErr && sched) {
-          console.group('[DEBUG-AGENDA] Momento 2 - Inicialização AgendamentoPublico');
-          console.log('[DEBUG-AGENDA] Schedule carregado do DB:', sched);
-          console.groupEnd();
           setSchedule(sched);
         }
 
@@ -188,16 +168,35 @@ export default function AgendamentoPublico() {
           .eq('status', 'active');
 
         if (!staffErr && dbStaff && dbStaff.length > 0) {
-          const mappedStaff = dbStaff.map((s: any) => ({
-            id: s.id,
-            tenantId: s.tenant_id,
-            userId: s.user_id,
-            name: s.name,
-            phone: s.phone,
-            photo: s.photo,
-            status: s.status,
-            commissionRate: s.commission_rate
-          }));
+          const userIds = dbStaff.map((s: any) => s.user_id).filter(Boolean);
+          const profilesMap: Record<string, any> = {};
+          if (userIds.length > 0) {
+            try {
+              const { data: profs } = await supabase
+                .from('profiles')
+                .select('id, name, photo, avatar')
+                .in('id', userIds);
+              if (profs) {
+                profs.forEach((p: any) => {
+                  profilesMap[p.id] = p;
+                });
+              }
+            } catch {}
+          }
+
+          const mappedStaff = dbStaff.map((s: any) => {
+            const userProf = s.user_id ? profilesMap[s.user_id] : null;
+            return {
+              id: s.id,
+              tenantId: s.tenant_id,
+              userId: s.user_id,
+              name: s.name || userProf?.name || 'Profissional',
+              phone: s.phone,
+              photo: s.photo || userProf?.photo || userProf?.avatar || undefined,
+              status: s.status,
+              commissionRate: s.commission_rate
+            };
+          });
           setStaff(mappedStaff);
 
           // Fetch staff availabilities
@@ -224,8 +223,6 @@ export default function AgendamentoPublico() {
       } catch (err) {
         console.error('[AGENDAMENTO PUBLICO] ❌ Erro fatal:', err);
         setStep(6);
-      } finally {
-        console.groupEnd();
       }
     }
     loadData();
@@ -766,13 +763,6 @@ export default function AgendamentoPublico() {
                         const dayEntry = schedule.find(sch => sch.day_of_week === dow);
                         const isOpen = dayEntry?.is_open;
                         const isDisabled = isPast || !isOpen;
-
-                        console.log(`[DEBUG-AGENDA] Render Dia ${dow}`);
-                        console.log(`  Entrada no schedule? ${!!dayEntry}`);
-                        console.log(`  Valor is_open: ${isOpen} (Tipo: ${typeof isOpen})`);
-                        console.log(`  is_open é undefined? ${isOpen === undefined}`);
-                        console.log(`  Comparações => !isOpen: ${!isOpen} | isOpen !== true: ${isOpen !== true}`);
-                        console.log(`  isDisabled final: ${isDisabled}`);
                         
                         dates.push({ d, isToday, isTomorrow, isPast, isOpen, dow, i });
                       }
@@ -1359,15 +1349,6 @@ export default function AgendamentoPublico() {
                   const dayEntry = schedule.find(sch => sch.day_of_week === dow);
                   const isOpen = dayEntry?.is_open;
                   const isDisabled = isPast || !isOpen;
-
-                  if (i <= 7) { // Só loga os primeiros dias para não floodar
-                    console.log(`[DEBUG-AGENDA-MODAL] Render Dia ${dow} (Data: ${i})`);
-                    console.log(`  Entrada no schedule? ${!!dayEntry}`);
-                    console.log(`  Valor is_open: ${isOpen} (Tipo: ${typeof isOpen})`);
-                    console.log(`  is_open é undefined? ${isOpen === undefined}`);
-                    console.log(`  Comparações => !isOpen: ${!isOpen} | isOpen !== true: ${isOpen !== true}`);
-                    console.log(`  isDisabled final: ${isDisabled}`);
-                  }
                   
                   const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                   const isSelected = selectedDate === dateStr;

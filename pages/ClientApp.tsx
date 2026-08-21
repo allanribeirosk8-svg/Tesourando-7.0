@@ -245,7 +245,6 @@ export const ClientApp: React.FC = () => {
 
           <div className="space-y-3">
             <Button fullWidth onClick={() => {
-              console.log("6. Modal fechado");
               setStep('welcome');
               setFormData({
                 name: '',

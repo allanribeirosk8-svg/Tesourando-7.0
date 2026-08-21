@@ -82,6 +82,7 @@ export const AppProvider: React.FC<{
   // Multi-tenant & Multi-staff state declarations
   const [activeTenant, setActiveTenant] = useState<any | null>(null);
   const [staff, setStaff] = useState<any[]>([]);
+  const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
   const [userRole, setUserRole] = useState<'admin_owner' | 'staff' | 'client' | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
 
@@ -263,6 +264,41 @@ export const AppProvider: React.FC<{
     }
   }, [loadBarbershopData]);
 
+  const sanitizeSessionLog = (user: any) => {
+    if (!user) return null;
+    const meta = user.user_metadata || {};
+    return {
+      id: user.id,
+      email: user.email,
+      role: meta.role || 'staff',
+      name: meta.name || meta.full_name || '',
+      full_name: meta.full_name || '',
+      photo_size: meta.photo ? `${meta.photo.length} chars` : 0,
+      avatar_url_size: meta.avatar_url ? `${meta.avatar_url.length} chars` : 0
+    };
+  };
+
+  const sanitizeOnboardingLog = (state: any) => {
+    if (!state) return null;
+    return {
+      userId: state.userId,
+      status: state.status,
+      isComplete: state.isComplete,
+      step: state.step,
+      isStaffMember: state.isStaffMember,
+      hasOwnerMembership: state.hasOwnerMembership,
+      hasBarbershop: state.hasBarbershop,
+      barbershop: state.barbershop ? { id: state.barbershop.id, name: state.barbershop.name } : null,
+      membership: state.membership,
+      staffProfile: state.staffProfile ? {
+        id: state.staffProfile.id,
+        name: state.staffProfile.name,
+        role: state.staffProfile.role,
+        photo_size: state.staffProfile.photo ? `${state.staffProfile.photo.length} chars` : 0
+      } : null
+    };
+  };
+
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -280,19 +316,22 @@ export const AppProvider: React.FC<{
         
         // Determine which user's data to fetch
         let targetId: string | null = null;
+        let onbState: any = null;
         if (currentSession?.user?.id) {
-          const onbState = await supabaseService.resolveOnboardingState(currentSession.user.id);
+          const sessionUserId = currentSession.user.id;
+          onbState = await supabaseService.resolveOnboardingState(sessionUserId);
           setOnboardingState(onbState);
-          if (onbState.profile) {
+          if (onbState.profile && onbState.hasOwnerMembership) {
             setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
           }
 
-          targetId = await supabaseService.getTenantIdForUser(currentSession.user.id); // mapeia colaborador para o ID do tenant
+          // targetId deve ser SEMPRE o ID da barbearia / tenant (membership.barbershop_id), NUNCA o user_id do colaborador
+          const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
+          targetId = membershipBarbershopId;
         } else {
           // visitante: busca público
           targetId = await supabaseService.getPublicBarberId();
         }
-        console.log('[STORE loadData] targetId resolvido:', targetId, '| fonte:', currentSession?.user?.id ? 'session' : 'getPublicBarberId');
 
         setBarberId(targetId);
         
@@ -308,16 +347,7 @@ export const AppProvider: React.FC<{
           ] = await Promise.all([
             supabaseService.getAppointments(targetId),
             supabaseService.getCustomers(targetId),
-            supabaseService.getServices(targetId).then(data => {
-              console.group('[STORE loadData] serviços');
-              console.log('targetId usado na busca:', targetId);
-              console.log('session.user.id:', currentSession?.user?.id);
-              console.log('targetId === session.user.id?', targetId === currentSession?.user?.id);
-              console.log('dados retornados do banco:', data);
-              console.log('quantidade:', data?.length ?? 0);
-              console.groupEnd();
-              return data;
-            }),
+            supabaseService.getServices(targetId),
             supabaseService.getProfile(targetId),
             supabaseService.getWeeklySchedule(targetId),
             supabaseService.getBlockedSlots(targetId),
@@ -337,8 +367,6 @@ export const AppProvider: React.FC<{
           }
           
           const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
-          console.log('[STORE loadData] setServices com:', finalServices.map(s => s.name));
-          console.log('[STORE loadData] motivo:', dbServices?.length > 0 ? 'banco' : '⚠️ DEFAULT (banco vazio ou null)');
           setServices(finalServices);
           
           setBarberProfile(dbProfile || DEFAULT_PROFILE);
@@ -349,8 +377,8 @@ export const AppProvider: React.FC<{
           // Multi-tenant & Multi-staff load
           const tenantInfo = {
             id: targetId,
-            name: dbProfile?.shopName || 'Meu Corte',
-            slug: dbProfile?.slug || '',
+            name: onbState?.barbershop?.name || dbProfile?.shopName || 'Meu Corte',
+            slug: onbState?.barbershop?.slug || dbProfile?.slug || '',
             logo: dbProfile?.logo,
             businessPhone: dbProfile?.businessPhone,
             address: dbProfile?.address,
@@ -363,16 +391,45 @@ export const AppProvider: React.FC<{
           setStaff(dbStaff);
 
           let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
-          if (currentSession?.user?.id === targetId) {
-            resolvedRole = 'admin_owner';
-            setUserRole('admin_owner');
-          } else if (currentSession?.user?.id) {
-            const isStaff = dbStaff.some((s: any) => s.userId === currentSession.user.id);
-            resolvedRole = isStaff ? 'staff' : 'client';
-            setUserRole(resolvedRole);
-          } else {
-            setUserRole(null);
+          const sessionUserId = currentSession?.user?.id || null;
+          
+          if (sessionUserId) {
+            const memberRole = onbState?.membership?.role;
+            if (memberRole === 'owner') {
+              resolvedRole = 'admin_owner';
+            } else if (memberRole === 'admin' || memberRole === 'staff') {
+              resolvedRole = 'staff';
+            } else if (onbState?.isStaffMember) {
+              resolvedRole = 'staff';
+            } else if (onbState?.hasOwnerMembership || onbState?.barbershop?.ownerId === sessionUserId) {
+              resolvedRole = 'admin_owner';
+            } else {
+              const isStaff = dbStaff && dbStaff.some((s: any) => s.userId === sessionUserId);
+              resolvedRole = isStaff ? 'staff' : 'client';
+            }
           }
+
+          setUserRole(resolvedRole);
+
+          // Resolver colaborador ativo atual
+          let activeStaffUser: Staff | null = null;
+          if (sessionUserId) {
+            activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
+            if (!activeStaffUser && (resolvedRole === 'staff' || onbState?.isStaffMember)) {
+              activeStaffUser = {
+                id: sessionUserId,
+                tenantId: targetId || sessionUserId,
+                userId: sessionUserId,
+                name: 'Profissional',
+                phone: '',
+                photo: undefined,
+                status: 'active',
+                commissionRate: 0,
+                role: 'staff'
+              };
+            }
+          }
+          setCurrentStaff(activeStaffUser);
 
           if (resolvedRole && resolvedRole !== 'client') {
             const dbNotifications = await supabaseService.getNotifications(targetId, resolvedRole, currentSession?.user?.id);
@@ -525,17 +582,13 @@ export const AppProvider: React.FC<{
       });
 
       const authResult = supabase.auth.onAuthStateChange((event, newSession) => {
-        console.log('[AUTH] evento:', event);
-        console.log('[AUTH] session recebida:', newSession);
-        console.log('[AUTH] session.user?.id:', newSession?.user?.id);
-        console.log("Auth event:", event);
         setSession(newSession);
         
         if (event === 'SIGNED_OUT') {
           resetStore();
         }
         
-        if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'TOKEN_REFRESHED') {
+        if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
           loadData();
         }
       });
@@ -571,7 +624,6 @@ export const AppProvider: React.FC<{
             filter: `user_id=eq.${currentSession.user.id}`
           },
           (payload) => {
-            console.log("Realtime evento recebido:", payload);
             const { eventType, new: newRecord, old: oldRecord } = payload;
 
             if (eventType === 'INSERT' || eventType === 'UPDATE') {
@@ -595,7 +647,6 @@ export const AppProvider: React.FC<{
                   // If it exists, update it but ONLY if the new data is complete
                   // This prevents REPLICA IDENTITY issues where 'new' might be incomplete
                   if (!apt.date || !apt.time || !apt.clientName) {
-                    console.log('Ignoring incomplete Realtime update for existing appointment:', apt.id);
                     return prev;
                   }
                   const next = [...prev];
@@ -606,7 +657,6 @@ export const AppProvider: React.FC<{
                 if (eventType === 'INSERT') {
                   // If the record is incomplete, don't add it - wait for the manual fetch or a better event
                   if (!apt.date || !apt.time || !apt.clientName) {
-                    console.log('Ignoring incomplete Realtime INSERT:', apt.id);
                     return prev;
                   }
 
@@ -670,8 +720,6 @@ export const AppProvider: React.FC<{
     const currentSession = sessionRef.current;
     if (!currentSession) return;
     
-    console.log('[LOAD_TRANSACTIONS] startDate:', startDate, '| endDate:', endDate);
-    
     const resolvedTenantId = barberId || currentSession.user.id;
     const memberIds = await supabaseService.getTenantMemberIds(resolvedTenantId);
     const { data, error } = await supabase
@@ -682,7 +730,6 @@ export const AppProvider: React.FC<{
       .lte('date', `${endDate}T23:59:59`)
       .order('date', { ascending: false });
     if (!error && data) {
-      console.log('[LOAD_TRANSACTIONS] registros retornados:', data?.map((t: any) => ({ id: t.id, date: t.date, description: t.description })));
       setTransactions(data.map((t: any) => ({
         id: t.id,
         type: t.type,
@@ -703,22 +750,10 @@ export const AppProvider: React.FC<{
     if (!currentSession) return;
 
     if (userRole === 'client') {
-      console.error('[ADD_TRANSACTION] Não autorizado: usuário é cliente');
       throw new Error("Não autorizado. Apenas administradores e colaboradores podem gerenciar transações.");
     }
-
-    console.log('[ADD_TRANSACTION] date recebida:', t.date);
     
     const resolvedTenantId = barberId || currentSession.user.id;
-    console.log('[ADD_TRANSACTION] payload enviado ao Supabase:', {
-      date: t.date,
-      type: t.type,
-      amount: t.amount,
-      description: t.description,
-      tenantId: resolvedTenantId,
-      staffId: t.staffId
-    });
-
     const insertPayload: any = {
       user_id: resolvedTenantId,
       type: t.type,
@@ -940,8 +975,6 @@ export const AppProvider: React.FC<{
   }, [activeTenant, barberId]);
 
   const addAppointment = useCallback(async (apt: Appointment, isExceptional?: boolean) => {
-    console.log("1. Iniciando criação do agendamento");
-    
     // 1. Time normalization
     const normalizedTimeValue = normalizeTime(apt.time);
     if (!normalizedTimeValue) {
@@ -989,11 +1022,8 @@ export const AppProvider: React.FC<{
       return;
     }
 
-    console.log("2. Dados do agendamento:", finalApt);
-    
     setAppointments(prev => {
       const next = [...prev, finalApt];
-      console.log("5. Estado local atualizado:", next);
       return next;
     });
     
@@ -1027,17 +1057,13 @@ export const AppProvider: React.FC<{
       const targetId = sessionRef.current?.user?.id || barberId;
 
       if (targetId) {
-        console.log("3. Enviando para Supabase...");
         try {
           const savedApt = await supabaseService.saveAppointment(finalApt, targetId);
-          console.log("4. Resposta do Supabase:", { data: savedApt, error: null });
-          
           const normalizedSavedApt = normalizeAppointment(savedApt);
 
           // Update state with the real ID from Supabase
           setAppointments(prev => {
             const next = prev.map(a => a.id === finalApt.id ? normalizedSavedApt : a);
-            console.log("5. Estado local atualizado (com ID real):", next);
             return next;
           });
           
@@ -1055,7 +1081,6 @@ export const AppProvider: React.FC<{
             photos: [] 
           }, targetId);
         } catch (err) {
-          console.log("4. Resposta do Supabase:", { data: null, error: err });
           throw err;
         }
       }
@@ -1184,9 +1209,6 @@ export const AppProvider: React.FC<{
               .maybeSingle();
 
             if (!existingTx) {
-              console.log('[FINISH_APPOINTMENT] apt.date:', apt.date);
-              console.log('[FINISH_APPOINTMENT] date que será usada na transação:', apt.date);
-              
               addTransaction({
                 type: 'income',
                 category: 'walk_in',
@@ -1614,10 +1636,7 @@ export const AppProvider: React.FC<{
     try {
       const currentSession = sessionRef.current;
       if (currentSession) {
-        console.log('[UI] handleSaveServices chamado em addService, lista:', newList);
         const savedServices = await supabaseService.saveServices(newList);
-        console.log('[UI] saveServices retornou:', savedServices);
-        console.log('[UI] estado atualizado com IDs do banco?', savedServices.map(s => s.id));
         setServices(savedServices);
       }
     } catch (e) {
@@ -1643,14 +1662,11 @@ export const AppProvider: React.FC<{
       const sync = async () => {
         const currentSession = sessionRef.current;
         if (currentSession) {
-          console.log('[UI] handleSaveServices chamado em updateService, lista:', newList);
           try {
             const savedServices = await supabaseService.saveServices(newList);
-            console.log('[UI] saveServices retornou:', savedServices);
-            console.log('[UI] estado atualizado com IDs do banco?', savedServices.map(s => s.id));
             setServices(savedServices);
           } catch (e) {
-            console.error('[UI] ERRO ao salvar em updateService:', e);
+            console.error('ERRO ao salvar em updateService:', e);
           }
         }
       };
@@ -1661,13 +1677,27 @@ export const AppProvider: React.FC<{
 
   const updateBarberProfile = useCallback(async (profile: BarberProfile) => {
     setBarberProfile(profile);
+    const ownerUserId = sessionRef.current?.user?.id || barberId;
+    if (ownerUserId) {
+      setStaff(prev => prev.map(s => {
+        if (s.userId === ownerUserId || s.id === ownerUserId) {
+          return {
+            ...s,
+            name: profile.name || s.name,
+            phone: profile.personalPhone || profile.businessPhone || s.phone,
+            photo: profile.photo !== undefined ? profile.photo : s.photo
+          };
+        }
+        return s;
+      }));
+    }
     try {
       const currentSession = sessionRef.current;
       if (currentSession) await supabaseService.updateProfile(profile);
     } catch (e) {
       console.error("Supabase sync error in updateBarberProfile", e);
     }
-  }, []);
+  }, [barberId]);
 
   const addCustomer = useCallback(async (customer: Customer) => {
     const normalized = normalizePhone(customer.phone);
@@ -1684,7 +1714,6 @@ export const AppProvider: React.FC<{
         const targetId = sessionRef.current?.user?.id || barberId;
         if (targetId) {
           await supabaseService.saveCustomer(customer, targetId);
-          console.log("Customer saved to Supabase successfully");
         }
       } catch (e) {
         console.error("Supabase sync error in addCustomer", e);
@@ -1698,14 +1727,11 @@ export const AppProvider: React.FC<{
     const sync = async () => {
       const currentSession = sessionRef.current;
       if (currentSession) {
-        console.log('[UI] handleSaveServices chamado em reorderServices, lista:', newServices);
         try {
             const savedServices = await supabaseService.saveServices(newServices);
-            console.log('[UI] saveServices retornou:', savedServices);
-            console.log('[UI] estado atualizado com IDs do banco?', savedServices.map(s => s.id));
             setServices(savedServices);
         } catch (e) {
-            console.error('[UI] ERRO ao salvar em reorderServices:', e);
+            console.error('ERRO ao salvar em reorderServices:', e);
         }
       }
     };
@@ -1745,38 +1771,12 @@ export const AppProvider: React.FC<{
     commissionRate?: number;
     barbershopId?: string;
   }) => {
-    // Log [CREATE_STAFF_STORE_01]
-    console.log('[CREATE_STAFF_STORE_01] Entrada no callback createStaffDirectly do Store:', {
-      paramsWithoutPassword: {
-        email: params.email,
-        role: params.role,
-        name: params.name,
-        phone: params.phone,
-        commissionRate: params.commissionRate,
-        barbershopIdParam: params.barbershopId
-      },
-      currentContextBarbershopState: barbershop ? {
-        id: barbershop.id,
-        name: barbershop.name,
-        slug: barbershop.slug
-      } : null
-    });
-
     try {
       const targetBarbershopId = params.barbershopId || barbershop?.id || undefined;
-      
-      // Log [CREATE_STAFF_STORE_02]
-      console.log('[CREATE_STAFF_STORE_02] Resolvendo barbershopId a ser enviado para o serviço:', {
-        targetBarbershopId
-      });
-
       const res = await supabaseService.createStaffDirectly({
         ...params,
         barbershopId: targetBarbershopId
       });
-      
-      // Log [CREATE_STAFF_STORE_03]
-      console.log('[CREATE_STAFF_STORE_03] Sucesso ao invocar o serviço createStaffDirectly. Resposta recebida:', res);
 
       if (res && res.staff) {
         setStaff(prev => [...prev, {
@@ -1813,48 +1813,70 @@ export const AppProvider: React.FC<{
 
   const updateStaff = useCallback(async (id: string, updates: Partial<Staff>) => {
     try {
-      const targetId = sessionRef.current?.user?.id || barberId;
-      const existing = staff.find(s => s.id === id || s.userId === id);
+      const activeTenantId = activeTenant?.id || barbershop?.id || barberProfile?.id || barberId;
+      const currentSessionUserId = sessionRef.current?.user?.id;
+      const existing = staff.find(s => s.id === id || s.userId === id || (currentSessionUserId && (s.userId === currentSessionUserId || s.id === currentSessionUserId)));
       
       let payload: Staff;
       if (existing) {
         payload = { ...existing, ...updates };
       } else {
+        const isOwnerRole = updates.role === 'admin' || updates.role === 'admin_owner';
         payload = {
           id: id,
-          tenantId: targetId || id,
-          userId: id,
-          name: updates.name || barberProfile?.name || 'Administrador',
-          phone: updates.phone || barberProfile?.personalPhone || '',
-          photo: updates.photo || barberProfile?.photo,
+          tenantId: activeTenantId || id,
+          userId: updates.userId || (id === currentSessionUserId ? id : undefined) || currentSessionUserId,
+          name: updates.name || (isOwnerRole ? barberProfile?.name : 'Profissional') || 'Profissional',
+          phone: updates.phone || (isOwnerRole ? barberProfile?.personalPhone : '') || '',
+          photo: updates.photo || (isOwnerRole ? barberProfile?.photo : undefined),
           status: updates.status || 'active',
           commissionRate: updates.commissionRate ?? 100,
-          role: updates.role || 'admin',
+          role: updates.role || 'staff',
           ...updates
         };
       }
       
-      await supabaseService.saveStaff(payload);
+      const savedStaff = await supabaseService.saveStaff(payload);
+      const finalPayload: Staff = savedStaff ? {
+        id: savedStaff.id || payload.id,
+        tenantId: savedStaff.tenant_id || payload.tenantId,
+        userId: savedStaff.user_id || payload.userId,
+        name: savedStaff.name || payload.name,
+        phone: savedStaff.phone || payload.phone,
+        photo: savedStaff.photo || payload.photo,
+        status: (savedStaff.status as any) || payload.status,
+        commissionRate: savedStaff.commission_rate ?? payload.commissionRate,
+        role: (savedStaff.role === 'admin' ? 'admin' : 'staff') as 'admin' | 'staff'
+      } : payload;
+
       setStaff(prev => {
-        const index = prev.findIndex(s => s.id === id || s.userId === id);
+        const index = prev.findIndex(s => s.id === id || s.userId === id || (finalPayload.userId && s.userId === finalPayload.userId));
         if (index > -1) {
           const next = [...prev];
-          next[index] = payload;
+          next[index] = finalPayload;
           return next;
         }
-        return [...prev, payload];
+        return [...prev, finalPayload];
       });
 
-      if (payload.userId || id) {
-        const targetUserId = payload.userId || id;
+      setCurrentStaff(prev => {
+        if (!prev) return finalPayload;
+        if (prev.id === id || prev.userId === id || (finalPayload.userId && prev.userId === finalPayload.userId) || (currentSessionUserId && (prev.userId === currentSessionUserId || prev.id === currentSessionUserId))) {
+          return { ...prev, ...finalPayload };
+        }
+        return prev;
+      });
+
+      if (finalPayload.userId || id) {
+        const targetUserId = finalPayload.userId || id;
         setBarbershopMembers(prev => {
           return prev.map(m => {
             if (m.userId === targetUserId) {
               return {
                 ...m,
-                role: payload.role === 'admin' ? 'admin' : 'staff',
-                name: payload.name,
-                phone: payload.phone
+                role: finalPayload.role === 'admin' ? 'admin' : 'staff',
+                name: finalPayload.name,
+                phone: finalPayload.phone
               };
             }
             return m;
@@ -1864,7 +1886,7 @@ export const AppProvider: React.FC<{
     } catch (err) {
       console.error('Error updating staff member:', err);
     }
-  }, [staff, barberId, barberProfile]);
+  }, [staff, barberId, barberProfile, activeTenant, barbershop]);
 
   const deleteStaff = useCallback(async (id: string) => {
     try {
@@ -1910,6 +1932,7 @@ export const AppProvider: React.FC<{
       // Multi-tenant & Multi-staff state exports
       activeTenant,
       staff,
+      currentStaff,
       userRole,
       permissions,
       selectedStaffId,

@@ -142,9 +142,11 @@ export interface OnboardingState {
   barbershop: Barbershop | null;
   hasOwnerMembership: boolean;
   isStaffMember: boolean;
-  status: 'no_session' | 'needs_profile' | 'needs_barbershop' | 'needs_membership' | 'needs_completion' | 'complete';
+  status: 'no_session' | 'needs_profile' | 'needs_barbershop' | 'needs_membership' | 'needs_completion' | 'complete' | 'network_error';
   isComplete: boolean;
   step: number;
+  membership?: BarbershopMember | null;
+  staffProfile?: Staff | null;
 }
 
 export interface Transaction {
@@ -178,6 +180,7 @@ export interface AppState {
   // Multi-tenant & Multi-staff state extensions
   activeTenant: Tenant | null;
   staff: Staff[];
+  currentStaff: Staff | null;
   userRole: 'admin_owner' | 'staff' | 'client' | null;
   permissions: {
     canManageStaff: boolean;

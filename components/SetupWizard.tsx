@@ -239,16 +239,10 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
     setIsFinishing(true);
 
     try {
-      console.group('[ONBOARDING] handleComplete iniciado');
-
       const userId = await supabaseService.getUserId();
       if (!userId) {
         throw new Error('Não foi possível obter o ID do usuário logado no onboarding.');
       }
-      console.log('[ONBOARDING] 1. ID do usuário obtido:', userId);
-
-      // 1. Log slug solicitado pelo usuário
-      console.log('[onboarding] requested profile slug:', handle);
 
       // 2. Montar e salvar payload do perfil
       const profilePayload = await supabaseService.buildProfilePayload(
@@ -271,7 +265,6 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
         console.error('[ONBOARDING] Erro ao salvar profile:', profileUpsertErr.message);
         throw profileUpsertErr;
       }
-      console.log('[onboarding] persisted profile payload:', profilePayload);
 
       // 3. Garantir barbearia própria de forma idempotente
       const existingShop = await supabaseService.getOwnedBarbershop(userId);
@@ -307,11 +300,9 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
         barbershopId = newShop.id;
         shopPayload = newShop;
       }
-      console.log('[onboarding] persisted barbershop payload:', shopPayload);
 
       // 4. Garantir owner membership
-      const ownerMember = await supabaseService.ensureOwnerMembership(barbershopId, userId);
-      console.log('[onboarding] owner membership status:', ownerMember);
+      await supabaseService.ensureOwnerMembership(barbershopId, userId);
 
       // 5. Salvar serviços do usuário
       await supabase.from('services').delete().eq('user_id', userId);
@@ -355,11 +346,7 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
       await supabaseService.completeOwnerSetupIfPossible(userId);
 
       // 8. Reler o estado real do banco de dados
-      const refreshState = await supabaseService.resolveOnboardingState(userId);
-      console.log('[onboarding] refresh state result:', refreshState);
-
-      const navTarget = refreshState.isComplete ? '/app' : `SetupWizard (Step ${refreshState.step})`;
-      console.log('[onboarding] final navigation target:', navTarget);
+      await supabaseService.resolveOnboardingState(userId);
 
       // 9. Atualizar Store
       await checkOnboardingState();
@@ -375,8 +362,6 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
       console.error('[ONBOARDING] Erro capturado na finalização:', err);
       alert(err?.message || 'Erro ao finalizar a configuração. Por favor, tente novamente.');
       setIsFinishing(false);
-    } finally {
-      console.groupEnd();
     }
   };
 

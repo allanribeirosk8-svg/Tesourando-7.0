@@ -435,3 +435,95 @@ CREATE POLICY "select_staff_profiles" ON public.staff_profiles
 DROP POLICY IF EXISTS "manage_staff_profiles" ON public.staff_profiles;
 CREATE POLICY "manage_staff_profiles" ON public.staff_profiles
   FOR ALL USING (tenant_id = auth.uid()) WITH CHECK (tenant_id = auth.uid());
+
+-- Permite que o colaborador atualize seu próprio perfil (foto, etc.)
+DROP POLICY IF EXISTS "staff_update_own_profile" ON public.staff_profiles;
+CREATE POLICY "staff_update_own_profile" ON public.staff_profiles
+  FOR UPDATE
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+
+-- =========================================================
+-- FASE 1: MIGRATION ESTRUTURAL ADITIVA (MULTI-TENANT / MULTI-STAFF)
+-- Colunas Nullable, Foreign Keys Não-Destrutivas e Índices
+-- =========================================================
+
+-- 1. staff_profiles: Adição de barbershop_id
+ALTER TABLE public.staff_profiles
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE;
+
+-- 2. services: Adição de barbershop_id
+ALTER TABLE public.services
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE;
+
+-- 3. customers: Adição de barbershop_id e colunas adicionais de metadados
+ALTER TABLE public.customers
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS notes TEXT,
+  ADD COLUMN IF NOT EXISTS total_visits INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS total_spent NUMERIC DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_visit TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 4. customer_photos: Adição de barbershop_id e photo_url
+ALTER TABLE public.customer_photos
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS photo_url TEXT,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 5. appointments: Adição de barbershop_id, staff_id e created_by
+ALTER TABLE public.appointments
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL;
+
+-- 6. transactions: Adição de barbershop_id, staff_id, created_by e appointment_id
+ALTER TABLE public.transactions
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS appointment_id UUID;
+
+-- 7. weekly_schedule: Adição de barbershop_id e staff_id
+ALTER TABLE public.weekly_schedule
+  ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid(),
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE CASCADE;
+
+-- 8. weekly_breaks: Adição de barbershop_id e staff_id
+ALTER TABLE public.weekly_breaks
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE CASCADE;
+
+-- 9. blocked_slots: Adição de barbershop_id, staff_id, reason e created_at
+ALTER TABLE public.blocked_slots
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS reason TEXT,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 10. unblocked_slots: Adição de barbershop_id, staff_id e created_at
+ALTER TABLE public.unblocked_slots
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 11. notifications: Adição de barbershop_id e staff_id
+ALTER TABLE public.notifications
+  ADD COLUMN IF NOT EXISTS barbershop_id UUID REFERENCES public.barbershops(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS staff_id UUID REFERENCES public.staff_profiles(id) ON DELETE CASCADE;
+
+-- =========================================================
+-- ÍNDICES DE PERFORMANCE (IF NOT EXISTS)
+-- =========================================================
+CREATE INDEX IF NOT EXISTS idx_appointments_barbershop_date ON public.appointments (barbershop_id, date);
+CREATE INDEX IF NOT EXISTS idx_appointments_staff_date ON public.appointments (staff_id, date);
+CREATE INDEX IF NOT EXISTS idx_services_barbershop ON public.services (barbershop_id);
+CREATE INDEX IF NOT EXISTS idx_customers_barbershop_phone ON public.customers (barbershop_id, phone);
+CREATE INDEX IF NOT EXISTS idx_transactions_barbershop_date ON public.transactions (barbershop_id, date);
+CREATE INDEX IF NOT EXISTS idx_staff_profiles_barbershop ON public.staff_profiles (barbershop_id);
+CREATE INDEX IF NOT EXISTS idx_weekly_schedule_barbershop_staff_day ON public.weekly_schedule (barbershop_id, staff_id, day_of_week);
+CREATE INDEX IF NOT EXISTS idx_weekly_breaks_barbershop_staff ON public.weekly_breaks (barbershop_id, staff_id, day_of_week);
+CREATE INDEX IF NOT EXISTS idx_blocked_slots_barbershop_date ON public.blocked_slots (barbershop_id, date);
+CREATE INDEX IF NOT EXISTS idx_unblocked_slots_barbershop_date ON public.unblocked_slots (barbershop_id, date);
+CREATE INDEX IF NOT EXISTS idx_notifications_barbershop ON public.notifications (barbershop_id, created_at DESC);
