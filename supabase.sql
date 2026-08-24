@@ -527,3 +527,328 @@ CREATE INDEX IF NOT EXISTS idx_weekly_breaks_barbershop_staff ON public.weekly_b
 CREATE INDEX IF NOT EXISTS idx_blocked_slots_barbershop_date ON public.blocked_slots (barbershop_id, date);
 CREATE INDEX IF NOT EXISTS idx_unblocked_slots_barbershop_date ON public.unblocked_slots (barbershop_id, date);
 CREATE INDEX IF NOT EXISTS idx_notifications_barbershop ON public.notifications (barbershop_id, created_at DESC);
+
+-- =========================================================
+-- RLS POLICIES FOR MULTI-TENANT ENTITIES (CUSTOMERS, PHOTOS, APPOINTMENTS)
+-- =========================================================
+
+-- Customers
+ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "customers_select_policy" ON public.customers;
+CREATE POLICY "customers_select_policy" ON public.customers
+  FOR SELECT USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "customers_insert_policy" ON public.customers;
+CREATE POLICY "customers_insert_policy" ON public.customers
+  FOR INSERT WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "customers_update_policy" ON public.customers;
+CREATE POLICY "customers_update_policy" ON public.customers
+  FOR UPDATE USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "customers_delete_policy" ON public.customers;
+CREATE POLICY "customers_delete_policy" ON public.customers
+  FOR DELETE USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+-- Customer Photos
+ALTER TABLE public.customer_photos ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "customer_photos_select_policy" ON public.customer_photos;
+CREATE POLICY "customer_photos_select_policy" ON public.customer_photos
+  FOR SELECT USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "customer_photos_insert_policy" ON public.customer_photos;
+CREATE POLICY "customer_photos_insert_policy" ON public.customer_photos
+  FOR INSERT WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "customer_photos_delete_policy" ON public.customer_photos;
+CREATE POLICY "customer_photos_delete_policy" ON public.customer_photos
+  FOR DELETE USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+-- Appointments
+ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "appointments_select_policy" ON public.appointments;
+CREATE POLICY "appointments_select_policy" ON public.appointments
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "appointments_insert_policy" ON public.appointments;
+CREATE POLICY "appointments_insert_policy" ON public.appointments
+  FOR INSERT WITH CHECK (
+    auth.uid() IS NULL
+    OR user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "appointments_update_policy" ON public.appointments;
+CREATE POLICY "appointments_update_policy" ON public.appointments
+  FOR UPDATE USING (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "appointments_delete_policy" ON public.appointments;
+CREATE POLICY "appointments_delete_policy" ON public.appointments
+  FOR DELETE USING (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+-- Transactions
+ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "transactions_select_policy" ON public.transactions;
+CREATE POLICY "transactions_select_policy" ON public.transactions
+  FOR SELECT USING (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "transactions_insert_policy" ON public.transactions;
+CREATE POLICY "transactions_insert_policy" ON public.transactions
+  FOR INSERT WITH CHECK (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "transactions_update_policy" ON public.transactions;
+CREATE POLICY "transactions_update_policy" ON public.transactions
+  FOR UPDATE USING (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+DROP POLICY IF EXISTS "transactions_delete_policy" ON public.transactions;
+CREATE POLICY "transactions_delete_policy" ON public.transactions
+  FOR DELETE USING (
+    user_id = auth.uid()
+    OR created_by = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+-- Services
+ALTER TABLE public.services ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "services_select_policy" ON public.services;
+CREATE POLICY "services_select_policy" ON public.services
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "services_manage_policy" ON public.services;
+CREATE POLICY "services_manage_policy" ON public.services
+  FOR ALL USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+-- Weekly Schedule & Breaks
+ALTER TABLE public.weekly_schedule ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "weekly_schedule_select_policy" ON public.weekly_schedule;
+CREATE POLICY "weekly_schedule_select_policy" ON public.weekly_schedule
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "weekly_schedule_manage_policy" ON public.weekly_schedule;
+CREATE POLICY "weekly_schedule_manage_policy" ON public.weekly_schedule
+  FOR ALL USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+ALTER TABLE public.weekly_breaks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "weekly_breaks_select_policy" ON public.weekly_breaks;
+CREATE POLICY "weekly_breaks_select_policy" ON public.weekly_breaks
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "weekly_breaks_manage_policy" ON public.weekly_breaks;
+CREATE POLICY "weekly_breaks_manage_policy" ON public.weekly_breaks
+  FOR ALL USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+-- Blocked / Unblocked Slots
+ALTER TABLE public.blocked_slots ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "blocked_slots_select_policy" ON public.blocked_slots;
+CREATE POLICY "blocked_slots_select_policy" ON public.blocked_slots
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "blocked_slots_manage_policy" ON public.blocked_slots;
+CREATE POLICY "blocked_slots_manage_policy" ON public.blocked_slots
+  FOR ALL USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+
+ALTER TABLE public.unblocked_slots ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "unblocked_slots_select_policy" ON public.unblocked_slots;
+CREATE POLICY "unblocked_slots_select_policy" ON public.unblocked_slots
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "unblocked_slots_manage_policy" ON public.unblocked_slots;
+CREATE POLICY "unblocked_slots_manage_policy" ON public.unblocked_slots
+  FOR ALL USING (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  ) WITH CHECK (
+    user_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
+      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
+      UNION
+      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    ))
+  );
+

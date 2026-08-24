@@ -300,243 +300,134 @@ export const AppProvider: React.FC<{
   };
 
   const loadData = useCallback(async () => {
+    const currentSession = sessionRef.current;
+    if (!currentSession?.user?.id) {
+      return;
+    }
+
     setIsLoading(true);
     try {
       const isConfigured = isSupabaseConfigured();
-      
-      if (isConfigured) {
-        // Use the current session from ref if available, or fetch it once
-        let currentSession = sessionRef.current;
-        if (!currentSession) {
-          const result = await supabase.auth.getSession();
-          const fetchedSession = result?.data?.session || null;
-          currentSession = fetchedSession;
-          setSession(fetchedSession);
-        }
-        
-        // Determine which user's data to fetch
-        let targetId: string | null = null;
-        let onbState: any = null;
-        if (currentSession?.user?.id) {
-          const sessionUserId = currentSession.user.id;
-          onbState = await supabaseService.resolveOnboardingState(sessionUserId);
-          setOnboardingState(onbState);
-          if (onbState.profile && onbState.hasOwnerMembership) {
-            setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
-          }
-
-          // targetId deve ser SEMPRE o ID da barbearia / tenant (membership.barbershop_id), NUNCA o user_id do colaborador
-          const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
-          targetId = membershipBarbershopId;
-        } else {
-          // visitante: busca público
-          targetId = await supabaseService.getPublicBarberId();
-        }
-
-        setBarberId(targetId);
-        
-        if (targetId) {
-          const [
-            dbApts,
-            dbCustomers,
-            dbServices,
-            dbProfile,
-            dbWeekly,
-            dbBlocked,
-            dbUnblocked
-          ] = await Promise.all([
-            supabaseService.getAppointments(targetId),
-            supabaseService.getCustomers(targetId),
-            supabaseService.getServices(targetId),
-            supabaseService.getProfile(targetId),
-            supabaseService.getWeeklySchedule(targetId),
-            supabaseService.getBlockedSlots(targetId),
-            supabaseService.getUnblockedSlots(targetId)
-          ]);
-
-          setAppointments((dbApts || []).map(normalizeAppointment));
-          if (dbCustomers) {
-            const custMap: Record<string, Customer> = {};
-            dbCustomers.forEach((c: any) => {
-              custMap[normalizePhone(c.phone)] = {
-                ...c,
-                photos: c.customer_photos || []
-              };
-            });
-            setCustomers(custMap);
-          }
-          
-          const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
-          setServices(finalServices);
-          
-          setBarberProfile(dbProfile || DEFAULT_PROFILE);
-          setWeeklySchedule({ ...DEFAULT_WEEKLY, ...(dbWeekly || {}) });
-          setBlockedSlots(dbBlocked || {});
-          setUnblockedSlots(dbUnblocked || {});
-
-          // Multi-tenant & Multi-staff load
-          const tenantInfo = {
-            id: targetId,
-            name: onbState?.barbershop?.name || dbProfile?.shopName || 'Meu Corte',
-            slug: onbState?.barbershop?.slug || dbProfile?.slug || '',
-            logo: dbProfile?.logo,
-            businessPhone: dbProfile?.businessPhone,
-            address: dbProfile?.address,
-            instagram: dbProfile?.instagram,
-            website: dbProfile?.website
-          };
-          setActiveTenant(tenantInfo);
-
-          const dbStaff = await supabaseService.getStaff(targetId);
-          setStaff(dbStaff);
-
-          let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
-          const sessionUserId = currentSession?.user?.id || null;
-          
-          if (sessionUserId) {
-            const memberRole = onbState?.membership?.role;
-            if (memberRole === 'owner') {
-              resolvedRole = 'admin_owner';
-            } else if (memberRole === 'admin' || memberRole === 'staff') {
-              resolvedRole = 'staff';
-            } else if (onbState?.isStaffMember) {
-              resolvedRole = 'staff';
-            } else if (onbState?.hasOwnerMembership || onbState?.barbershop?.ownerId === sessionUserId) {
-              resolvedRole = 'admin_owner';
-            } else {
-              const isStaff = dbStaff && dbStaff.some((s: any) => s.userId === sessionUserId);
-              resolvedRole = isStaff ? 'staff' : 'client';
-            }
-          }
-
-          setUserRole(resolvedRole);
-
-          // Resolver colaborador ativo atual
-          let activeStaffUser: Staff | null = null;
-          if (sessionUserId) {
-            activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
-            if (!activeStaffUser && (resolvedRole === 'staff' || onbState?.isStaffMember)) {
-              activeStaffUser = {
-                id: sessionUserId,
-                tenantId: targetId || sessionUserId,
-                userId: sessionUserId,
-                name: 'Profissional',
-                phone: '',
-                photo: undefined,
-                status: 'active',
-                commissionRate: 0,
-                role: 'staff'
-              };
-            }
-          }
-          setCurrentStaff(activeStaffUser);
-
-          if (resolvedRole && resolvedRole !== 'client') {
-            const dbNotifications = await supabaseService.getNotifications(targetId, resolvedRole, currentSession?.user?.id);
-            setNotifications(dbNotifications);
-
-            // Verificações operacionais automáticas e proativas
-            const runOperationalChecks = async (apts: Appointment[], currentNotifs: any[]) => {
-              try {
-                const now = new Date();
-                const todayStr = now.toISOString().split('T')[0];
-                const currentMinutes = now.getHours() * 60 + now.getMinutes();
-                const existingNotifMessages = new Set(currentNotifs.map(n => n.message));
-                let addedAny = false;
-
-                for (const apt of apts) {
-                  if (apt.status !== 'pending') continue;
-
-                  const formattedDate = apt.date.split('-').reverse().join('/');
-                  const [aptHour, aptMin] = apt.time.split(':').map(Number);
-                  const aptMinutes = aptHour * 60 + aptMin;
-
-                  // 1. Lembrete de consulta próxima (próximas 2 horas de hoje)
-                  if (apt.date === todayStr) {
-                    const diff = aptMinutes - currentMinutes;
-                    if (diff > 0 && diff <= 120) {
-                      const msg = `Lembrete: Agendamento de ${apt.clientName} às ${apt.time} está próximo (em ${diff} minutos).`;
-                      if (!existingNotifMessages.has(msg)) {
-                        await supabaseService.addNotification({
-                          tenantId: targetId!,
-                          staffId: apt.staffId !== targetId ? apt.staffId : null,
-                          title: 'Lembrete de Consulta Próxima',
-                          message: msg,
-                          type: 'appointment_reminder',
-                          priority: 'medium',
-                          groupKey: 'appointment_reminder',
-                          expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 3).getTime(), // expira em 3 horas
-                          meta: {
-                            appointmentId: apt.id,
-                            date: apt.date,
-                            time: apt.time
-                          }
-                        });
-                        addedAny = true;
-                      }
-                    }
-                  }
-
-                  // 2. Alerta de fechamento pendente (agendamentos de datas passadas, ou de hoje que já passaram há mais de 1 hora)
-                  const isPastDate = apt.date < todayStr;
-                  const isPastHourToday = apt.date === todayStr && (currentMinutes - aptMinutes > 60);
-
-                  if (isPastDate || isPastHourToday) {
-                    const msg = `Aviso: O agendamento de ${apt.clientName} no dia ${formattedDate} às ${apt.time} ainda está pendente de fechamento.`;
-                    if (!existingNotifMessages.has(msg)) {
-                      await supabaseService.addNotification({
-                        tenantId: targetId!,
-                        staffId: apt.staffId !== targetId ? apt.staffId : null,
-                        title: 'Agendamento Pendente de Fechamento',
-                        message: msg,
-                        type: 'pending_close_alert',
-                        priority: 'high',
-                        groupKey: 'pending_close',
-                        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).getTime(), // expira em 7 dias
-                        meta: {
-                          appointmentId: apt.id,
-                          date: apt.date,
-                          time: apt.time
-                        }
-                      });
-                      addedAny = true;
-                    }
-                  }
-                }
-
-                if (addedAny && resolvedRole) {
-                  const refreshed = await supabaseService.getNotifications(targetId!, resolvedRole, currentSession?.user?.id);
-                  setNotifications(refreshed);
-                }
-              } catch (err) {
-                console.error('Erro nas verificações operacionais automáticas:', err);
-              }
-            };
-
-            runOperationalChecks((dbApts || []).map(normalizeAppointment), dbNotifications || []);
-          } else {
-            setNotifications([]);
-          }
-        } else {
-          // If configured but no barber found, we don't fallback to LocalStorage
-          // to keep it "totally via Supabase"
-          setAppointments([]);
-          setCustomers({});
-          setServices(DEFAULT_SERVICES);
-          setBarberProfile(DEFAULT_PROFILE);
-        }
-
-        if (isSupabaseConfigured() && currentSession) {
-          await loadBarbershopData();
-        }
-      } else {
+      if (!isConfigured) {
         loadFromLocalStorage();
+        return;
       }
 
+      const sessionUserId = currentSession.user.id;
+      const onbState = await supabaseService.resolveOnboardingState(sessionUserId);
+      setOnboardingState(onbState);
+      if (onbState.profile && onbState.hasOwnerMembership) {
+        setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+      }
 
+      const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
+      if (!membershipBarbershopId) {
+        setBarberId(null);
+        setActiveTenant(null);
+        setAppointments([]);
+        setStaff([]);
+        setCustomers({});
+        setIsLoading(false);
+        return;
+      }
+
+      setBarberId(membershipBarbershopId);
+
+      const [
+        dbApts,
+        dbCustomers,
+        dbServices,
+        dbProfile,
+        dbWeekly,
+        dbBlocked,
+        dbUnblocked
+      ] = await Promise.all([
+        supabaseService.getAppointments(membershipBarbershopId),
+        supabaseService.getCustomers(membershipBarbershopId),
+        supabaseService.getServices(membershipBarbershopId),
+        supabaseService.getProfile(membershipBarbershopId),
+        supabaseService.getWeeklySchedule(membershipBarbershopId),
+        supabaseService.getBlockedSlots(membershipBarbershopId),
+        supabaseService.getUnblockedSlots(membershipBarbershopId)
+      ]);
+
+      setAppointments((dbApts || []).map(normalizeAppointment));
+      if (dbCustomers) {
+        const custMap: Record<string, Customer> = {};
+        dbCustomers.forEach((c: any) => {
+          custMap[normalizePhone(c.phone)] = {
+            ...c,
+            photos: c.customer_photos || []
+          };
+        });
+        setCustomers(custMap);
+      }
+      
+      const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
+      setServices(finalServices);
+      
+      setBarberProfile(dbProfile || DEFAULT_PROFILE);
+      setWeeklySchedule({ ...DEFAULT_WEEKLY, ...(dbWeekly || {}) });
+      setBlockedSlots(dbBlocked || {});
+      setUnblockedSlots(dbUnblocked || {});
+
+      const tenantInfo = {
+        id: membershipBarbershopId,
+        name: onbState?.barbershop?.name || dbProfile?.shopName || 'Meu Corte',
+        slug: onbState?.barbershop?.slug || dbProfile?.slug || '',
+        logo: dbProfile?.logo,
+        businessPhone: dbProfile?.businessPhone,
+        address: dbProfile?.address,
+        instagram: dbProfile?.instagram,
+        website: dbProfile?.website
+      };
+      setActiveTenant(tenantInfo);
+
+      const dbStaff = await supabaseService.getStaff(membershipBarbershopId);
+      setStaff(dbStaff);
+
+      let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
+      const memberRole = onbState?.membership?.role;
+      if (memberRole === 'owner') {
+        resolvedRole = 'admin_owner';
+      } else if (memberRole === 'admin' || memberRole === 'staff') {
+        resolvedRole = 'staff';
+      } else if (onbState?.isStaffMember) {
+        resolvedRole = 'staff';
+      } else if (onbState?.hasOwnerMembership || onbState?.barbershop?.ownerId === sessionUserId) {
+        resolvedRole = 'admin_owner';
+      } else {
+        const isStaff = dbStaff && dbStaff.some((s: any) => s.userId === sessionUserId);
+        resolvedRole = isStaff ? 'staff' : 'client';
+      }
+
+      setUserRole(resolvedRole);
+
+      let activeStaffUser: Staff | null = null;
+      activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
+      setCurrentStaff(activeStaffUser);
+
+      if (resolvedRole && resolvedRole !== 'client') {
+        const dbNotifications = await supabaseService.getNotifications(membershipBarbershopId, resolvedRole, sessionUserId);
+        setNotifications(dbNotifications);
+      } else {
+        setNotifications([]);
+      }
+
+      try {
+        const [bs, members, invites] = await Promise.all([
+          supabaseService.getBarbershop(),
+          supabaseService.getBarbershopMembers(),
+          supabaseService.getInvites()
+        ]);
+        setBarbershop(bs);
+        setBarbershopMembers(members);
+        setBarbershopInvites(invites);
+      } catch (err) {
+        console.error('[loadBarbershopData] Error:', err);
+      }
     } catch (e) {
       console.error("Failed to load data", e);
-      loadFromLocalStorage();
     } finally {
       setIsLoading(false);
       if (isFirstLoad.current) {
@@ -564,7 +455,7 @@ export const AppProvider: React.FC<{
     if (storedProfile) setBarberProfile(JSON.parse(storedProfile));
   };
 
-  // Load from Supabase (Primary) and LocalStorage (Fallback/Cache)
+  // Auth state listener & session resolution
   useEffect(() => {
     if (isPublicRoute) {
       setIsLoading(false);
@@ -578,19 +469,22 @@ export const AppProvider: React.FC<{
     if (isSupabaseConfigured()) {
       // Fetch initial session
       supabase.auth.getSession().then(({ data: { session } }) => {
-        setSession(session);
+        if (session?.user?.id) {
+          setSession(session);
+        } else {
+          setSession(null);
+          resetStore();
+        }
       });
 
       const authResult = supabase.auth.onAuthStateChange((event, newSession) => {
-        setSession(newSession);
-        
-        if (event === 'SIGNED_OUT') {
+        if (event === 'SIGNED_OUT' || !newSession) {
+          setSession(null);
           resetStore();
+          return;
         }
         
-        if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
-          loadData();
-        }
+        setSession(newSession);
       });
 
       return () => {
@@ -599,100 +493,272 @@ export const AppProvider: React.FC<{
         }
       };
     } else {
-      loadData();
+      loadFromLocalStorage();
+      setIsLoading(false);
     }
-  }, [loadData, resetStore, isPublicRoute]);
+  }, [isPublicRoute, resetStore]);
+
+  // Main data loader effect with cancelled flag pattern
+  useEffect(() => {
+    let cancelled = false;
+
+    if (isPublicRoute) {
+      setIsLoading(false);
+      return;
+    }
+
+    if (!isSupabaseConfigured()) {
+      loadFromLocalStorage();
+      setIsLoading(false);
+      return;
+    }
+
+    if (!session?.user?.id) {
+      resetStore();
+      setIsLoading(false);
+      return;
+    }
+
+    const loadTenantAndData = async () => {
+      setIsLoading(true);
+      try {
+        const sessionUserId = session.user.id;
+        const onbState = await supabaseService.resolveOnboardingState(sessionUserId);
+        if (cancelled) return;
+
+        setOnboardingState(onbState);
+        if (onbState.profile && onbState.hasOwnerMembership) {
+          setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+        }
+
+        const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
+        if (cancelled) return;
+
+        if (!membershipBarbershopId) {
+          setBarberId(null);
+          setActiveTenant(null);
+          setAppointments([]);
+          setStaff([]);
+          setCustomers({});
+          setIsLoading(false);
+          return;
+        }
+
+        setBarberId(membershipBarbershopId);
+
+        const tenantInfo = {
+          id: membershipBarbershopId,
+          name: onbState?.barbershop?.name || onbState?.profile?.shopName || 'Meu Corte',
+          slug: onbState?.barbershop?.slug || onbState?.profile?.slug || '',
+          logo: onbState?.profile?.logo,
+          businessPhone: onbState?.profile?.businessPhone,
+          address: onbState?.profile?.address,
+          instagram: onbState?.profile?.instagram,
+          website: onbState?.profile?.website
+        };
+        setActiveTenant(tenantInfo);
+
+        const [
+          dbApts,
+          dbCustomers,
+          dbServices,
+          dbProfile,
+          dbWeekly,
+          dbBlocked,
+          dbUnblocked,
+          dbStaff
+        ] = await Promise.all([
+          supabaseService.getAppointments(membershipBarbershopId),
+          supabaseService.getCustomers(membershipBarbershopId),
+          supabaseService.getServices(membershipBarbershopId),
+          supabaseService.getProfile(membershipBarbershopId),
+          supabaseService.getWeeklySchedule(membershipBarbershopId),
+          supabaseService.getBlockedSlots(membershipBarbershopId),
+          supabaseService.getUnblockedSlots(membershipBarbershopId),
+          supabaseService.getStaff(membershipBarbershopId)
+        ]);
+
+        if (cancelled) return;
+
+        setAppointments((dbApts || []).map(normalizeAppointment));
+        if (dbCustomers) {
+          const custMap: Record<string, Customer> = {};
+          dbCustomers.forEach((c: any) => {
+            custMap[normalizePhone(c.phone)] = {
+              ...c,
+              photos: c.customer_photos || []
+            };
+          });
+          setCustomers(custMap);
+        }
+
+        const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
+        setServices(finalServices);
+        setBarberProfile(dbProfile || DEFAULT_PROFILE);
+        setWeeklySchedule({ ...DEFAULT_WEEKLY, ...(dbWeekly || {}) });
+        setBlockedSlots(dbBlocked || {});
+        setUnblockedSlots(dbUnblocked || {});
+        setStaff(dbStaff);
+
+        let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
+        const memberRole = onbState?.membership?.role;
+        if (memberRole === 'owner') {
+          resolvedRole = 'admin_owner';
+        } else if (memberRole === 'admin' || memberRole === 'staff') {
+          resolvedRole = 'staff';
+        } else if (onbState?.isStaffMember) {
+          resolvedRole = 'staff';
+        } else if (onbState?.hasOwnerMembership || onbState?.barbershop?.ownerId === sessionUserId) {
+          resolvedRole = 'admin_owner';
+        } else {
+          const isStaff = dbStaff && dbStaff.some((s: any) => s.userId === sessionUserId);
+          resolvedRole = isStaff ? 'staff' : 'client';
+        }
+
+        setUserRole(resolvedRole);
+
+        let activeStaffUser: Staff | null = null;
+        activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
+        if (!cancelled) setCurrentStaff(activeStaffUser);
+
+        if (resolvedRole && resolvedRole !== 'client') {
+          const dbNotifications = await supabaseService.getNotifications(membershipBarbershopId, resolvedRole, sessionUserId);
+          if (!cancelled) setNotifications(dbNotifications);
+        } else {
+          if (!cancelled) setNotifications([]);
+        }
+
+        try {
+          const [bs, members, invites] = await Promise.all([
+            supabaseService.getBarbershop(),
+            supabaseService.getBarbershopMembers(),
+            supabaseService.getInvites()
+          ]);
+          if (!cancelled) {
+            setBarbershop(bs);
+            setBarbershopMembers(members);
+            setBarbershopInvites(invites);
+          }
+        } catch (err) {
+          console.error('[loadBarbershopData] Error:', err);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          console.error("Failed to load data", e);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+          if (isFirstLoad.current) {
+            isFirstLoad.current = false;
+            onReadyRef.current?.();
+          }
+        }
+      }
+    };
+
+    void loadTenantAndData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user?.id, isPublicRoute, resetStore]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
-    if (!isSupabaseConfigured()) return;
+    if (!isSupabaseConfigured() || !session?.user?.id || !activeTenant?.id) return;
 
     let channel: any;
+    let isCancelled = false;
 
-    const setupRealtime = async () => {
-      const currentSession = sessionRef.current;
-      if (!currentSession) return;
+    const barbershopId = activeTenant.id;
+    if (!barbershopId) return;
 
-      channel = supabase
-        .channel('appointments_changes')
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'appointments',
-            filter: `user_id=eq.${currentSession.user.id}`
-          },
-          (payload) => {
-            const { eventType, new: newRecord, old: oldRecord } = payload;
+    channel = supabase
+      .channel(`appointments_${barbershopId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'appointments',
+          filter: `barbershop_id=eq.${barbershopId}`
+        },
+        (payload) => {
+          if (isCancelled) return;
+          const { eventType, new: newRecord, old: oldRecord } = payload;
 
-            if (eventType === 'INSERT' || eventType === 'UPDATE') {
-              const apt = {
-                id: newRecord.id,
-                date: normalizeDate(newRecord.date),
-                time: normalizeTime(newRecord.time),
-                clientName: newRecord.client_name,
-                phone: newRecord.phone,
-                service: newRecord.service,
-                price: Number(newRecord.price),
-                duration: newRecord.duration,
-                status: newRecord.status,
-                createdAt: new Date(newRecord.created_at).getTime()
-              } as Appointment;
+          if (eventType === 'INSERT' || eventType === 'UPDATE') {
+            if (!newRecord.barbershop_id) {
+              console.error(`[Realtime appointments] Registro recebido sem barbershop_id:`, newRecord.id);
+              return;
+            }
+            const apt = {
+              id: newRecord.id,
+              tenantId: newRecord.barbershop_id,
+              staffId: newRecord.staff_id ?? null,
+              userId: newRecord.user_id,
+              date: normalizeDate(newRecord.date),
+              time: normalizeTime(newRecord.time),
+              clientName: newRecord.client_name,
+              phone: newRecord.phone,
+              service: newRecord.service,
+              price: Number(newRecord.price),
+              duration: newRecord.duration,
+              status: newRecord.status,
+              observation: newRecord.observation,
+              createdAt: new Date(newRecord.created_at).getTime()
+            } as Appointment;
+            
+            setAppointments(prev => {
+              const index = prev.findIndex(a => a.id === apt.id);
               
-              setAppointments(prev => {
-                const index = prev.findIndex(a => a.id === apt.id);
-                
-                if (index !== -1) {
-                  // If it exists, update it but ONLY if the new data is complete
-                  // This prevents REPLICA IDENTITY issues where 'new' might be incomplete
-                  if (!apt.date || !apt.time || !apt.clientName) {
-                    return prev;
-                  }
+              if (index !== -1) {
+                if (!apt.date || !apt.time || !apt.clientName) {
+                  return prev;
+                }
+                const next = [...prev];
+                next[index] = apt;
+                return next;
+              }
+
+              if (eventType === 'INSERT') {
+                if (!apt.date || !apt.time || !apt.clientName) {
+                  return prev;
+                }
+
+                const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+                const tempIndex = prev.findIndex(a => 
+                  !isUUID(a.id) && 
+                  a.date === apt.date && 
+                  a.time === apt.time && 
+                  a.clientName === apt.clientName
+                );
+
+                if (tempIndex !== -1) {
                   const next = [...prev];
-                  next[index] = apt;
+                  next[tempIndex] = apt;
                   return next;
                 }
-
-                if (eventType === 'INSERT') {
-                  // If the record is incomplete, don't add it - wait for the manual fetch or a better event
-                  if (!apt.date || !apt.time || !apt.clientName) {
-                    return prev;
-                  }
-
-                  // Check for a temporary appointment (non-UUID id) that matches
-                  const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-                  const tempIndex = prev.findIndex(a => 
-                    !isUUID(a.id) && 
-                    a.date === apt.date && 
-                    a.time === apt.time && 
-                    a.clientName === apt.clientName
-                  );
-
-                  if (tempIndex !== -1) {
-                    const next = [...prev];
-                    next[tempIndex] = apt;
-                    return next;
-                  }
-                  return [...prev, apt];
-                }
-                
-                return prev;
-              });
-            } else if (eventType === 'DELETE') {
-              setAppointments(prev => prev.filter(a => a.id !== oldRecord.id));
-            }
+                return [...prev, apt];
+              }
+              
+              return prev;
+            });
+          } else if (eventType === 'DELETE') {
+            setAppointments(prev => prev.filter(a => a.id !== oldRecord.id));
           }
-        )
-        .subscribe();
-    };
-
-    setupRealtime();
+        }
+      )
+      .subscribe();
 
     return () => {
-      if (channel) supabase.removeChannel(channel);
+      isCancelled = true;
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
     };
-  }, []);
+  }, [session?.user?.id, activeTenant?.id]);
 
   // Sync to LocalStorage (Cache) - Apenas se NÃO estiver logado como barbeiro
   useEffect(() => {
@@ -721,14 +787,23 @@ export const AppProvider: React.FC<{
     if (!currentSession) return;
     
     const resolvedTenantId = barberId || currentSession.user.id;
-    const memberIds = await supabaseService.getTenantMemberIds(resolvedTenantId);
-    const { data, error } = await supabase
+    const ctx = await supabaseService.resolveTenantContext(resolvedTenantId);
+    const barbershopId = ctx.barbershopId;
+    const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ctx.tenantOwnerId || resolvedTenantId];
+
+    let query = supabase
       .from('transactions')
       .select('*')
-      .in('user_id', memberIds)
       .gte('date', `${startDate}T00:00:00`)
-      .lte('date', `${endDate}T23:59:59`)
-      .order('date', { ascending: false });
+      .lte('date', `${endDate}T23:59:59`);
+
+    if (barbershopId) {
+      query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')})`);
+    } else {
+      query = query.in('user_id', memberIds);
+    }
+
+    const { data, error } = await query.order('date', { ascending: false });
     if (!error && data) {
       setTransactions(data.map((t: any) => ({
         id: t.id,
@@ -754,8 +829,12 @@ export const AppProvider: React.FC<{
     }
     
     const resolvedTenantId = barberId || currentSession.user.id;
+    const ctx = await supabaseService.resolveTenantContext(resolvedTenantId);
+    const barbershopId = ctx.barbershopId;
+    const tenantOwnerId = ctx.tenantOwnerId || resolvedTenantId;
+
     const insertPayload: any = {
-      user_id: resolvedTenantId,
+      user_id: tenantOwnerId,
       type: t.type,
       amount: t.amount,
       description: t.description ?? null,
@@ -764,6 +843,9 @@ export const AppProvider: React.FC<{
       linked_appointment_id: t.linkedAppointmentId ?? null,
       payment_method: t.paymentMethod ?? null,
     };
+    if (barbershopId) {
+      insertPayload.barbershop_id = barbershopId;
+    }
     if (t.staffId) {
       insertPayload.staff_id = t.staffId;
     }
@@ -774,9 +856,10 @@ export const AppProvider: React.FC<{
       .select()
       .single();
 
-    if (error && t.staffId) {
-      console.warn('[ADD_TRANSACTION] Erro na inserção com staff_id, tentando sem staff_id:', error);
+    if (error && (t.staffId || barbershopId)) {
+      console.warn('[ADD_TRANSACTION] Erro na inserção com colunas estendidas, tentando payload básico:', error);
       delete insertPayload.staff_id;
+      delete insertPayload.barbershop_id;
       const fallbackRes = await supabase
         .from('transactions')
         .insert(insertPayload)
@@ -804,12 +887,11 @@ export const AppProvider: React.FC<{
       throw new Error("Não autorizado. Apenas administradores e colaboradores podem excluir transações.");
     }
 
-    const resolvedTenantId = barberId || currentSession.user.id;
     const { error } = await supabase
       .from('transactions')
       .delete()
-      .eq('id', id)
-      .eq('user_id', resolvedTenantId);
+      .eq('id', id);
+
     if (!error) {
       setTransactions(state => state.filter(t => t.id !== id));
     } else {
@@ -990,13 +1072,22 @@ export const AppProvider: React.FC<{
 
     const resolvedTenantId = apt.tenantId || activeTenant?.id || barberId || '';
     const currentUserId = sessionRef.current?.user?.id;
-    let resolvedStaffId = apt.staffId && apt.staffId !== '' ? apt.staffId : '';
-    if (!resolvedStaffId) {
-      if (userRole === 'staff' && currentUserId) {
-        resolvedStaffId = currentUserId;
-      } else {
-        resolvedStaffId = resolvedTenantId;
-      }
+    
+    const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
+    const effectiveStaffId = isAdmin 
+      ? (apt.staffId || currentStaff?.id || staff[0]?.id || '') 
+      : (currentStaff?.id || staff.find(s => s.userId === currentUserId || s.id === currentUserId)?.id || '');
+
+    if (!resolvedTenantId) {
+      console.error("[addAppointment] barbershop_id não encontrado.");
+      alert("Erro: Barbearia não identificada.");
+      return;
+    }
+
+    if (!effectiveStaffId) {
+      console.error("[addAppointment] staff_id não encontrado.");
+      alert("Erro: Profissional não identificado.");
+      return;
     }
 
     const finalApt: Appointment = {
@@ -1004,15 +1095,15 @@ export const AppProvider: React.FC<{
       time: normalizedTimeValue,
       observation: finalObservation,
       tenantId: resolvedTenantId,
-      staffId: resolvedStaffId,
-      userId: currentUserId || resolvedStaffId
+      staffId: effectiveStaffId,
+      userId: currentUserId || ''
     };
 
-    // 3. Conflict validation (now scoped by staffId)
+    // 3. Conflict validation (strictly scoped by staffId)
     const isConflict = appointmentsRef.current.some(a => 
       a.date === finalApt.date && 
       a.time === finalApt.time && 
-      (a.staffId || a.tenantId) === (finalApt.staffId || finalApt.tenantId) &&
+      a.staffId === finalApt.staffId &&
       a.id !== finalApt.id
     );
 

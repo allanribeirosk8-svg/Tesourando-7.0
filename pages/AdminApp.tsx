@@ -116,27 +116,28 @@ const WEEKDAYS = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Q
 interface SectionHeaderProps {
   title: string;
   count?: number;
-  accent?: 'blue' | 'green' | 'gray';
+  accent?: 'blue' | 'green' | 'gray' | 'purple';
 }
 
 const SectionHeader = ({ title, count, accent = 'blue' }: SectionHeaderProps) => {
   const isGreen = accent === 'green';
-  const barColor = isGreen ? 'bg-[#48C78E]' : 'bg-[#F5A623]';
-  const badgeColor = isGreen ? 'bg-[#48C78E] text-[#FFFFFF]' : 'bg-[#F5A623] text-[#FFFFFF]';
+  const isPurple = accent === 'purple';
+  const barColor = isGreen ? 'bg-[#48C78E]' : isPurple ? 'bg-[#8B7CFF]' : 'bg-[#F5A623]';
+  const badgeColor = isGreen ? 'bg-[#48C78E] text-[#FFFFFF]' : isPurple ? 'bg-[#8B7CFF] text-[#FFFFFF]' : 'bg-[#F5A623] text-[#FFFFFF]';
 
   return (
     <div className="flex flex-row items-center">
       {/* Barra lateral */}
-      <div className={`w-1 h-[18px] rounded-sm ${barColor} mr-2`} />
+      <div className={`w-1 h-[18px] rounded-sm ${barColor} mr-2 transition-colors`} />
 
       {/* Título */}
-      <span className={`text-[13px] font-bold tracking-[0.8px] uppercase ${isGreen ? 'text-[#48C78E]' : 'text-[#1E1B4B]'}`}>
+      <span className={`text-[13px] font-bold tracking-[0.8px] uppercase ${isGreen ? 'text-[#48C78E]' : isPurple ? 'text-[#8B7CFF]' : 'text-[#1E1B4B]'}`}>
         {title}
       </span>
 
       {/* Badge de contagem */}
       {count !== undefined && (
-        <span className={`${badgeColor} text-[11px] font-bold rounded-[10px] px-[7px] py-[2px] ml-2 leading-none`}>
+        <span className={`${badgeColor} text-[11px] font-bold rounded-[10px] px-[7px] py-[2px] ml-2 leading-none transition-colors`}>
           {count}
         </span>
       )}
@@ -1282,7 +1283,7 @@ export const AdminApp: React.FC = () => {
                   >
                     <div className="bg-secondary rounded-full flex items-center justify-center -translate-y-2.5 shadow-[0_4px_16px_rgba(249,148,23,0.45)] relative transition-all duration-[180ms]" style={{ padding: '10px 12px' }}>
                       <item.icon size={26} className="text-white" />
-                      {pendingTodayCount > 0 && (
+                      {!isActive && pendingTodayCount > 0 && (
                         <div className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center text-[8px] font-bold border-2 border-white ">
                           {pendingTodayCount}
                         </div>
@@ -1393,27 +1394,19 @@ const AgendaView: React.FC<{
   const [agendaContext, setAgendaContext] = useState<'mine' | 'team'>('mine');
   const [teamFilter, setTeamFilter] = useState<'all' | string>('all');
   const [showTeamFilterModal, setShowTeamFilterModal] = useState(false);
+  const isTeamMode = agendaContext === 'team';
 
   const fullStaffList = useMemo(() => {
     const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
-    const hasOwner = staff.some(s => s.id === tenantOwnerId || s.userId === tenantOwnerId || s.role === 'admin' || s.role === 'admin_owner');
-    
-    if (!hasOwner && tenantOwnerId) {
-      const ownerMember: Staff = {
-        id: tenantOwnerId,
-        tenantId: tenantOwnerId,
-        userId: tenantOwnerId,
-        name: barberProfile?.name || session?.user?.user_metadata?.name || 'Administrador',
-        phone: barberProfile?.personalPhone || '',
-        photo: barberProfile?.photo,
-        status: 'active',
-        commissionRate: 100,
-        role: 'admin'
-      };
-      return [ownerMember, ...staff];
-    }
-    return staff;
-  }, [staff, activeTenant?.id, barberProfile, session?.user]);
+    return [...staff].sort((a, b) => {
+      const aIsAdmin = (a.role === 'admin' || a.role === 'admin_owner' || a.userId === tenantOwnerId || a.id === tenantOwnerId) ? 1 : 0;
+      const bIsAdmin = (b.role === 'admin' || b.role === 'admin_owner' || b.userId === tenantOwnerId || b.id === tenantOwnerId) ? 1 : 0;
+      if (aIsAdmin !== bIsAdmin) {
+        return bIsAdmin - aIsAdmin;
+      }
+      return (a.name || '').localeCompare(b.name || '');
+    });
+  }, [staff, activeTenant?.id, barberProfile?.id, session?.user?.id]);
 
   const totalTeamCount = useMemo(() => fullStaffList.length, [fullStaffList]);
 
@@ -1435,60 +1428,37 @@ const AgendaView: React.FC<{
 
   const isAppointmentForContext = useCallback((a: Appointment) => {
     const viewerUserId = session?.user?.id;
-    const isOwner = userRole === 'admin_owner';
-    const ownerUserId = activeTenant?.id || barberProfile?.id || viewerUserId;
+    const isOwner = userRole === 'admin_owner' || userRole === 'admin';
 
     // Find viewer's staff profile if present
-    const viewerStaff = staff.find(s => s.userId === viewerUserId || s.id === viewerUserId);
+    const viewerStaff = staff.find(s => s.userId === viewerUserId || s.id === viewerUserId) || currentStaff;
     const viewerStaffId = viewerStaff?.id;
 
     if (!isOwner) {
-      // Common employee (role !== 'admin_owner'): ALWAYS sees only their own agenda
-      return (
-        a.userId === viewerUserId ||
-        a.staffId === viewerUserId ||
-        (!!viewerStaffId && a.staffId === viewerStaffId) ||
-        (!!viewerStaffId && a.userId === viewerStaffId)
-      );
+      // Colaborador comum (role === 'staff'): SEMPRE visualiza apenas seus próprios agendamentos por staff_profiles.id
+      if (!viewerStaffId) return false;
+      return a.staffId === viewerStaffId;
     }
 
-    // Owner mode (userRole === 'admin_owner')
+    // Modo Administrador / Proprietário
     if (agendaContext === 'mine') {
-      // "Minha agenda" of owner: ONLY appointments assigned to or created by owner
-      // Must NOT be an appointment belonging to another staff member
-      const isForOwner = (
-        a.staffId === ownerUserId ||
-        a.userId === ownerUserId ||
-        (!!viewerStaffId && a.staffId === viewerStaffId)
-      );
-
-      // Check if it explicitly belongs to another staff member
-      const belongsToOtherStaff = staff.some(s => 
-        s.userId !== ownerUserId && s.id !== ownerUserId &&
-        (s.id === a.staffId || s.userId === a.staffId || (a.userId && s.userId === a.userId && s.userId !== ownerUserId))
-      );
-
-      return isForOwner && !belongsToOtherStaff;
+      // "Minha agenda" do admin: filtra exatamente pelo staff_profiles.id do admin
+      if (!viewerStaffId) return false;
+      return a.staffId === viewerStaffId;
     }
 
     // agendaContext === 'team'
     if (teamFilter === 'all') {
-      // "Equipe > Todos": Consolidated barbershop agenda
+      // "Equipe > Todos": Agenda consolidada da barbearia
       return true;
     }
 
-    // "Equipe > [specific staff]"
+    // "Equipe > [profissional específico]"
     const targetStaff = staff.find(s => s.id === teamFilter || s.userId === teamFilter);
     const targetStaffId = targetStaff?.id || teamFilter;
-    const targetStaffUserId = targetStaff?.userId || teamFilter;
 
-    return (
-      a.staffId === targetStaffId ||
-      a.staffId === targetStaffUserId ||
-      a.userId === targetStaffUserId ||
-      a.userId === targetStaffId
-    );
-  }, [agendaContext, teamFilter, userRole, session?.user?.id, activeTenant?.id, barberProfile?.id, staff]);
+    return a.staffId === targetStaffId;
+  }, [agendaContext, teamFilter, userRole, session?.user?.id, currentStaff, staff]);
 
   // Inline Calendar States
   const [isCalendarExpanded, setIsCalendarExpanded] = useState(false);
@@ -1526,6 +1496,13 @@ const AgendaView: React.FC<{
 
   const getAppointmentsCount = (dateStr: string) => {
     return appointments.filter(a => a.date === dateStr && a.status === 'pending' && isAppointmentForContext(a)).length;
+  };
+
+  const getStaffAppointmentsCount = (memberId: string, memberUserId?: string, dateStr: string = selectedDate) => {
+    return appointments.filter(a => {
+      if (a.date !== dateStr || a.status !== 'pending') return false;
+      return a.staffId === memberId || (memberUserId && a.staffId === memberUserId);
+    }).length;
   };
 
   const formatMonthYear = (date: Date) => {
@@ -1883,12 +1860,18 @@ const AgendaView: React.FC<{
                               setIsCalendarExpanded(false);
                             }}
                             className={`h-9 w-full flex-col rounded-xl flex items-center justify-center text-[12px] font-bold transition-all relative
-                              ${isSelected ? 'bg-secondary text-white shadow-[0_0_0_2px_#1E1B4B,0_0_0_4px_#F99417]' : isToday ? 'bg-secondary/25 text-white ring-1 ring-secondary/50' : isClosed ? 'text-muted line-through ' : 'hover:bg-primary/40 bg-surface text-white '}`}
+                              ${isSelected 
+                                ? (isTeamMode ? 'bg-[#8B7CFF] text-white shadow-[0_0_0_2px_#1E1B4B,0_0_0_4px_#8B7CFF]' : 'bg-secondary text-white shadow-[0_0_0_2px_#1E1B4B,0_0_0_4px_#F99417]') 
+                                : isToday 
+                                  ? (isTeamMode ? 'bg-[#8B7CFF]/25 text-white ring-1 ring-[#8B7CFF]/50' : 'bg-secondary/25 text-white ring-1 ring-secondary/50') 
+                                  : isClosed 
+                                    ? 'text-muted line-through ' 
+                                    : 'hover:bg-primary/40 bg-surface text-white '}`}
                           >
                             <span>{d}</span>
-                            {isToday && <div className={`w-1 h-1 rounded-full mt-0.5 ${isSelected ? 'bg-white' : 'bg-secondary'}`}></div>}
+                            {isToday && <div className={`w-1 h-1 rounded-full mt-0.5 ${isSelected ? 'bg-white' : (isTeamMode ? 'bg-[#8B7CFF]' : 'bg-secondary')}`}></div>}
                             {count > 0 && (
-                              <div className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[7px] font-bold border bg-secondary text-white border-white ">
+                              <div className={`absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[7px] font-black bg-white shadow-sm border border-black/5 ${isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'}`}>
                                 {count > 9 ? '9+' : count}
                               </div>
                             )}
@@ -1928,7 +1911,7 @@ const AgendaView: React.FC<{
                         setViewMode('days');
                       }}
                       className={`h-11 rounded-xl flex items-center justify-center font-bold text-sm transition-all
-                        ${viewDate.getFullYear() === year ? 'bg-secondary text-white shadow-sm' : 'bg-primary/40  text-white  hover:bg-[#E2E8F0]'}`}
+                        ${viewDate.getFullYear() === year ? (isTeamMode ? 'bg-[#8B7CFF] text-white shadow-sm' : 'bg-secondary text-white shadow-sm') : 'bg-primary/40  text-white  hover:bg-[#E2E8F0]'}`}
                     >
                       {year}
                     </button>
@@ -1970,9 +1953,9 @@ const AgendaView: React.FC<{
                       onClick={() => setSelectedDate(day.dateStr)}
                       className={`flex-1 flex flex-col items-center justify-center rounded-xl transition-all py-1.5 relative
                         ${isSelected 
-                          ? 'bg-secondary text-white shadow-[0_0_0_2px_#1E1B4B,0_0_0_4px_#F99417]' 
+                          ? (isTeamMode ? 'bg-[#8B7CFF] text-white shadow-[0_0_0_2px_#1E1B4B,0_0_0_4px_#8B7CFF]' : 'bg-secondary text-white shadow-[0_0_0_2px_#1E1B4B,0_0_0_4px_#F99417]') 
                           : isToday 
-                            ? 'bg-secondary/25 text-white ring-1 ring-secondary/50' 
+                            ? (isTeamMode ? 'bg-[#8B7CFF]/25 text-white ring-1 ring-[#8B7CFF]/50' : 'bg-secondary/25 text-white ring-1 ring-secondary/50') 
                             : isClosed
                               ? 'text-white/30 line-through '
                               : 'hover:bg-white/5 text-white/80'}`}
@@ -1984,10 +1967,10 @@ const AgendaView: React.FC<{
                       <span className={`text-sm font-black flex flex-col items-center
                         ${isSelected ? 'text-white' : isToday ? 'text-white' : isClosed ? 'text-white/30 ' : 'text-white '}`}>
                         <span>{day.dayNum}</span>
-                        {isToday && <div className={`w-1 h-1 rounded-full mt-0.5 ${isSelected ? 'bg-white' : 'bg-secondary'}`}></div>}
+                        {isToday && <div className={`w-1 h-1 rounded-full mt-0.5 ${isSelected ? 'bg-white' : (isTeamMode ? 'bg-[#8B7CFF]' : 'bg-secondary')}`}></div>}
                       </span>
                       {count > 0 && (
-                        <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold border-2 bg-secondary text-white border-transparent ">
+                        <div className={`absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black bg-white shadow-sm border border-black/5 ${isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'}`}>
                           {count > 9 ? '9+' : count}
                         </div>
                       )}
@@ -2008,7 +1991,11 @@ const AgendaView: React.FC<{
 
         {/* Context Control Switcher: Minha agenda | Equipe - Only for admin_owner when at least 2 professionals exist (owner + 1) */}
         {userRole === 'admin_owner' && totalTeamCount >= 2 && (
-          <div className="flex items-center justify-center mx-0 mt-3 p-1 rounded-2xl bg-white/[0.08] border border-white/10">
+          <div className={`flex items-center justify-center mx-0 mt-3 p-1 rounded-2xl bg-white/[0.08] border transition-all duration-200 ${
+            isTeamMode 
+              ? 'border-[#8B7CFF]/30 shadow-[0_0_12px_rgba(139,124,255,0.12)]' 
+              : 'border-white/10'
+          }`}>
             <button
               onClick={() => {
                 setAgendaContext('mine');
@@ -2022,20 +2009,34 @@ const AgendaView: React.FC<{
               <User size={15} />
               <span>Minha agenda</span>
             </button>
-            <button
-              onClick={() => {
-                setAgendaContext('team');
-                setTeamFilter('all');
-              }}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
-                agendaContext === 'team'
-                  ? 'bg-[#F99417] text-white shadow-md shadow-[#F99417]/20 scale-[1.02]'
-                  : 'text-white/60 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <Users size={15} />
-              <span>Equipe</span>
-            </button>
+            {(() => {
+              const totalTeamPendingCount = appointments.filter(a => a.date === selectedDate && a.status === 'pending').length;
+              return (
+                <button
+                  onClick={() => {
+                    setAgendaContext('team');
+                    setTeamFilter('all');
+                  }}
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                    agendaContext === 'team'
+                      ? 'bg-[#8B7CFF] text-white shadow-md shadow-[#8B7CFF]/25 scale-[1.02]'
+                      : 'text-white/60 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  <Users size={15} />
+                  <span>Equipe</span>
+                  {totalTeamPendingCount > 0 && (
+                    <span className={`min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center text-[10px] font-black shadow-sm ${
+                      agendaContext === 'team'
+                        ? 'bg-white text-[#8B7CFF]'
+                        : 'bg-white text-[#8B7CFF]'
+                    }`}>
+                      {totalTeamPendingCount > 99 ? '99+' : totalTeamPendingCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })()}
           </div>
         )}
 
@@ -2052,24 +2053,36 @@ const AgendaView: React.FC<{
               {/* MOBILE SELECTOR BAR (sm:hidden) */}
               <div className="flex sm:hidden items-center gap-2 w-full">
                 {/* 'Todos' Button */}
-                <button
-                  onClick={() => setTeamFilter('all')}
-                  className={`px-3.5 py-2.5 rounded-2xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 min-h-[44px] active:scale-95 ${
-                    teamFilter === 'all'
-                      ? 'bg-[#F99417] text-white shadow-lg shadow-[#F99417]/25 ring-2 ring-[#F99417]/50'
-                      : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'
-                  }`}
-                >
-                  <Users size={15} />
-                  <span>Todos ({fullStaffList.length})</span>
-                </button>
+                {(() => {
+                  const totalPendingCount = appointments.filter(a => a.date === selectedDate && a.status === 'pending').length;
+                  return (
+                    <button
+                      onClick={() => setTeamFilter('all')}
+                      className={`px-3.5 py-2.5 rounded-2xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 min-h-[44px] active:scale-95 ${
+                        teamFilter === 'all'
+                          ? 'bg-[#8B7CFF] text-white shadow-lg shadow-[#8B7CFF]/25 ring-2 ring-[#8B7CFF]/50'
+                          : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'
+                      }`}
+                    >
+                      <Users size={15} />
+                      <span>Todos</span>
+                      {totalPendingCount > 0 && (
+                        <span className={`min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center text-[9px] font-black bg-white shadow-sm ${
+                          isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+                        }`}>
+                          {totalPendingCount > 99 ? '99+' : totalPendingCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })()}
 
                 {/* Select Professional Dropdown Button */}
                 <button
                   onClick={() => setShowTeamFilterModal(true)}
                   className={`flex-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold tracking-wider transition-all flex items-center justify-between gap-2 min-h-[44px] border active:scale-95 min-w-0 ${
                     teamFilter !== 'all'
-                      ? 'bg-[#1E1B4B] border-[#F99417] text-white shadow-lg shadow-[#1E1B4B]/50 ring-1 ring-[#F99417]'
+                      ? 'bg-[#1E1B4B] border-[#8B7CFF] text-white shadow-lg shadow-[#1E1B4B]/50 ring-1 ring-[#8B7CFF]'
                       : 'bg-white/10 border-white/10 text-white/90 hover:bg-white/20'
                   }`}
                 >
@@ -2089,50 +2102,70 @@ const AgendaView: React.FC<{
                             selectedTeamMember.userId === tenantOwnerId
                           );
                           const memberPhoto = selectedTeamMember.photo || (isSelf ? currentStaff?.photo : undefined) || (isOwner ? barberProfile?.photo : undefined);
+                          const memberCount = getStaffAppointmentsCount(selectedTeamMember.id, selectedTeamMember.userId);
                           return (
                             <>
                               {memberPhoto ? (
                                 <img src={memberPhoto} alt={selectedTeamMember.name} className="w-5 h-5 rounded-full object-cover shrink-0 border border-white/20" referrerPolicy="no-referrer" />
                               ) : (
-                                <div className="w-5 h-5 rounded-full bg-[#F99417] text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                                <div className="w-5 h-5 rounded-full bg-[#8B7CFF] text-white text-[10px] font-black flex items-center justify-center shrink-0">
                                   {selectedTeamMember.name.charAt(0).toUpperCase()}
                                 </div>
                               )}
                               <span className="truncate text-left text-xs font-extrabold text-white">
                                 {formatProfessionalShortName(selectedTeamMember.name)}
-                                {isSelf && <span className="ml-1 text-[#F99417] font-black text-[10px]">(Você)</span>}
+                                {isSelf && <span className="ml-1 text-[#8B7CFF] font-black text-[10px]">(Você)</span>}
                               </span>
+                              {memberCount > 0 && (
+                                <span className={`min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center text-[9px] font-black bg-white shadow-sm ml-1 ${
+                                  isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+                                }`}>
+                                  {memberCount > 9 ? '9+' : memberCount}
+                                </span>
+                              )}
                             </>
                           );
                         })()}
                       </>
                     ) : (
                       <>
-                        <User size={15} className="text-[#F99417] shrink-0" />
+                        <User size={15} className="text-[#8B7CFF] shrink-0" />
                         <span className="truncate text-left font-bold text-white">
                           Profissional
                         </span>
                       </>
                     )}
                   </div>
-                  <ChevronDown size={16} className="text-[#F99417] shrink-0" />
+                  <ChevronDown size={16} className="text-[#8B7CFF] shrink-0" />
                 </button>
               </div>
 
               {/* DESKTOP CHIPS CAROUSEL (hidden sm:flex) */}
               <div className="hidden sm:flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
                 {/* 'Todos' Pill */}
-                <button
-                  onClick={() => setTeamFilter('all')}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider whitespace-nowrap transition-all flex items-center gap-1.5 shrink-0 ${
-                    teamFilter === 'all'
-                      ? 'bg-white text-[#1E1B4B] shadow-md ring-2 ring-[#F99417]'
-                      : 'bg-white/10 text-white/80 hover:bg-white/20'
-                  }`}
-                >
-                  <Users size={14} />
-                  <span>Todos ({fullStaffList.length})</span>
-                </button>
+                {(() => {
+                  const totalPendingCount = appointments.filter(a => a.date === selectedDate && a.status === 'pending').length;
+                  return (
+                    <button
+                      onClick={() => setTeamFilter('all')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider whitespace-nowrap transition-all flex items-center gap-1.5 shrink-0 ${
+                        teamFilter === 'all'
+                          ? 'bg-white text-[#1E1B4B] shadow-md ring-2 ring-[#8B7CFF]'
+                          : 'bg-white/10 text-white/80 hover:bg-white/20'
+                      }`}
+                    >
+                      <Users size={14} />
+                      <span>Todos ({fullStaffList.length})</span>
+                      {totalPendingCount > 0 && (
+                        <span className={`min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center text-[9px] font-black bg-white shadow-sm ${
+                          isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+                        }`}>
+                          {totalPendingCount > 99 ? '99+' : totalPendingCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })()}
 
                 {/* Staff Members List */}
                 {fullStaffList.map((member) => {
@@ -2150,6 +2183,7 @@ const AgendaView: React.FC<{
                   );
 
                   const memberPhoto = member.photo || (isSelf ? currentStaff?.photo : undefined) || (isOwner ? barberProfile?.photo : undefined);
+                  const memberCount = getStaffAppointmentsCount(member.id, member.userId);
 
                   return (
                     <button
@@ -2157,21 +2191,28 @@ const AgendaView: React.FC<{
                       onClick={() => setTeamFilter(member.id)}
                       className={`px-3.5 py-2 rounded-xl text-xs font-bold tracking-wider whitespace-nowrap transition-all flex items-center gap-2 shrink-0 ${
                         isSelected
-                          ? 'bg-[#1E1B4B] text-white shadow-md ring-2 ring-[#F99417]'
+                          ? 'bg-[#1E1B4B] text-white shadow-md ring-2 ring-[#8B7CFF]'
                           : 'bg-white/10 text-white/80 hover:bg-white/20'
                       }`}
                     >
                       {memberPhoto ? (
                         <img src={memberPhoto} alt={member.name} className="w-4 h-4 rounded-full object-cover" referrerPolicy="no-referrer" />
                       ) : (
-                        <div className="w-4 h-4 rounded-full bg-[#F99417] text-white text-[9px] font-bold flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full bg-[#8B7CFF] text-white text-[9px] font-bold flex items-center justify-center">
                           {member.name.charAt(0).toUpperCase()}
                         </div>
                       )}
                       <span>
                         {member.name}
-                        {isSelf && <span className="ml-1 text-[#F99417] font-black text-[10px]">(Você)</span>}
+                        {isSelf && <span className="ml-1 text-[#8B7CFF] font-black text-[10px]">(Você)</span>}
                       </span>
+                      {memberCount > 0 && (
+                        <span className={`min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center text-[9px] font-black bg-white shadow-sm ${
+                          isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+                        }`}>
+                          {memberCount > 9 ? '9+' : memberCount}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -2199,7 +2240,11 @@ const AgendaView: React.FC<{
           >
             <button 
               onClick={onNavigateToCaixa}
-              className="w-full h-full rounded-[14px] py-[12px] px-[14px] flex flex-col justify-between bg-[#F99417] shadow-[0_4px_12px_rgba(0,0,0,0.18)] relative overflow-hidden group text-left active:scale-[0.97] transition-all min-h-[82px]"
+              className={`w-full h-full rounded-[14px] py-[12px] px-[14px] flex flex-col justify-between ${
+                isTeamMode 
+                  ? 'bg-[#8B7CFF] shadow-[0_4px_14px_rgba(139,124,255,0.28)]' 
+                  : 'bg-[#F99417] shadow-[0_4px_12px_rgba(0,0,0,0.18)]'
+              } relative overflow-hidden group text-left active:scale-[0.97] transition-all duration-300 min-h-[82px]`}
             >
               {/* Decoração — círculo grande translúcido */}
               <div className="absolute -right-6 -top-6 w-32 h-32 rounded-full pointer-events-none"
@@ -2255,7 +2300,7 @@ const AgendaView: React.FC<{
             <SectionHeader 
               title={agendaContext === 'mine' ? 'Minha Agenda' : teamFilter === 'all' ? 'Agenda da Equipe' : `Agenda — ${fullStaffList.find(s => s.id === teamFilter || s.userId === teamFilter)?.name || 'Profissional'}`} 
               count={currentDayAppointments.filter(a => a.status === 'pending').length} 
-              accent="blue" 
+              accent={isTeamMode ? "purple" : "blue"} 
             />
           )}
           
@@ -2291,7 +2336,7 @@ const AgendaView: React.FC<{
                     className="w-full px-4 py-3 text-left text-[13px] font-semibold text-[#1E1B4B] hover:bg-[#F5F5F8] flex items-center justify-between"
                   >
                     {opt.label}
-                    {activeFilter === opt.value && <Check size={14} className="text-[#F99417]" />}
+                    {activeFilter === opt.value && <Check size={14} className={isTeamMode ? "text-[#8B7CFF]" : "text-[#F99417]"} />}
                   </button>
                 ))}
               </div>
@@ -2300,11 +2345,15 @@ const AgendaView: React.FC<{
         </div>
 
         {activeFilter !== 'todos' && (
-          <div className="flex items-center justify-between bg-[#F99417]/10 rounded-xl px-3 py-2 mb-2">
-            <span className="text-[11px] font-bold text-[#B7620A] uppercase tracking-widest">
+          <div className={`flex items-center justify-between rounded-xl px-3 py-2 mb-2 ${
+            isTeamMode ? 'bg-[#8B7CFF]/10 text-[#6B5CF6]' : 'bg-[#F99417]/10 text-[#B7620A]'
+          }`}>
+            <span className="text-[11px] font-bold uppercase tracking-widest">
               ⚠ Exibindo apenas: {activeFilter === 'agendados' ? 'Agendados' : activeFilter === 'livres' ? 'Horários Livres' : 'Concluídos'}
             </span>
-            <button onClick={() => setActiveFilter('todos')} className="text-[11px] font-black text-[#F99417] underline">
+            <button onClick={() => setActiveFilter('todos')} className={`text-[11px] font-black underline ${
+              isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+            }`}>
               Limpar
             </button>
           </div>
@@ -2969,7 +3018,7 @@ const AgendaView: React.FC<{
               {/* Modal Handle Header */}
               <div className="p-4 sm:p-5 pb-3 border-b border-white/10 flex items-center justify-between bg-black/20 shrink-0">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-xl bg-[#F99417]/20 text-[#F99417] flex items-center justify-center font-bold shrink-0">
+                  <div className="w-8 h-8 rounded-xl bg-[#8B7CFF]/20 text-[#8B7CFF] flex items-center justify-center font-bold shrink-0">
                     <Users size={18} />
                   </div>
                   <div>
@@ -2988,36 +3037,50 @@ const AgendaView: React.FC<{
               {/* Members Content - Scrollable container with flex-1 min-h-0 and generous bottom padding */}
               <div className="p-4 space-y-3 overflow-y-auto flex-1 min-h-0 touch-pan-y overscroll-contain pb-20">
                 {/* Option: Todos os Profissionais (Full Width) */}
-                <button
-                  onClick={() => {
-                    setTeamFilter('all');
-                    setShowTeamFilterModal(false);
-                  }}
-                  className={`w-full p-3.5 rounded-2xl flex items-center justify-between gap-3 text-left transition-all min-h-[52px] active:scale-[0.98] border ${
-                    teamFilter === 'all'
-                      ? 'bg-[#F99417] text-white font-bold shadow-lg shadow-[#F99417]/20 ring-1 ring-[#F99417] border-[#F99417]'
-                      : 'bg-white/5 hover:bg-white/10 text-white/90 border-white/10'
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 ${
-                      teamFilter === 'all' ? 'bg-white/20 text-white' : 'bg-white/10 text-[#F99417]'
-                    }`}>
-                      <Users size={18} />
-                    </div>
-                    <div>
-                      <span className="font-extrabold text-sm block">Todos os Profissionais</span>
-                      <span className={`text-[11px] block ${teamFilter === 'all' ? 'text-white/80' : 'text-white/50'}`}>
-                        Visualizar agenda completa ({fullStaffList.length})
-                      </span>
-                    </div>
-                  </div>
-                  {teamFilter === 'all' && (
-                    <div className="w-6 h-6 rounded-full bg-white text-[#F99417] flex items-center justify-center shrink-0 shadow">
-                      <Check size={14} strokeWidth={3} />
-                    </div>
-                  )}
-                </button>
+                {(() => {
+                  const totalPendingCount = appointments.filter(a => a.date === selectedDate && a.status === 'pending').length;
+                  return (
+                    <button
+                      onClick={() => {
+                        setTeamFilter('all');
+                        setShowTeamFilterModal(false);
+                      }}
+                      className={`w-full p-3.5 rounded-2xl flex items-center justify-between gap-3 text-left transition-all min-h-[52px] active:scale-[0.98] border ${
+                        teamFilter === 'all'
+                          ? 'bg-[#8B7CFF] text-white font-bold shadow-lg shadow-[#8B7CFF]/25 ring-1 ring-[#8B7CFF] border-[#8B7CFF]'
+                          : 'bg-white/5 hover:bg-white/10 text-white/90 border-white/10'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 ${
+                          teamFilter === 'all' ? 'bg-white/20 text-white' : 'bg-white/10 text-[#8B7CFF]'
+                        }`}>
+                          <Users size={18} />
+                        </div>
+                        <div>
+                          <span className="font-extrabold text-sm block">Todos os Profissionais</span>
+                          <span className={`text-[11px] block ${teamFilter === 'all' ? 'text-white/80' : 'text-white/50'}`}>
+                            Visualizar agenda completa ({fullStaffList.length})
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {totalPendingCount > 0 && (
+                          <div className={`min-w-[20px] h-5 px-1.5 rounded-full flex items-center justify-center text-[10px] font-black bg-white shadow-sm border border-black/5 ${
+                            isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+                          }`}>
+                            {totalPendingCount > 99 ? '99+' : totalPendingCount}
+                          </div>
+                        )}
+                        {teamFilter === 'all' && (
+                          <div className="w-6 h-6 rounded-full bg-white text-[#8B7CFF] flex items-center justify-center shrink-0 shadow">
+                            <Check size={14} strokeWidth={3} />
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })()}
 
                 {/* Section Header */}
                 <div className="pt-1">
@@ -3043,6 +3106,7 @@ const AgendaView: React.FC<{
                     );
                     const memberPhoto = member.photo || (isSelf ? currentStaff?.photo : undefined) || (isOwner ? barberProfile?.photo : undefined);
                     const shortName = formatProfessionalShortName(member.name);
+                    const memberCount = getStaffAppointmentsCount(member.id, member.userId);
 
                     return (
                       <button
@@ -3051,9 +3115,9 @@ const AgendaView: React.FC<{
                           setTeamFilter(member.id);
                           setShowTeamFilterModal(false);
                         }}
-                        className={`relative p-3 rounded-2xl flex items-center gap-2.5 text-left transition-all min-h-[60px] active:scale-[0.97] border ${
+                        className={`relative p-3 rounded-2xl flex items-center gap-2 text-left transition-all min-h-[60px] active:scale-[0.97] border ${
                           isSelected
-                            ? 'bg-[#1E1B4B] border-[#F99417] text-white shadow-lg shadow-[#F99417]/15 ring-1 ring-[#F99417]'
+                            ? 'bg-[#1E1B4B] border-[#8B7CFF] text-white shadow-lg shadow-[#8B7CFF]/20 ring-1 ring-[#8B7CFF]'
                             : 'bg-white/5 hover:bg-white/10 text-white/90 border-white/10'
                         }`}
                       >
@@ -3062,19 +3126,19 @@ const AgendaView: React.FC<{
                           {memberPhoto ? (
                             <img src={memberPhoto} alt={member.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                           ) : (
-                            <div className="w-full h-full bg-[#F99417] text-white text-xs font-black flex items-center justify-center">
+                            <div className="w-full h-full bg-[#8B7CFF] text-white text-xs font-black flex items-center justify-center">
                               {member.name.charAt(0).toUpperCase()}
                             </div>
                           )}
                         </div>
 
                         {/* Professional Name Info */}
-                        <div className="min-w-0 flex-1 pr-3">
+                        <div className="min-w-0 flex-1">
                           <span className="font-extrabold text-xs text-white block truncate leading-tight">
                             {shortName}
                           </span>
                           {isSelf ? (
-                            <span className="text-[10px] font-black uppercase text-[#F99417] tracking-wider block truncate mt-0.5">
+                            <span className="text-[10px] font-black uppercase text-[#8B7CFF] tracking-wider block truncate mt-0.5">
                               Você
                             </span>
                           ) : (
@@ -3084,12 +3148,21 @@ const AgendaView: React.FC<{
                           )}
                         </div>
 
-                        {/* Selected Indicator Checkmark */}
-                        {isSelected && (
-                          <div className="absolute top-2 right-2 w-4 h-4 rounded-full bg-[#F99417] text-white flex items-center justify-center shrink-0 shadow">
-                            <Check size={11} strokeWidth={3.5} />
-                          </div>
-                        )}
+                        {/* Right Indicators: Appointment Count Badge and Checkmark */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {memberCount > 0 && (
+                            <div className={`min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center text-[10px] font-black bg-white shadow-sm border border-black/5 ${
+                              isTeamMode ? 'text-[#8B7CFF]' : 'text-[#F99417]'
+                            }`}>
+                              {memberCount > 9 ? '9+' : memberCount}
+                            </div>
+                          )}
+                          {isSelected && (
+                            <div className="w-4 h-4 rounded-full bg-[#8B7CFF] text-white flex items-center justify-center shrink-0 shadow">
+                              <Check size={11} strokeWidth={3.5} />
+                            </div>
+                          )}
+                        </div>
                       </button>
                     );
                   })}
@@ -3247,7 +3320,7 @@ const AddAppointmentModal: React.FC<{
   onSuccess?: () => void;
 }> = ({ selectedDate: initialDate, selectedTime: initialTime, prefilledCustomer, isExceptional = false, onClose, onSuccess }) => {
   useLockBodyScroll();
-  const { addAppointment, appointments, weeklySchedule, services, customers, addCustomer, staff, selectedStaffId, activeTenant, userRole, session } = useStore();
+  const { addAppointment, appointments, weeklySchedule, services, customers, addCustomer, staff, currentStaff, selectedStaffId, activeTenant, userRole, session } = useStore();
 
   const getRoundedCurrentTime = () => {
     const now = new Date();
@@ -3259,16 +3332,18 @@ const AddAppointmentModal: React.FC<{
     return d.toTimeString().substring(0, 5);
   };
 
-  const myStaff = useMemo(() => staff.find(s => s.userId === session?.user?.id || s.id === session?.user?.id), [staff, session?.user?.id]);
+  const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
+  const myStaff = useMemo(() => staff.find(s => s.userId === session?.user?.id || s.id === session?.user?.id) || currentStaff, [staff, session?.user?.id, currentStaff]);
   const initialStaffId = useMemo(() => {
-    if (userRole === 'staff') {
-      return myStaff?.id || session?.user?.id || '';
+    if (!isAdmin) {
+      return currentStaff?.id || myStaff?.id || '';
     }
     if (selectedStaffId && selectedStaffId !== 'all') {
-      return selectedStaffId;
+      const selectedMember = staff.find(s => s.id === selectedStaffId || s.userId === selectedStaffId);
+      if (selectedMember) return selectedMember.id;
     }
-    return staff[0]?.id || session?.user?.id || '';
-  }, [userRole, myStaff, session?.user?.id, selectedStaffId, staff]);
+    return currentStaff?.id || myStaff?.id || staff[0]?.id || '';
+  }, [isAdmin, currentStaff?.id, myStaff?.id, selectedStaffId, staff]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(prefilledCustomer || null);
@@ -3437,10 +3512,19 @@ const AddAppointmentModal: React.FC<{
       }
     }
 
+    const effectiveStaffId = isAdmin 
+      ? (data.staffId || currentStaff?.id || myStaff?.id || staff[0]?.id) 
+      : (currentStaff?.id || myStaff?.id);
+
+    if (!effectiveStaffId) {
+      alert("Erro: Profissional não identificado.");
+      return;
+    }
+
     addAppointment({
       id: Date.now().toString(),
       tenantId: activeTenant?.id || undefined,
-      staffId: data.staffId || undefined,
+      staffId: effectiveStaffId,
       clientName: capitalizeName(data.name),
       phone: normalizePhone(data.phone),
       date: data.date,
@@ -3818,7 +3902,7 @@ const AddAppointmentModal: React.FC<{
                 )}
               </div>
             )}
-            {staff.length > 1 && (
+            {isAdmin && staff.length > 1 && (
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-title uppercase tracking-widest ml-1 flex items-center gap-1">
                   Profissional

@@ -48,27 +48,18 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
     return false;
   }, [session?.user?.id, userRole, isOwnerMember]);
 
-  // Garantir que o dono sempre esteja presente na lista exibida
+  // Lista de profissionais reais ordenados com o Administrador no topo
   const staffListToRender = React.useMemo(() => {
     const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
-    const hasOwner = staff.some(s => s.id === tenantOwnerId || s.userId === tenantOwnerId || s.role === 'admin' || s.role === 'admin_owner');
-    
-    if (!hasOwner && tenantOwnerId) {
-      const ownerMember: Staff = {
-        id: tenantOwnerId,
-        tenantId: tenantOwnerId,
-        userId: tenantOwnerId,
-        name: barberProfile?.name || 'Administrador',
-        phone: barberProfile?.personalPhone || '',
-        photo: barberProfile?.photo,
-        status: 'active',
-        commissionRate: 100,
-        role: 'admin'
-      };
-      return [ownerMember, ...staff];
-    }
-    return staff;
-  }, [staff, activeTenant?.id, barberProfile, session?.user?.id]);
+    return [...staff].sort((a, b) => {
+      const aIsAdmin = (a.role === 'admin' || a.role === 'admin_owner' || a.userId === tenantOwnerId || a.id === tenantOwnerId) ? 1 : 0;
+      const bIsAdmin = (b.role === 'admin' || b.role === 'admin_owner' || b.userId === tenantOwnerId || b.id === tenantOwnerId) ? 1 : 0;
+      if (aIsAdmin !== bIsAdmin) {
+        return bIsAdmin - aIsAdmin;
+      }
+      return (a.name || '').localeCompare(b.name || '');
+    });
+  }, [staff, activeTenant?.id, barberProfile?.id, session?.user?.id]);
   
   // Profissional em edição ou configuração
   const [selectedStaffMember, setSelectedStaffMember] = useState<Staff | null>(null);

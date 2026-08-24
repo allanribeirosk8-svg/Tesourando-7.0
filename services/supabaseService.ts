@@ -252,22 +252,19 @@ export const supabaseService = {
         return [];
       }
 
-      let ownerId = idToUse;
-      const { data: shop } = await supabase
-        .from('barbershops')
-        .select('owner_id')
-        .eq('id', idToUse)
-        .maybeSingle();
+      const ctx = await this.resolveTenantContext(idToUse);
+      const barbershopId = ctx.barbershopId;
+      const ownerId = ctx.tenantOwnerId || idToUse;
+      const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, idToUse];
 
-      if (shop?.owner_id) {
-        ownerId = shop.owner_id;
+      let query = supabase.from('services').select('*');
+      if (barbershopId) {
+        query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')}),user_id.eq.${ownerId}`);
+      } else {
+        query = query.or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
       }
 
-      const { data, error } = await supabase
-        .from('services')
-        .select('*')
-        .or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`)
-        .order('order_index', { ascending: true });
+      const { data, error } = await query.order('order_index', { ascending: true });
       
       if (error) {
         throw error;
@@ -294,6 +291,9 @@ export const supabaseService = {
       throw new Error('Apenas o proprietário do salão (admin_owner) pode salvar ou gerenciar serviços.');
     }
 
+    const ctx = await this.resolveTenantContext(userId);
+    const barbershopId = ctx.barbershopId;
+
     const existingIds = services.map(s => s.id);
 
     if (existingIds.length > 0) {
@@ -310,14 +310,20 @@ export const supabaseService = {
     }
 
     const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-    const payload = services.map((s, index) => ({
-      id: isUUID(s.id) ? s.id : crypto.randomUUID(),
-      user_id: userId,
-      name: s.name,
-      price: s.price,
-      duration: s.duration,
-      order_index: index
-    }));
+    const payload = services.map((s, index) => {
+      const item: any = {
+        id: isUUID(s.id) ? s.id : crypto.randomUUID(),
+        user_id: userId,
+        name: s.name,
+        price: s.price,
+        duration: s.duration,
+        order_index: index
+      };
+      if (barbershopId) {
+        item.barbershop_id = barbershopId;
+      }
+      return item;
+    });
 
     const { data, error } = await supabase.from('services')
       .upsert(payload as any)
@@ -352,21 +358,19 @@ export const supabaseService = {
       const idToUse = targetUserId || await this.getUserId();
       if (!idToUse) return [];
 
-      let ownerId = idToUse;
-      const { data: shop } = await supabase
-        .from('barbershops')
-        .select('owner_id')
-        .eq('id', idToUse)
-        .maybeSingle();
+      const ctx = await this.resolveTenantContext(idToUse);
+      const barbershopId = ctx.barbershopId;
+      const ownerId = ctx.tenantOwnerId || idToUse;
+      const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, idToUse];
 
-      if (shop?.owner_id) {
-        ownerId = shop.owner_id;
+      let query = supabase.from('customers').select('*, customer_photos(*)');
+      if (barbershopId) {
+        query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')}),user_id.eq.${ownerId}`);
+      } else {
+        query = query.or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
       }
 
-      const { data, error } = await supabase
-        .from('customers')
-        .select('*, customer_photos(*)')
-        .or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
+      const { data, error } = await query;
 
       if (error) throw error;
       if (!data) return [];
@@ -388,43 +392,74 @@ export const supabaseService = {
     }
   },
   async saveCustomer(customer: Customer, targetUserId?: string) {
-    const userId = targetUserId || await this.getUserId();
-    if (!userId) throw new Error('User not authenticated');
+    const sessionRes = await supabase.auth.getSession();
+    const currentAuthId = sessionRes?.data?.session?.user?.id;
+    const userId = targetUserId || currentAuthId || await this.getUserId();
+    if (!userId && !currentAuthId) throw new Error('User not authenticated');
+
+    const ctx = await this.resolveTenantContext(userId || currentAuthId!);
+    const barbershopId = ctx.barbershopId;
+    const tenantOwnerId = ctx.tenantOwnerId || userId;
 
     const { photos, ...rest } = customer;
-    const { data, error } = await supabase.from('customers').upsert({
-    user_id: userId,
-    phone: customer.phone,
-    name: customer.name,
-    avatar: customer.avatar,
-    cut_count: customer.cutCount,
-    no_show_count: customer.noShowCount || 0
-    } as any, { onConflict: 'phone,user_id' }).select().single();
+    const payload: any = {
+      user_id: currentAuthId || tenantOwnerId || userId,
+      phone: customer.phone,
+      name: customer.name,
+      avatar: customer.avatar,
+      cut_count: customer.cutCount,
+      no_show_count: customer.noShowCount || 0
+    };
+
+    if (barbershopId) {
+      payload.barbershop_id = barbershopId;
+    }
+
+    const { data, error } = await supabase.from('customers').upsert(payload, { onConflict: 'phone,user_id' }).select().single();
     
-    if (error) throw error;
-    
-    // We don't save photos here anymore to avoid duplication. 
-    // Photos should be saved via addCustomerPhoto or handle separately.
+    if (error) {
+      // Fallback in case of onConflict 'phone,barbershop_id' or 'phone'
+      const { data: fallbackData, error: fallbackError } = await supabase.from('customers').upsert(payload).select().single();
+      if (fallbackError) throw error;
+      return fallbackData;
+    }
     
     return data;
   },
   async addCustomerPhoto(phone: string, photo: { url: string; description: string; date: string }) {
-    const userId = await this.getUserId();
+    const sessionRes = await supabase.auth.getSession();
+    const currentAuthId = sessionRes?.data?.session?.user?.id;
+    const userId = currentAuthId || await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
 
-    const { error } = await supabase.from('customer_photos').insert({
+    const ctx = await this.resolveTenantContext(userId);
+    const barbershopId = ctx.barbershopId;
+
+    const payload: any = {
       user_id: userId,
       customer_phone: phone,
       url: photo.url,
       description: photo.description,
       date: photo.date
-    } as any);
+    };
+    if (barbershopId) {
+      payload.barbershop_id = barbershopId;
+    }
+
+    const { error } = await supabase.from('customer_photos').insert(payload as any);
     
     if (error) throw error;
   },
   async updateCustomer(oldPhone: string, customer: Customer) {
-    const userId = await this.getUserId();
+    const sessionRes = await supabase.auth.getSession();
+    const currentAuthId = sessionRes?.data?.session?.user?.id;
+    const userId = currentAuthId || await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
+
+    const ctx = await this.resolveTenantContext(userId);
+    const barbershopId = ctx.barbershopId;
+    const ownerId = ctx.tenantOwnerId || userId;
+    const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, userId];
 
     const normalizedOld = normalizePhone(oldPhone);
     const normalizedNew = normalizePhone(customer.phone);
@@ -432,73 +467,104 @@ export const supabaseService = {
     if (normalizedOld !== normalizedNew) {
       // If phone changed, we need to handle the PK change
       // 1. Create new customer record
-      const { error: insertError } = await supabase.from('customers').insert({
+      const newPayload: any = {
         user_id: userId,
         phone: customer.phone,
         name: customer.name,
         avatar: customer.avatar,
         cut_count: customer.cutCount,
         no_show_count: customer.noShowCount || 0
-      } as any);
+      };
+      if (barbershopId) newPayload.barbershop_id = barbershopId;
+
+      const { error: insertError } = await supabase.from('customers').insert(newPayload as any);
       
       if (insertError) throw insertError;
 
       // 2. Update photos to point to new phone
-      const { error: photoError } = await (supabase.from('customer_photos') as any)
+      let photoQuery = (supabase.from('customer_photos') as any)
         .update({ customer_phone: customer.phone } as any)
-        .eq('user_id', userId)
         .eq('customer_phone', oldPhone);
-      
-      if (photoError) throw photoError;
+      if (barbershopId) {
+        photoQuery = photoQuery.eq('barbershop_id', barbershopId);
+      } else {
+        photoQuery = photoQuery.in('user_id', memberIds);
+      }
+      await photoQuery;
 
       // 3. Update appointments to point to new phone
-      const { error: aptError } = await (supabase.from('appointments') as any)
+      let aptQuery = (supabase.from('appointments') as any)
         .update({ phone: customer.phone, client_name: customer.name } as any)
-        .eq('user_id', userId)
         .eq('phone', oldPhone);
-      
-      if (aptError) throw aptError;
+      if (barbershopId) {
+        aptQuery = aptQuery.eq('barbershop_id', barbershopId);
+      } else {
+        aptQuery = aptQuery.in('user_id', memberIds);
+      }
+      await aptQuery;
 
       // 4. Delete old customer record
-      const { error: deleteError } = await (supabase.from('customers') as any)
+      let deleteQuery = (supabase.from('customers') as any)
         .delete()
-        .eq('user_id', userId)
         .eq('phone', oldPhone);
-      
-      if (deleteError) throw deleteError;
+      if (barbershopId) {
+        deleteQuery = deleteQuery.eq('barbershop_id', barbershopId);
+      } else {
+        deleteQuery = deleteQuery.in('user_id', memberIds);
+      }
+      await deleteQuery;
     } else {
       // Just a normal update
-      const { error } = await (supabase.from('customers') as any).update({
+      const updatePayload: any = {
         name: customer.name,
         avatar: customer.avatar,
         cut_count: customer.cutCount,
         no_show_count: customer.noShowCount || 0
-      } as any)
-      .eq('user_id', userId)
-      .eq('phone', customer.phone);
+      };
+      if (barbershopId) updatePayload.barbershop_id = barbershopId;
+
+      let updateQuery = (supabase.from('customers') as any).update(updatePayload)
+        .eq('phone', customer.phone);
+      if (barbershopId) {
+        updateQuery = updateQuery.eq('barbershop_id', barbershopId);
+      } else {
+        updateQuery = updateQuery.in('user_id', memberIds);
+      }
       
+      const { error } = await updateQuery;
       if (error) throw error;
 
       // Also update appointments name if it changed
-      const { error: aptError } = await (supabase.from('appointments') as any)
+      let aptUpdateQuery = (supabase.from('appointments') as any)
         .update({ client_name: customer.name } as any)
-        .eq('user_id', userId)
         .eq('phone', customer.phone);
-      
-      if (aptError) throw aptError;
+      if (barbershopId) {
+        aptUpdateQuery = aptUpdateQuery.eq('barbershop_id', barbershopId);
+      } else {
+        aptUpdateQuery = aptUpdateQuery.in('user_id', memberIds);
+      }
+      await aptUpdateQuery;
     }
   },
   async checkDuplicateCustomer(phone: string) {
-    const userId = await this.getUserId();
+    const sessionRes = await supabase.auth.getSession();
+    const currentAuthId = sessionRes?.data?.session?.user?.id;
+    const userId = currentAuthId || await this.getUserId();
     if (!userId) return null;
 
-    const { data, error } = await supabase
-      .from('customers')
-      .select('phone, name')
-      .eq('phone', phone)
-      .eq('user_id', userId)
-      .maybeSingle();
-    
+    const ctx = await this.resolveTenantContext(userId);
+    const barbershopId = ctx.barbershopId;
+    const ownerId = ctx.tenantOwnerId || userId;
+    const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, userId];
+
+    let query = supabase.from('customers').select('phone, name').eq('phone', phone);
+    if (barbershopId) {
+      query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')})`);
+    } else {
+      query = query.or(`user_id.eq.${userId},user_id.eq.${ownerId}`);
+    }
+
+    const { data, error } = await query.maybeSingle();
     if (error) throw error;
     return data;
   },
@@ -507,42 +573,49 @@ export const supabaseService = {
   async getAppointments(targetUserId?: string) {
     if (isNetworkOffline) return [];
     try {
-      const userId = targetUserId || await this.getUserId();
-      if (!userId) return [];
+      const idToUse = targetUserId || await this.getUserId();
+      if (!idToUse) return [];
 
-      const memberIds = await this.getTenantMemberIds(userId);
-      const { data, error } = await supabase
-        .from('appointments')
-        .select('*')
-        .or(`tenant_id.eq.${userId},user_id.in.(${memberIds.join(',')})`);
-
-      let rows = data;
-      if (error || !rows) {
-        const { data: fallbackData, error: fallbackErr } = await supabase
-          .from('appointments')
-          .select('*')
-          .in('user_id', memberIds);
-        if (fallbackErr) throw fallbackErr;
-        rows = fallbackData;
+      const ctx = await this.resolveTenantContext(idToUse);
+      const barbershopId = ctx.barbershopId;
+      if (!barbershopId) {
+        throw new Error(`[getAppointments] Contexto de barbearia (barbershop_id) não encontrado para o usuário ${idToUse}.`);
       }
 
-      if (!rows) return [];
-      return (rows as any[]).map(a => ({
-        id: a.id,
-        tenantId: a.tenant_id || userId,
-        staffId: a.staff_id || a.user_id || userId,
-        userId: a.user_id,
-        date: a.date ? a.date.substring(0, 10) : '',
-        time: normalizeTime(a.time),
-        clientName: a.client_name,
-        phone: a.phone,
-        service: a.service,
-        price: Number(a.price),
-        duration: a.duration,
-        status: a.status,
-        observation: a.observation,
-        createdAt: new Date(a.created_at).getTime()
-      })) as Appointment[];
+      let query = supabase.from('appointments').select('*').eq('barbershop_id', barbershopId);
+
+      if (ctx.role === 'staff') {
+        if (!ctx.staffProfileId) {
+          throw new Error(`[getAppointments] Perfil de colaborador (staff_profiles.id) não encontrado para o colaborador ${idToUse}.`);
+        }
+        query = query.eq('staff_id', ctx.staffProfileId);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+      if (!data) return [];
+
+      return (data as any[]).map(a => {
+        if (!a.barbershop_id) {
+          throw new Error(`[getAppointments] Appointment ${a.id} possui barbershop_id nulo no banco.`);
+        }
+        return {
+          id: a.id,
+          tenantId: a.barbershop_id,
+          staffId: a.staff_id ?? null,
+          userId: a.user_id,
+          date: a.date ? a.date.substring(0, 10) : '',
+          time: normalizeTime(a.time),
+          clientName: a.client_name,
+          phone: a.phone,
+          service: a.service,
+          price: Number(a.price),
+          duration: a.duration,
+          status: a.status,
+          observation: a.observation,
+          createdAt: new Date(a.created_at).getTime()
+        } as Appointment;
+      });
     } catch (err: any) {
       return handleNetworkError('getAppointments', err, []);
     }
@@ -551,35 +624,54 @@ export const supabaseService = {
   async getAppointmentsByDate(date: string, targetUserId?: string) {
     if (isNetworkOffline) return [];
     try {
-      const userId = targetUserId || await this.getUserId();
-      if (!userId) return [];
+      const idToUse = targetUserId || await this.getUserId();
+      if (!idToUse) return [];
 
-      const memberIds = await this.getTenantMemberIds(userId);
-      const { data, error } = await supabase
+      const ctx = await this.resolveTenantContext(idToUse);
+      const barbershopId = ctx.barbershopId;
+      if (!barbershopId) {
+        throw new Error(`[getAppointmentsByDate] Contexto de barbearia (barbershop_id) não encontrado para o usuário ${idToUse}.`);
+      }
+
+      let query = supabase
         .from('appointments')
         .select('*')
-        .in('user_id', memberIds)
-        .eq('date', date)
-        .order('time', { ascending: true });
+        .eq('barbershop_id', barbershopId)
+        .eq('date', date);
+
+      if (ctx.role === 'staff') {
+        if (!ctx.staffProfileId) {
+          throw new Error(`[getAppointmentsByDate] Perfil de colaborador (staff_profiles.id) não encontrado para o colaborador ${idToUse}.`);
+        }
+        query = query.eq('staff_id', ctx.staffProfileId);
+      }
+
+      const { data, error } = await query.order('time', { ascending: true });
       
       if (error) throw error;
       if (!data) return [];
-      return (data as any[]).map(a => ({
-        id: a.id,
-        tenantId: a.tenant_id || userId,
-        staffId: a.staff_id || a.user_id || userId,
-        userId: a.user_id,
-        date: a.date ? a.date.substring(0, 10) : '',
-        time: normalizeTime(a.time),
-        clientName: a.client_name,
-        phone: a.phone,
-        service: a.service,
-        price: Number(a.price),
-        duration: a.duration,
-        status: a.status,
-        observation: a.observation,
-        createdAt: new Date(a.created_at).getTime()
-      })) as Appointment[];
+
+      return (data as any[]).map(a => {
+        if (!a.barbershop_id) {
+          throw new Error(`[getAppointmentsByDate] Appointment ${a.id} possui barbershop_id nulo no banco.`);
+        }
+        return {
+          id: a.id,
+          tenantId: a.barbershop_id,
+          staffId: a.staff_id ?? null,
+          userId: a.user_id,
+          date: a.date ? a.date.substring(0, 10) : '',
+          time: normalizeTime(a.time),
+          clientName: a.client_name,
+          phone: a.phone,
+          service: a.service,
+          price: Number(a.price),
+          duration: a.duration,
+          status: a.status,
+          observation: a.observation,
+          createdAt: new Date(a.created_at).getTime()
+        } as Appointment;
+      });
     } catch (err) {
       return handleNetworkError(`getAppointmentsByDate`, err, []);
     }
@@ -588,28 +680,47 @@ export const supabaseService = {
   async getMyAppointments(viewerUserId: string): Promise<Appointment[]> {
     if (isNetworkOffline) return [];
     try {
-      const { data, error } = await supabase
+      const ctx = await this.resolveTenantContext(viewerUserId);
+      const barbershopId = ctx.barbershopId;
+      if (!barbershopId) {
+        throw new Error(`[getMyAppointments] Contexto de barbearia (barbershop_id) não encontrado para o usuário ${viewerUserId}.`);
+      }
+
+      if (!ctx.staffProfileId) {
+        // Owner/admin sem staff_profiles: não tentar usar userId como staff_id; retornar array vazio
+        return [];
+      }
+
+      const query = supabase
         .from('appointments')
         .select('*')
-        .or(`user_id.eq.${viewerUserId},staff_id.eq.${viewerUserId}`);
+        .eq('barbershop_id', barbershopId)
+        .eq('staff_id', ctx.staffProfileId);
+
+      const { data, error } = await query;
 
       if (error) throw error;
-      return (data || []).map((a: any) => ({
-        id: a.id,
-        tenantId: a.tenant_id || viewerUserId,
-        staffId: a.staff_id || a.user_id || viewerUserId,
-        userId: a.user_id,
-        date: a.date ? a.date.substring(0, 10) : '',
-        time: normalizeTime(a.time),
-        clientName: a.client_name,
-        phone: a.phone,
-        service: a.service,
-        price: Number(a.price),
-        duration: a.duration,
-        status: a.status,
-        observation: a.observation,
-        createdAt: new Date(a.created_at).getTime()
-      })) as Appointment[];
+      return (data || []).map((a: any) => {
+        if (!a.barbershop_id) {
+          throw new Error(`[getMyAppointments] Appointment ${a.id} possui barbershop_id nulo no banco.`);
+        }
+        return {
+          id: a.id,
+          tenantId: a.barbershop_id,
+          staffId: a.staff_id ?? null,
+          userId: a.user_id,
+          date: a.date ? a.date.substring(0, 10) : '',
+          time: normalizeTime(a.time),
+          clientName: a.client_name,
+          phone: a.phone,
+          service: a.service,
+          price: Number(a.price),
+          duration: a.duration,
+          status: a.status,
+          observation: a.observation,
+          createdAt: new Date(a.created_at).getTime()
+        } as Appointment;
+      });
     } catch (err) {
       return handleNetworkError('getMyAppointments', err, []);
     }
@@ -622,41 +733,100 @@ export const supabaseService = {
   async getStaffAppointments(staffUserIdOrId: string, tenantOwnerUserId: string): Promise<Appointment[]> {
     if (isNetworkOffline) return [];
     try {
-      const { data, error } = await supabase
+      const ctx = await this.resolveTenantContext(tenantOwnerUserId);
+      const barbershopId = ctx.barbershopId;
+      if (!barbershopId) {
+        throw new Error(`[getStaffAppointments] Contexto de barbearia (barbershop_id) não encontrado para a barbearia ${tenantOwnerUserId}.`);
+      }
+
+      // Validar se staffUserIdOrId é staffProfileId ou userId e buscar staff_profiles.id real
+      let targetStaffProfileId = staffUserIdOrId;
+      const { data: staffData } = await supabase
+        .from('staff_profiles')
+        .select('id, user_id, barbershop_id')
+        .or(`id.eq.${staffUserIdOrId},user_id.eq.${staffUserIdOrId}`)
+        .eq('barbershop_id', barbershopId)
+        .maybeSingle();
+
+      if (staffData?.id) {
+        targetStaffProfileId = staffData.id;
+      }
+
+      const query = supabase
         .from('appointments')
         .select('*')
-        .or(`staff_id.eq.${staffUserIdOrId},user_id.eq.${staffUserIdOrId}`);
+        .eq('barbershop_id', barbershopId)
+        .eq('staff_id', targetStaffProfileId);
+
+      const { data, error } = await query;
 
       if (error) throw error;
-      return (data || []).map((a: any) => ({
-        id: a.id,
-        tenantId: a.tenant_id || tenantOwnerUserId,
-        staffId: a.staff_id || a.user_id || tenantOwnerUserId,
-        userId: a.user_id,
-        date: a.date ? a.date.substring(0, 10) : '',
-        time: normalizeTime(a.time),
-        clientName: a.client_name,
-        phone: a.phone,
-        service: a.service,
-        price: Number(a.price),
-        duration: a.duration,
-        status: a.status,
-        observation: a.observation,
-        createdAt: new Date(a.created_at).getTime()
-      })) as Appointment[];
+      return (data || []).map((a: any) => {
+        if (!a.barbershop_id) {
+          throw new Error(`[getStaffAppointments] Appointment ${a.id} possui barbershop_id nulo no banco.`);
+        }
+        return {
+          id: a.id,
+          tenantId: a.barbershop_id,
+          staffId: a.staff_id ?? null,
+          userId: a.user_id,
+          date: a.date ? a.date.substring(0, 10) : '',
+          time: normalizeTime(a.time),
+          clientName: a.client_name,
+          phone: a.phone,
+          service: a.service,
+          price: Number(a.price),
+          duration: a.duration,
+          status: a.status,
+          observation: a.observation,
+          createdAt: new Date(a.created_at).getTime()
+        } as Appointment;
+      });
     } catch (err) {
       return handleNetworkError('getStaffAppointments', err, []);
     }
   },
 
   async saveAppointment(appointment: Appointment, targetUserId?: string) {
-    const userId = targetUserId || await this.getUserId();
-    if (!userId) throw new Error('User not authenticated');
+    const currentUserId = await this.getUserId();
+    const idToUse = targetUserId || appointment.tenantId || currentUserId;
+    if (!idToUse && !currentUserId) throw new Error('User not authenticated');
+
+    const ctx = await this.resolveTenantContext(idToUse || currentUserId!);
+    const barbershopId = ctx.barbershopId;
+    if (!barbershopId) {
+      throw new Error(`[saveAppointment] Contexto de barbearia (barbershop_id) não encontrado.`);
+    }
+
+    const isAdmin = ctx.role === 'admin_owner';
+    let effectiveStaffId = isAdmin ? (appointment.staffId || ctx.staffProfileId) : ctx.staffProfileId;
+
+    if (!effectiveStaffId) {
+      throw new Error(`[saveAppointment] Profissional (staff_id) obrigatório não fornecido ou não encontrado.`);
+    }
+
+    // Validar se effectiveStaffId é um staff_profiles.id real pertencente a este barbershop_id
+    const { data: staffRow, error: staffErr } = await supabase
+      .from('staff_profiles')
+      .select('id, barbershop_id')
+      .or(`id.eq.${effectiveStaffId},user_id.eq.${effectiveStaffId}`)
+      .eq('barbershop_id', barbershopId)
+      .maybeSingle();
+
+    if (staffErr || !staffRow) {
+      throw new Error(`[saveAppointment] Profissional id="${effectiveStaffId}" não é um staff_profiles válido da barbearia ${barbershopId}.`);
+    }
+
+    effectiveStaffId = staffRow.id;
 
     const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
     const dataToSave: any = {
-      user_id: appointment.userId || userId,
+      barbershop_id: barbershopId,
+      staff_id: effectiveStaffId,
+      user_id: currentUserId || ctx.tenantOwnerId || ctx.userId,
+      tenant_id: ctx.tenantOwnerId || currentUserId,
+      created_by: currentUserId || ctx.userId,
       date: appointment.date,
       time: normalizeTime(appointment.time),
       client_name: appointment.clientName,
@@ -672,55 +842,28 @@ export const supabaseService = {
       dataToSave.id = appointment.id;
     }
 
-    try {
-      const dataToSaveWithStaff = {
-        ...dataToSave,
-        tenant_id: appointment.tenantId || userId,
-        staff_id: appointment.staffId || userId
-      };
-      const { data, error } = await supabase.from('appointments').upsert(dataToSaveWithStaff).select().single();
-      if (!error && data) {
-        const a = data as any;
-        return {
-          id: a.id,
-          tenantId: a.tenant_id || appointment.tenantId || userId,
-          staffId: a.staff_id || appointment.staffId || userId,
-          userId: a.user_id || appointment.userId || userId,
-          date: a.date,
-          time: normalizeTime(a.time),
-          clientName: a.client_name,
-          phone: a.phone,
-          service: a.service,
-          price: Number(a.price),
-          duration: a.duration,
-          status: a.status,
-          observation: a.observation,
-          createdAt: new Date(a.created_at).getTime()
-        } as Appointment;
-      }
-      if (error) throw error;
-    } catch (e) {
-      console.warn('[saveAppointment] Missing tenant_id/staff_id or other issue, retrying with legacy schema:', e);
-      const { data, error } = await supabase.from('appointments').upsert(dataToSave).select().single();
-      if (error) throw error;
-      const a = data as any;
-      return {
-        id: a.id,
-        tenantId: appointment.tenantId || userId,
-        staffId: appointment.staffId || userId,
-        userId: a.user_id || appointment.userId || userId,
-        date: a.date,
-        time: normalizeTime(a.time),
-        clientName: a.client_name,
-        phone: a.phone,
-        service: a.service,
-        price: Number(a.price),
-        duration: a.duration,
-        status: a.status,
-        observation: a.observation,
-        createdAt: new Date(a.created_at).getTime()
-      } as Appointment;
+    const { data, error } = await supabase.from('appointments').upsert(dataToSave).select().single();
+    if (error) throw error;
+    const a = data as any;
+    if (!a.barbershop_id) {
+      throw new Error(`[saveAppointment] Appointment ${a.id} salvo com barbershop_id nulo.`);
     }
+    return {
+      id: a.id,
+      tenantId: a.barbershop_id,
+      staffId: a.staff_id ?? null,
+      userId: a.user_id,
+      date: a.date,
+      time: normalizeTime(a.time),
+      clientName: a.client_name,
+      phone: a.phone,
+      service: a.service,
+      price: Number(a.price),
+      duration: a.duration,
+      status: a.status,
+      observation: a.observation,
+      createdAt: new Date(a.created_at).getTime()
+    } as Appointment;
   },
   async deleteAppointment(id: string) {
     const userId = await this.getUserId();
@@ -920,7 +1063,7 @@ export const supabaseService = {
     }
   },
 
-  async getStaff(tenantId: string) {
+  async getStaff(tenantId: string): Promise<Staff[]> {
     try {
       let ownerUserId = tenantId;
       let barbershopId = tenantId;
@@ -939,20 +1082,7 @@ export const supabaseService = {
       const { data, error } = await supabase
         .from('staff_profiles')
         .select('*')
-        .or(`tenant_id.eq.${barbershopId},tenant_id.eq.${ownerUserId},barbershop_id.eq.${barbershopId}`);
-
-      const profile = await this.getProfile(ownerUserId);
-      const ownerMember: Staff = {
-        id: ownerUserId,
-        tenantId: barbershopId,
-        userId: ownerUserId,
-        name: profile?.name || 'Proprietário',
-        phone: profile?.personalPhone || '',
-        photo: profile?.photo || undefined,
-        status: 'active',
-        commissionRate: 100,
-        role: 'admin'
-      };
+        .eq('barbershop_id', barbershopId);
 
       if (error) {
         if (
@@ -961,36 +1091,62 @@ export const supabaseService = {
           error.message?.includes('does not exist') || 
           error.message?.includes('não existe')
         ) {
-          return [ownerMember];
+          return [];
         }
         throw error;
       }
 
-      const staffMembers: Staff[] = (data || []).map((s: any) => {
-        return {
+      const rawMembers: any[] = data || [];
+      const seenUserIds = new Set<string>();
+      const seenIds = new Set<string>();
+      const deduplicatedStaff: Staff[] = [];
+
+      for (const s of rawMembers) {
+        if (s.user_id) {
+          if (seenUserIds.has(s.user_id)) {
+            console.warn(`[getStaff] Inconsistência detectada: Múltiplos staff_profiles com user_id="${s.user_id}". Mantendo o primeiro e ignorando duplicado id="${s.id}".`);
+            continue;
+          }
+          seenUserIds.add(s.user_id);
+        }
+        if (seenIds.has(s.id)) {
+          console.warn(`[getStaff] Inconsistência detectada: Múltiplos staff_profiles com id="${s.id}".`);
+          continue;
+        }
+        seenIds.add(s.id);
+
+        const isOwner = s.user_id === ownerUserId || s.role === 'admin' || s.role === 'admin_owner';
+        deduplicatedStaff.push({
           id: s.id,
-          tenantId: s.tenant_id || s.barbershop_id || barbershopId,
-          userId: s.user_id,
+          tenantId: s.barbershop_id || barbershopId,
+          userId: s.user_id || undefined,
           name: s.name || 'Profissional',
           phone: s.phone || '',
           photo: s.photo ?? null,
           status: s.status || 'active',
           commissionRate: Number(s.commission_rate || 0),
-          role: (s.role === 'admin' ? 'admin' : 'staff') as 'admin' | 'staff'
-        };
+          role: (isOwner ? 'admin' : 'staff') as 'admin' | 'staff'
+        });
+      }
+
+      // Ordenar para que o Administrador/Owner fique sempre no topo da lista
+      deduplicatedStaff.sort((a, b) => {
+        const aIsAdmin = (a.role === 'admin' || a.userId === ownerUserId) ? 1 : 0;
+        const bIsAdmin = (b.role === 'admin' || b.userId === ownerUserId) ? 1 : 0;
+        if (aIsAdmin !== bIsAdmin) {
+          return bIsAdmin - aIsAdmin; // Administrador primeiro
+        }
+        return (a.name || '').localeCompare(b.name || '');
       });
 
-      const hasOwner = staffMembers.some(s => s.userId === ownerUserId || s.id === ownerUserId);
-      const fullList = hasOwner ? staffMembers : [ownerMember, ...staffMembers];
-
       isNetworkOffline = false;
-      return fullList;
+      return deduplicatedStaff;
     } catch (err: any) {
       if (isNetworkError(err)) {
         return handleNetworkError('getStaff', err, []);
       }
-      console.error('[getStaff] Erro:', err);
-      return [];
+      console.error('[getStaff] Erro ao buscar equipe:', err);
+      throw err;
     }
   },
 
@@ -1315,12 +1471,12 @@ export const supabaseService = {
       // 3. Fallback para staff_profiles
       const { data: staffData, error: staffError } = await supabase
         .from('staff_profiles')
-        .select('tenant_id')
+        .select('barbershop_id')
         .eq('user_id', userId)
         .maybeSingle();
       
-      if (!staffError && staffData && staffData.tenant_id) {
-        return staffData.tenant_id;
+      if (!staffError && staffData && (staffData as any).barbershop_id) {
+        return (staffData as any).barbershop_id;
       }
       return userId;
     } catch (err) {
@@ -1335,89 +1491,151 @@ export const supabaseService = {
     userId: string;
     role: 'admin_owner' | 'staff' | 'client';
     memberUserIds: string[];
+    staffProfileId: string | null;
+    staffProfileIds: string[];
   }> {
     try {
-      const userId = targetUserId || await this.getUserId();
-      if (!userId) {
-        return { barbershopId: null, tenantOwnerId: '', userId: '', role: 'client', memberUserIds: [] };
+      const currentAuthUser = await this.getUserId();
+      const inputId = targetUserId || currentAuthUser;
+      if (!inputId) {
+        return { barbershopId: null, tenantOwnerId: '', userId: '', role: 'client', memberUserIds: [], staffProfileId: null, staffProfileIds: [] };
       }
 
-      // 1. Tenta buscar em barbershop_members
-      const { data: members, error: memberError } = await supabase
-        .from('barbershop_members')
-        .select('barbershop_id, role, barbershops(id, owner_id)')
-        .eq('user_id', userId);
+      let barbershopId: string | null = null;
+      let tenantOwnerId = inputId;
+      let detectedRole: 'admin_owner' | 'staff' | 'client' = 'admin_owner';
+      let staffProfileId: string | null = null;
 
-      if (!memberError && members && members.length > 0) {
-        const member = members[0] as any;
-        const barbershopId = member.barbershop_id;
-        const ownerId = member.barbershops?.owner_id || userId;
-        const role = member.role === 'owner' ? 'admin_owner' : 'staff';
-
-        const { data: allMembers } = await supabase
-          .from('barbershop_members')
-          .select('user_id')
-          .eq('barbershop_id', barbershopId);
-
-        const memberUserIds = Array.from(new Set([
-          ...(allMembers || []).map((m: any) => m.user_id).filter(Boolean),
-          ownerId,
-          userId
-        ]));
-
-        return {
-          barbershopId,
-          tenantOwnerId: ownerId,
-          userId,
-          role,
-          memberUserIds
-        };
-      }
-
-      // 2. Se for dono direto na tabela barbershops
-      const { data: barbershop } = await supabase
+      // 1. Tentar identificar se inputId é diretamente um ID de barbearia (UUID de barbershops)
+      const { data: shopById } = await supabase
         .from('barbershops')
         .select('id, owner_id')
-        .eq('owner_id', userId)
+        .eq('id', inputId)
         .maybeSingle();
 
-      if (barbershop) {
-        const barbershopId = (barbershop as any).id;
-        const { data: allMembers } = await supabase
-          .from('barbershop_members')
-          .select('user_id')
-          .eq('barbershop_id', barbershopId);
-
-        const memberUserIds = Array.from(new Set([
-          ...(allMembers || []).map((m: any) => m.user_id).filter(Boolean),
-          userId
-        ]));
-
-        return {
-          barbershopId,
-          tenantOwnerId: userId,
-          userId,
-          role: 'admin_owner',
-          memberUserIds
-        };
+      if (shopById) {
+        barbershopId = (shopById as any).id;
+        tenantOwnerId = (shopById as any).owner_id || inputId;
       }
 
-      // Fallback
+      // 2. Se não encontrou como barbershop.id, tentar barbershop_members pelo inputId
+      if (!barbershopId) {
+        const { data: members } = await supabase
+          .from('barbershop_members')
+          .select('barbershop_id, role, user_id, barbershops(id, owner_id)')
+          .eq('user_id', inputId);
+
+        if (members && members.length > 0) {
+          const member = members[0] as any;
+          barbershopId = member.barbershop_id;
+          tenantOwnerId = member.barbershops?.owner_id || inputId;
+          detectedRole = member.role === 'owner' ? 'admin_owner' : 'staff';
+        }
+      }
+
+      // 3. Se não encontrou, tentar barbershops por owner_id
+      if (!barbershopId) {
+        const { data: shopByOwner } = await supabase
+          .from('barbershops')
+          .select('id, owner_id')
+          .eq('owner_id', inputId)
+          .maybeSingle();
+
+        if (shopByOwner) {
+          barbershopId = (shopByOwner as any).id;
+          tenantOwnerId = (shopByOwner as any).owner_id || inputId;
+          detectedRole = 'admin_owner';
+        }
+      }
+
+      // 4. Se não encontrou, tentar staff_profiles por user_id
+      if (!barbershopId) {
+        const { data: staffData } = await supabase
+          .from('staff_profiles')
+          .select('id, barbershop_id, user_id, role')
+          .eq('user_id', inputId)
+          .maybeSingle();
+
+        if (staffData) {
+          barbershopId = (staffData as any).barbershop_id || null;
+          staffProfileId = (staffData as any).id || null;
+          detectedRole = (staffData as any).role === 'admin' ? 'admin_owner' : 'staff';
+          
+          if (barbershopId) {
+            const { data: shopFromStaff } = await supabase
+              .from('barbershops')
+              .select('id, owner_id')
+              .eq('id', barbershopId)
+              .maybeSingle();
+            if (shopFromStaff) {
+              tenantOwnerId = (shopFromStaff as any).owner_id || tenantOwnerId;
+            } else {
+              tenantOwnerId = inputId;
+            }
+          }
+        }
+      }
+
+      // 5. Coletar todos os memberUserIds e staffProfileIds da barbearia
+      const memberIdsSet = new Set<string>();
+      const staffProfileIdsSet = new Set<string>();
+
+      if (tenantOwnerId) memberIdsSet.add(tenantOwnerId);
+      if (inputId) memberIdsSet.add(inputId);
+      if (currentAuthUser) memberIdsSet.add(currentAuthUser);
+
+      if (barbershopId) {
+        const [membersRes, staffRes] = await Promise.all([
+          supabase.from('barbershop_members').select('user_id').eq('barbershop_id', barbershopId),
+          supabase.from('staff_profiles').select('id, user_id').eq('barbershop_id', barbershopId)
+        ]);
+
+        (membersRes.data || []).forEach((m: any) => {
+          if (m.user_id) memberIdsSet.add(m.user_id);
+        });
+
+        (staffRes.data || []).forEach((s: any) => {
+          if (s.id) staffProfileIdsSet.add(s.id);
+          if (s.user_id) memberIdsSet.add(s.user_id);
+          if (s.user_id === inputId || s.user_id === currentAuthUser || s.id === inputId) {
+            staffProfileId = s.id;
+          }
+        });
+      } else {
+        const { data: staffRes } = await supabase
+          .from('staff_profiles')
+          .select('id, user_id')
+          .eq('user_id', inputId);
+
+        (staffRes || []).forEach((s: any) => {
+          if (s.id) staffProfileIdsSet.add(s.id);
+          if (s.user_id) memberIdsSet.add(s.user_id);
+          if (s.user_id === inputId || s.user_id === currentAuthUser || s.id === inputId) {
+            staffProfileId = s.id;
+          }
+        });
+      }
+
       return {
-        barbershopId: null,
-        tenantOwnerId: userId,
-        userId,
-        role: 'admin_owner',
-        memberUserIds: [userId]
+        barbershopId,
+        tenantOwnerId,
+        userId: currentAuthUser || inputId,
+        role: detectedRole,
+        memberUserIds: Array.from(memberIdsSet),
+        staffProfileId,
+        staffProfileIds: Array.from(staffProfileIdsSet)
       };
     } catch (err) {
       console.warn('[resolveTenantContext] Erro ao resolver contexto:', err);
+      const fallbackId = targetUserId || '';
       return {
         barbershopId: null,
-        tenantOwnerId: targetUserId || '',
-        userId: targetUserId || '',
+        tenantOwnerId: fallbackId,
+        userId: fallbackId,
         role: 'admin_owner',
-        memberUserIds: targetUserId ? [targetUserId] : []
+        memberUserIds: fallbackId ? [fallbackId] : [],
+        staffProfileId: null,
+        staffProfileIds: []
       };
     }
   },
@@ -1428,26 +1646,7 @@ export const supabaseService = {
       if (ctx.memberUserIds && ctx.memberUserIds.length > 0) {
         return ctx.memberUserIds;
       }
-      
-      const { data: barbershop } = await supabase
-        .from('barbershops')
-        .select('id')
-        .eq('owner_id', tenantOwnerUserId)
-        .maybeSingle();
-
-      if (!barbershop) return [tenantOwnerUserId];
-
-      const { data: members } = await supabase
-        .from('barbershop_members')
-        .select('user_id')
-        .eq('barbershop_id', (barbershop as any).id);
-
-      const ids: string[] = (members || [])
-        .map((m: any) => m.user_id)
-        .filter(Boolean);
-
-      if (!ids.includes(tenantOwnerUserId)) ids.push(tenantOwnerUserId);
-      return ids;
+      return [tenantOwnerUserId];
     } catch {
       return [tenantOwnerUserId];
     }

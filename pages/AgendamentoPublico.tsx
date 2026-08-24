@@ -160,11 +160,21 @@ export default function AgendamentoPublico() {
           setSchedule(sched);
         }
 
-        // Fetch active staff members for this tenant
+        // Fetch active staff members for this barbershop
+        let barbershopId = prof.id;
+        const { data: shop } = await supabase
+          .from('barbershops')
+          .select('id')
+          .or(`id.eq.${prof.id},owner_id.eq.${prof.id}`)
+          .maybeSingle();
+        if (shop?.id) {
+          barbershopId = shop.id;
+        }
+
         const { data: dbStaff, error: staffErr } = await supabase
           .from('staff_profiles')
           .select('*')
-          .eq('tenant_id', prof.id)
+          .eq('barbershop_id', barbershopId)
           .eq('status', 'active');
 
         if (!staffErr && dbStaff && dbStaff.length > 0) {
@@ -184,19 +194,36 @@ export default function AgendamentoPublico() {
             } catch {}
           }
 
-          const mappedStaff = dbStaff.map((s: any) => {
+          const seenStaffUserIds = new Set<string>();
+          const seenStaffIds = new Set<string>();
+          const mappedStaff = [];
+          for (const s of (dbStaff || [])) {
+            if (s.user_id) {
+              if (seenStaffUserIds.has(s.user_id)) continue;
+              seenStaffUserIds.add(s.user_id);
+            }
+            if (seenStaffIds.has(s.id)) continue;
+            seenStaffIds.add(s.id);
             const userProf = s.user_id ? profilesMap[s.user_id] : null;
-            return {
+            mappedStaff.push({
               id: s.id,
-              tenantId: s.tenant_id,
+              tenantId: s.barbershop_id || barbershopId,
               userId: s.user_id,
               name: s.name || userProf?.name || 'Profissional',
-              phone: s.phone,
+              phone: s.phone || '',
               photo: s.photo || userProf?.photo || userProf?.avatar || undefined,
               status: s.status,
               commissionRate: s.commission_rate
-            };
+            });
+          }
+
+          mappedStaff.sort((a, b) => {
+            const aIsAdmin = (a.userId === prof.id || a.id === prof.id) ? 1 : 0;
+            const bIsAdmin = (b.userId === prof.id || b.id === prof.id) ? 1 : 0;
+            if (aIsAdmin !== bIsAdmin) return bIsAdmin - aIsAdmin;
+            return (a.name || '').localeCompare(b.name || '');
           });
+
           setStaff(mappedStaff);
 
           // Fetch staff availabilities
