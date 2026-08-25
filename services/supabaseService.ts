@@ -787,6 +787,66 @@ export const supabaseService = {
     }
   },
 
+  async updateAppointmentStatus(appointmentId: string, status: 'pending' | 'completed' | 'no-show' | 'cancelled'): Promise<Appointment> {
+    const currentUserId = await this.getUserId();
+    if (!currentUserId) throw new Error('User not authenticated');
+
+    const ctx = await this.resolveTenantContext(currentUserId);
+    const barbershopId = ctx.barbershopId;
+    if (!barbershopId) {
+      throw new Error(`[updateAppointmentStatus] Contexto de barbearia (barbershop_id) não encontrado.`);
+    }
+
+    let query = supabase
+      .from('appointments')
+      .update({ status })
+      .eq('id', appointmentId)
+      .eq('barbershop_id', barbershopId);
+
+    if (ctx.role === 'staff') {
+      if (!ctx.staffProfileId) {
+        throw new Error(`[updateAppointmentStatus] Perfil de colaborador (staff_profiles.id) não encontrado para o staff autenticado.`);
+      }
+      query = query.eq('staff_id', ctx.staffProfileId);
+    }
+
+    const { data, error } = await query.select('*').maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      throw new Error(`[updateAppointmentStatus] Nenhum registro atualizado. Detalhes: appointmentId="${appointmentId}", barbershopId="${barbershopId}", role="${ctx.role}", staffProfileId="${ctx.staffProfileId || 'N/A'}".`);
+    }
+
+    const a = data as any;
+    return {
+      id: a.id,
+      tenantId: a.barbershop_id,
+      staffId: a.staff_id ?? null,
+      userId: a.user_id,
+      date: a.date ? a.date.substring(0, 10) : '',
+      time: normalizeTime(a.time),
+      clientName: a.client_name,
+      phone: a.phone,
+      service: a.service,
+      price: Number(a.price),
+      duration: a.duration,
+      status: a.status,
+      observation: a.observation,
+      createdAt: new Date(a.created_at).getTime()
+    } as Appointment;
+  },
+
+  async completeAppointment(appointmentId: string): Promise<Appointment> {
+    return this.updateAppointmentStatus(appointmentId, 'completed');
+  },
+
+  async revertAppointment(appointmentId: string): Promise<Appointment> {
+    return this.updateAppointmentStatus(appointmentId, 'pending');
+  },
+
+  async markAppointmentNoShow(appointmentId: string): Promise<Appointment> {
+    return this.updateAppointmentStatus(appointmentId, 'no-show');
+  },
+
   async saveAppointment(appointment: Appointment, targetUserId?: string) {
     const currentUserId = await this.getUserId();
     const idToUse = targetUserId || appointment.tenantId || currentUserId;
@@ -825,7 +885,6 @@ export const supabaseService = {
       barbershop_id: barbershopId,
       staff_id: effectiveStaffId,
       user_id: currentUserId || ctx.tenantOwnerId || ctx.userId,
-      tenant_id: ctx.tenantOwnerId || currentUserId,
       created_by: currentUserId || ctx.userId,
       date: appointment.date,
       time: normalizeTime(appointment.time),
@@ -1506,19 +1565,37 @@ export const supabaseService = {
       let detectedRole: 'admin_owner' | 'staff' | 'client' = 'admin_owner';
       let staffProfileId: string | null = null;
 
-      // 1. Tentar identificar se inputId é diretamente um ID de barbearia (UUID de barbershops)
-      const { data: shopById } = await supabase
+      // 1. Tentar verificar se inputId é proprietário em barbershops
+      const { data: shopByOwner } = await supabase
         .from('barbershops')
         .select('id, owner_id')
-        .eq('id', inputId)
+        .eq('owner_id', inputId)
         .maybeSingle();
 
-      if (shopById) {
-        barbershopId = (shopById as any).id;
-        tenantOwnerId = (shopById as any).owner_id || inputId;
+      if (shopByOwner) {
+        barbershopId = (shopByOwner as any).id;
+        tenantOwnerId = (shopByOwner as any).owner_id || inputId;
+        detectedRole = 'admin_owner';
       }
 
-      // 2. Se não encontrou como barbershop.id, tentar barbershop_members pelo inputId
+      // 2. Tentar identificar se inputId é diretamente um ID de barbearia (UUID de barbershops)
+      if (!barbershopId) {
+        const { data: shopById } = await supabase
+          .from('barbershops')
+          .select('id, owner_id')
+          .eq('id', inputId)
+          .maybeSingle();
+
+        if (shopById) {
+          barbershopId = (shopById as any).id;
+          tenantOwnerId = (shopById as any).owner_id || inputId;
+          if (currentAuthUser === shopById.owner_id || inputId === shopById.owner_id) {
+            detectedRole = 'admin_owner';
+          }
+        }
+      }
+
+      // 3. Se não encontrou, tentar barbershop_members pelo inputId
       if (!barbershopId) {
         const { data: members } = await supabase
           .from('barbershop_members')
@@ -1529,22 +1606,7 @@ export const supabaseService = {
           const member = members[0] as any;
           barbershopId = member.barbershop_id;
           tenantOwnerId = member.barbershops?.owner_id || inputId;
-          detectedRole = member.role === 'owner' ? 'admin_owner' : 'staff';
-        }
-      }
-
-      // 3. Se não encontrou, tentar barbershops por owner_id
-      if (!barbershopId) {
-        const { data: shopByOwner } = await supabase
-          .from('barbershops')
-          .select('id, owner_id')
-          .eq('owner_id', inputId)
-          .maybeSingle();
-
-        if (shopByOwner) {
-          barbershopId = (shopByOwner as any).id;
-          tenantOwnerId = (shopByOwner as any).owner_id || inputId;
-          detectedRole = 'admin_owner';
+          detectedRole = (member.role === 'owner' || member.role === 'admin' || member.role === 'admin_owner') ? 'admin_owner' : 'staff';
         }
       }
 
@@ -1559,7 +1621,7 @@ export const supabaseService = {
         if (staffData) {
           barbershopId = (staffData as any).barbershop_id || null;
           staffProfileId = (staffData as any).id || null;
-          detectedRole = (staffData as any).role === 'admin' ? 'admin_owner' : 'staff';
+          detectedRole = (staffData as any).role === 'admin' || (staffData as any).role === 'owner' ? 'admin_owner' : 'staff';
           
           if (barbershopId) {
             const { data: shopFromStaff } = await supabase

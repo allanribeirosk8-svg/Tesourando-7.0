@@ -1289,7 +1289,7 @@ export const AppProvider: React.FC<{
         try {
           const currentSession = sessionRef.current;
           if (currentSession) {
-            const savedApt = await supabaseService.saveAppointment(updatedApt);
+            const savedApt = await supabaseService.completeAppointment(id);
             setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
             supabaseService.saveCustomer(updatedCust).catch(console.error);
 
@@ -1311,6 +1311,9 @@ export const AppProvider: React.FC<{
               });
             }
           }
+        } catch (err) {
+          console.error('[finishAppointment] Erro ao finalizar agendamento:', err);
+          throw err;
         } finally {
           finishingRef.current.delete(id);
         }
@@ -1345,7 +1348,7 @@ export const AppProvider: React.FC<{
       const sync = async () => {
         const currentSession = sessionRef.current;
         if (currentSession) {
-          const savedApt = await supabaseService.saveAppointment(updatedApt);
+          const savedApt = await supabaseService.markAppointmentNoShow(id);
           setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
           supabaseService.saveCustomer(updatedCust).catch(console.error);
         }
@@ -1433,7 +1436,7 @@ export const AppProvider: React.FC<{
       const sync = async () => {
         const currentSession = sessionRef.current;
         if (currentSession) {
-          const savedApt = await supabaseService.saveAppointment(updatedApt);
+          const savedApt = await supabaseService.revertAppointment(id);
           setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
           supabaseService.saveCustomer(updatedCust).catch(console.error);
         }

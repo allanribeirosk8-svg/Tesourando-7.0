@@ -622,55 +622,103 @@ CREATE POLICY "customer_photos_delete_policy" ON public.customer_photos
 ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "appointments_select_policy" ON public.appointments;
-CREATE POLICY "appointments_select_policy" ON public.appointments
+DROP POLICY IF EXISTS "apts_select" ON public.appointments;
+CREATE POLICY "apts_select" ON public.appointments
   FOR SELECT USING (true);
 
 DROP POLICY IF EXISTS "appointments_insert_policy" ON public.appointments;
-CREATE POLICY "appointments_insert_policy" ON public.appointments
+DROP POLICY IF EXISTS "apts_insert" ON public.appointments;
+CREATE POLICY "apts_insert" ON public.appointments
   FOR INSERT WITH CHECK (
     auth.uid() IS NULL
     OR user_id = auth.uid()
     OR created_by = auth.uid()
-    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
-    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
-      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
-      UNION
-      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND (
+      EXISTS (
+        SELECT 1 FROM public.barbershop_members m
+        WHERE m.barbershop_id = appointments.barbershop_id
+          AND m.user_id = auth.uid()
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.barbershops b
+        WHERE b.id = appointments.barbershop_id
+          AND b.owner_id = auth.uid()
+      )
     ))
   );
 
 DROP POLICY IF EXISTS "appointments_update_policy" ON public.appointments;
-CREATE POLICY "appointments_update_policy" ON public.appointments
-  FOR UPDATE USING (
-    user_id = auth.uid()
-    OR created_by = auth.uid()
-    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
-    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
-      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
-      UNION
-      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
-    ))
-  ) WITH CHECK (
-    user_id = auth.uid()
-    OR created_by = auth.uid()
-    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
-    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
-      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
-      UNION
-      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
-    ))
+DROP POLICY IF EXISTS "apts_update" ON public.appointments;
+DROP POLICY IF EXISTS "appointments_update_authenticated" ON public.appointments;
+
+CREATE POLICY "appointments_update_authenticated" ON public.appointments
+  FOR UPDATE
+  TO authenticated
+  USING (
+    -- 1. Owner ou Admin da barbearia
+    EXISTS (
+      SELECT 1
+      FROM public.barbershop_members m
+      WHERE m.barbershop_id = appointments.barbershop_id
+        AND m.user_id = auth.uid()
+        AND m.role IN ('owner', 'admin')
+    )
+    OR
+    -- 2. Staff da barbearia atualizando seus próprios agendamentos
+    EXISTS (
+      SELECT 1
+      FROM public.staff_profiles s
+      JOIN public.barbershop_members m
+        ON m.barbershop_id = s.barbershop_id
+       AND m.user_id = s.user_id
+      WHERE s.barbershop_id = appointments.barbershop_id
+        AND s.user_id = auth.uid()
+        AND m.role = 'staff'
+        AND s.id = appointments.staff_id
+    )
+  )
+  WITH CHECK (
+    -- 1. Owner ou Admin da barbearia
+    EXISTS (
+      SELECT 1
+      FROM public.barbershop_members m
+      WHERE m.barbershop_id = appointments.barbershop_id
+        AND m.user_id = auth.uid()
+        AND m.role IN ('owner', 'admin')
+    )
+    OR
+    -- 2. Staff da barbearia atualizando seus próprios agendamentos
+    EXISTS (
+      SELECT 1
+      FROM public.staff_profiles s
+      JOIN public.barbershop_members m
+        ON m.barbershop_id = s.barbershop_id
+       AND m.user_id = s.user_id
+      WHERE s.barbershop_id = appointments.barbershop_id
+        AND s.user_id = auth.uid()
+        AND m.role = 'staff'
+        AND s.id = appointments.staff_id
+    )
   );
 
 DROP POLICY IF EXISTS "appointments_delete_policy" ON public.appointments;
-CREATE POLICY "appointments_delete_policy" ON public.appointments
+DROP POLICY IF EXISTS "apts_delete" ON public.appointments;
+CREATE POLICY "apts_delete" ON public.appointments
   FOR DELETE USING (
     user_id = auth.uid()
     OR created_by = auth.uid()
-    OR (tenant_id IS NOT NULL AND tenant_id = auth.uid())
-    OR (barbershop_id IS NOT NULL AND barbershop_id IN (
-      SELECT barbershop_id FROM public.barbershop_members WHERE user_id = auth.uid()
-      UNION
-      SELECT id FROM public.barbershops WHERE owner_id = auth.uid()
+    OR (barbershop_id IS NOT NULL AND (
+      EXISTS (
+        SELECT 1 FROM public.barbershop_members m
+        WHERE m.barbershop_id = appointments.barbershop_id
+          AND m.user_id = auth.uid()
+          AND m.role IN ('owner', 'admin')
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.barbershops b
+        WHERE b.id = appointments.barbershop_id
+          AND b.owner_id = auth.uid()
+      )
     ))
   );
 

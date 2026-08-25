@@ -79,6 +79,7 @@ export default function AgendamentoPublico() {
   const [services, setServices] = useState<Service[]>([]);
   const [schedule, setSchedule] = useState<WeeklySchedule[]>([]);
   
+  const [barbershopId, setBarbershopId] = useState<string>('');
   const [staff, setStaff] = useState<any[]>([]);
   const [selectedStaff, setSelectedStaff] = useState<any | null>(null);
   const [staffAvailabilities, setStaffAvailabilities] = useState<any[]>([]);
@@ -161,20 +162,21 @@ export default function AgendamentoPublico() {
         }
 
         // Fetch active staff members for this barbershop
-        let barbershopId = prof.id;
+        let resolvedBarbershopId = prof.id;
         const { data: shop } = await supabase
           .from('barbershops')
           .select('id')
           .or(`id.eq.${prof.id},owner_id.eq.${prof.id}`)
           .maybeSingle();
         if (shop?.id) {
-          barbershopId = shop.id;
+          resolvedBarbershopId = shop.id;
         }
+        setBarbershopId(resolvedBarbershopId);
 
         const { data: dbStaff, error: staffErr } = await supabase
           .from('staff_profiles')
           .select('*')
-          .eq('barbershop_id', barbershopId)
+          .eq('barbershop_id', resolvedBarbershopId)
           .eq('status', 'active');
 
         if (!staffErr && dbStaff && dbStaff.length > 0) {
@@ -272,12 +274,19 @@ export default function AgendamentoPublico() {
           return;
         }
 
-        const { data: existingApts } = await supabase
+        let aptQuery = supabase
           .from('appointments')
           .select('time, duration, status, staff_id')
           .eq('date', selectedDate)
-          .or(`user_id.eq.${profile.id},tenant_id.eq.${profile.id}`)
           .not('status', 'in', '("cancelled","no-show")');
+
+        if (barbershopId) {
+          aptQuery = aptQuery.eq('barbershop_id', barbershopId);
+        } else {
+          aptQuery = aptQuery.eq('user_id', profile.id);
+        }
+
+        const { data: existingApts } = await aptQuery;
 
         const existingInfo = existingApts || [];
 
@@ -435,12 +444,19 @@ export default function AgendamentoPublico() {
         const dayOfWeek = dateObj.getDay();
 
         // Consultar novamente os agendamentos ocupados no dia e hora para evitar conflito de última hora
-        const { data: currentDayApts } = await supabase
+        let currentDayQuery = supabase
           .from('appointments')
           .select('time, duration, staff_id')
           .eq('date', selectedDate)
-          .or(`user_id.eq.${profile!.id},tenant_id.eq.${profile!.id}`)
           .not('status', 'in', '("cancelled","no-show")');
+
+        if (barbershopId) {
+          currentDayQuery = currentDayQuery.eq('barbershop_id', barbershopId);
+        } else {
+          currentDayQuery = currentDayQuery.eq('user_id', profile!.id);
+        }
+
+        const { data: currentDayApts } = await currentDayQuery;
 
         const dayApts = currentDayApts || [];
 
@@ -498,8 +514,9 @@ export default function AgendamentoPublico() {
       }
 
       const { error } = await supabase.from('appointments').insert({
+        barbershop_id: barbershopId || profile!.id,
         user_id: profile!.id,
-        tenant_id: profile!.id,
+        created_by: null,
         staff_id: finalStaffId,
         client_name: cleanName,
         phone: phoneObj,
