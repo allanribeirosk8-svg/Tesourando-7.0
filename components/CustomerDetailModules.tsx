@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Calendar, Scissors, ThumbsDown, Camera, ChevronRight, Eye, RefreshCw, AlertCircle } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
-import { formatCurrency, formatDate } from '../utils/helpers';
+import { supabaseService } from '../services/supabaseService';
+import { formatCurrency, formatDate, normalizePhone } from '../utils/helpers';
 
 // Interface das fotos
 interface PhotoItem {
@@ -168,13 +169,24 @@ export const ClientPhotosGallery: React.FC<ClientPhotosGalleryProps> = ({
         return;
       }
 
-      const { data, error } = await supabase
+      const ctx = await supabaseService.resolveTenantContext(session.user.id);
+      const barbershopId = ctx.barbershopId;
+      const normalizedPhoneStr = normalizePhone(customerPhone) || customerPhone;
+
+      let photoQuery = supabase
         .from('customer_photos')
         .select('*')
-        .eq('user_id', session.user.id)
-        .eq('customer_phone', customerPhone)
+        .eq('customer_phone', normalizedPhoneStr)
         .order('date', { ascending: false })
         .range(currentOffset, currentOffset + LIMIT - 1);
+
+      if (barbershopId) {
+        photoQuery = photoQuery.eq('barbershop_id', barbershopId);
+      } else {
+        photoQuery = photoQuery.eq('user_id', session.user.id);
+      }
+
+      const { data, error } = await photoQuery;
 
       if (error) throw error;
 

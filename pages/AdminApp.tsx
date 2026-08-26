@@ -4942,18 +4942,27 @@ const CustomerDetail: React.FC<{
       const session = result?.data?.session;
       if (!session) return;
 
-      const tenantId = await supabaseService.getTenantIdForUser(session.user.id);
-      const memberIds = await supabaseService.getTenantMemberIds(tenantId);
+      const ctx = await supabaseService.resolveTenantContext(session.user.id);
+      const barbershopId = ctx.barbershopId;
+      const normalizedCustomerPhone = normalizePhone(customer.phone) || customer.phone;
 
-      // Fetch history (completed and no-show appointments)
-      const { data: appointmentsData, error: aptError } = await supabase
+      // Fetch history (completed and no-show appointments for this customer in this barbershop)
+      let aptQuery = supabase
         .from('appointments')
         .select('*')
-        .in('user_id', memberIds)
-        .eq('phone', customer.phone)
+        .eq('phone', normalizedCustomerPhone)
         .in('status', ['completed', 'no-show'])
         .order('date', { ascending: false });
 
+      if (barbershopId) {
+        aptQuery = aptQuery.eq('barbershop_id', barbershopId);
+      } else {
+        const tenantId = await supabaseService.getTenantIdForUser(session.user.id);
+        const memberIds = await supabaseService.getTenantMemberIds(tenantId);
+        aptQuery = aptQuery.in('user_id', memberIds);
+      }
+
+      const { data: appointmentsData, error: aptError } = await aptQuery;
       if (aptError) throw aptError;
 
       // Recalculate counts to ensure they match history
@@ -4964,14 +4973,22 @@ const CustomerDetail: React.FC<{
         updateCustomer(customer.phone, { cutCount: actualCutCount, noShowCount: actualNoShowCount });
       }
 
-      // Fetch photos
-      const { data: photosData, error: photoError } = await supabase
+      // Fetch photos for this customer in this barbershop
+      let photoQuery = supabase
         .from('customer_photos')
         .select('*')
-        .in('user_id', memberIds)
-        .eq('customer_phone', customer.phone)
+        .eq('customer_phone', normalizedCustomerPhone)
         .order('date', { ascending: false });
 
+      if (barbershopId) {
+        photoQuery = photoQuery.eq('barbershop_id', barbershopId);
+      } else {
+        const tenantId = await supabaseService.getTenantIdForUser(session.user.id);
+        const memberIds = await supabaseService.getTenantMemberIds(tenantId);
+        photoQuery = photoQuery.in('user_id', memberIds);
+      }
+
+      const { data: photosData, error: photoError } = await photoQuery;
       if (photoError) throw photoError;
 
       // Normalize and set history

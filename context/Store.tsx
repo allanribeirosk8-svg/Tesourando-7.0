@@ -357,7 +357,7 @@ export const AppProvider: React.FC<{
         dbCustomers.forEach((c: any) => {
           custMap[normalizePhone(c.phone)] = {
             ...c,
-            photos: c.customer_photos || []
+            photos: c.photos || c.customer_photos || []
           };
         });
         setCustomers(custMap);
@@ -586,7 +586,7 @@ export const AppProvider: React.FC<{
           dbCustomers.forEach((c: any) => {
             custMap[normalizePhone(c.phone)] = {
               ...c,
-              photos: c.customer_photos || []
+              photos: c.photos || c.customer_photos || []
             };
           });
           setCustomers(custMap);

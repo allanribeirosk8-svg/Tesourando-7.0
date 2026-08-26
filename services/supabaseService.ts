@@ -360,14 +360,12 @@ export const supabaseService = {
 
       const ctx = await this.resolveTenantContext(idToUse);
       const barbershopId = ctx.barbershopId;
-      const ownerId = ctx.tenantOwnerId || idToUse;
-      const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, idToUse];
 
       let query = supabase.from('customers').select('*, customer_photos(*)');
       if (barbershopId) {
-        query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')}),user_id.eq.${ownerId}`);
+        query = query.eq('barbershop_id', barbershopId);
       } else {
-        query = query.or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
+        query = query.eq('user_id', idToUse);
       }
 
       const { data, error } = await query;
@@ -375,14 +373,19 @@ export const supabaseService = {
       if (error) throw error;
       if (!data) return [];
       return (data as any[]).map(c => ({
+        id: c.id,
         phone: c.phone,
         name: c.name,
         avatar: c.avatar,
-        cutCount: c.cut_count,
-        noShowCount: c.no_show_count,
+        cutCount: c.cut_count || 0,
+        noShowCount: c.no_show_count || 0,
+        notes: c.notes || undefined,
+        totalVisits: c.total_visits || undefined,
+        totalSpent: c.total_spent || undefined,
+        lastVisit: c.last_visit || undefined,
         photos: (c.customer_photos || []).map((p: any) => ({
-          url: p.url,
-          description: p.description,
+          url: p.url || p.photo_url,
+          description: p.description || '',
           date: p.date ? p.date.substring(0, 10) : ''
         })),
         history: [] // History can be derived from appointments if needed, or stored separately
@@ -399,15 +402,14 @@ export const supabaseService = {
 
     const ctx = await this.resolveTenantContext(userId || currentAuthId!);
     const barbershopId = ctx.barbershopId;
-    const tenantOwnerId = ctx.tenantOwnerId || userId;
+    const normalizedPhone = normalizePhone(customer.phone) || customer.phone;
 
-    const { photos, ...rest } = customer;
     const payload: any = {
-      user_id: currentAuthId || tenantOwnerId || userId,
-      phone: customer.phone,
+      user_id: currentAuthId || userId,
+      phone: normalizedPhone,
       name: customer.name,
-      avatar: customer.avatar,
-      cut_count: customer.cutCount,
+      avatar: customer.avatar || null,
+      cut_count: customer.cutCount || 0,
       no_show_count: customer.noShowCount || 0
     };
 
@@ -415,15 +417,40 @@ export const supabaseService = {
       payload.barbershop_id = barbershopId;
     }
 
-    const { data, error } = await supabase.from('customers').upsert(payload, { onConflict: 'phone,user_id' }).select().single();
-    
-    if (error) {
-      // Fallback in case of onConflict 'phone,barbershop_id' or 'phone'
-      const { data: fallbackData, error: fallbackError } = await supabase.from('customers').upsert(payload).select().single();
-      if (fallbackError) throw error;
-      return fallbackData;
+    // 1. Pesquisar por barbershop_id + telefone normalizado
+    let existingQuery = supabase.from('customers').select('id, phone, barbershop_id');
+    if (barbershopId) {
+      existingQuery = existingQuery.eq('barbershop_id', barbershopId).eq('phone', normalizedPhone);
+    } else {
+      existingQuery = existingQuery.eq('user_id', userId).eq('phone', normalizedPhone);
     }
-    
+    const { data: existing, error: findError } = await existingQuery.maybeSingle();
+    if (findError) throw findError;
+
+    if (existing?.id) {
+      // 2. Atualizar registro existente por id + barbershop_id
+      let updateQuery = supabase.from('customers').update(payload).eq('id', existing.id);
+      if (barbershopId) {
+        updateQuery = updateQuery.eq('barbershop_id', barbershopId);
+      }
+      const { data, error } = await updateQuery.select().maybeSingle();
+      if (error) throw error;
+      return data;
+    }
+
+    // 3. Inserir novo registro compartilhado para a barbearia
+    const { data, error } = await supabase.from('customers').insert(payload).select().maybeSingle();
+    if (error) {
+      // Fallback em caso de corrida ou restrição única existente
+      let fallbackUpdate = supabase.from('customers').update(payload).eq('phone', normalizedPhone);
+      if (barbershopId) {
+        fallbackUpdate = fallbackUpdate.eq('barbershop_id', barbershopId);
+      }
+      const { data: fbData, error: fbErr } = await fallbackUpdate.select().maybeSingle();
+      if (fbErr) throw error;
+      return fbData;
+    }
+
     return data;
   },
   async addCustomerPhoto(phone: string, photo: { url: string; description: string; date: string }) {
@@ -434,16 +461,32 @@ export const supabaseService = {
 
     const ctx = await this.resolveTenantContext(userId);
     const barbershopId = ctx.barbershopId;
+    const normalizedPhone = normalizePhone(phone) || phone;
+
+    // Buscar customer_id se existir
+    let customerId: string | null = null;
+    if (barbershopId) {
+      const { data: cust } = await supabase
+        .from('customers')
+        .select('id')
+        .eq('barbershop_id', barbershopId)
+        .eq('phone', normalizedPhone)
+        .maybeSingle();
+      if (cust?.id) customerId = cust.id;
+    }
 
     const payload: any = {
       user_id: userId,
-      customer_phone: phone,
+      customer_phone: normalizedPhone,
       url: photo.url,
-      description: photo.description,
-      date: photo.date
+      description: photo.description || '',
+      date: photo.date || new Date().toISOString()
     };
     if (barbershopId) {
       payload.barbershop_id = barbershopId;
+    }
+    if (customerId) {
+      payload.customer_id = customerId;
     }
 
     const { error } = await supabase.from('customer_photos').insert(payload as any);
@@ -458,90 +501,99 @@ export const supabaseService = {
 
     const ctx = await this.resolveTenantContext(userId);
     const barbershopId = ctx.barbershopId;
-    const ownerId = ctx.tenantOwnerId || userId;
-    const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, userId];
 
-    const normalizedOld = normalizePhone(oldPhone);
-    const normalizedNew = normalizePhone(customer.phone);
+    const normalizedOld = normalizePhone(oldPhone) || oldPhone;
+    const normalizedNew = normalizePhone(customer.phone) || customer.phone;
 
     if (normalizedOld !== normalizedNew) {
-      // If phone changed, we need to handle the PK change
-      // 1. Create new customer record
+      // 1. Verificar se novo telefone já existe na mesma barbearia
+      let duplicateQuery = supabase.from('customers').select('id');
+      if (barbershopId) {
+        duplicateQuery = duplicateQuery.eq('barbershop_id', barbershopId).eq('phone', normalizedNew);
+      } else {
+        duplicateQuery = duplicateQuery.eq('user_id', userId).eq('phone', normalizedNew);
+      }
+      const { data: duplicate } = await duplicateQuery.maybeSingle();
+      if (duplicate) {
+        throw new Error(`Já existe um cliente cadastrado com o telefone ${customer.phone} nesta barbearia.`);
+      }
+
+      // 2. Inserir novo registro de cliente
       const newPayload: any = {
         user_id: userId,
-        phone: customer.phone,
+        phone: normalizedNew,
         name: customer.name,
-        avatar: customer.avatar,
-        cut_count: customer.cutCount,
+        avatar: customer.avatar || null,
+        cut_count: customer.cutCount || 0,
         no_show_count: customer.noShowCount || 0
       };
       if (barbershopId) newPayload.barbershop_id = barbershopId;
 
       const { error: insertError } = await supabase.from('customers').insert(newPayload as any);
-      
       if (insertError) throw insertError;
 
-      // 2. Update photos to point to new phone
+      // 3. Atualizar fotos para o novo telefone dentro da barbearia
       let photoQuery = (supabase.from('customer_photos') as any)
-        .update({ customer_phone: customer.phone } as any)
-        .eq('customer_phone', oldPhone);
+        .update({ customer_phone: normalizedNew })
+        .eq('customer_phone', normalizedOld);
       if (barbershopId) {
         photoQuery = photoQuery.eq('barbershop_id', barbershopId);
       } else {
-        photoQuery = photoQuery.in('user_id', memberIds);
+        photoQuery = photoQuery.eq('user_id', userId);
       }
       await photoQuery;
 
-      // 3. Update appointments to point to new phone
+      // 4. Atualizar appointments para o novo telefone dentro da barbearia
       let aptQuery = (supabase.from('appointments') as any)
-        .update({ phone: customer.phone, client_name: customer.name } as any)
-        .eq('phone', oldPhone);
+        .update({ phone: normalizedNew, client_name: customer.name })
+        .eq('phone', normalizedOld);
       if (barbershopId) {
         aptQuery = aptQuery.eq('barbershop_id', barbershopId);
       } else {
-        aptQuery = aptQuery.in('user_id', memberIds);
+        aptQuery = aptQuery.eq('user_id', userId);
       }
       await aptQuery;
 
-      // 4. Delete old customer record
+      // 5. Excluir cliente antigo dentro da barbearia
       let deleteQuery = (supabase.from('customers') as any)
         .delete()
-        .eq('phone', oldPhone);
+        .eq('phone', normalizedOld);
       if (barbershopId) {
         deleteQuery = deleteQuery.eq('barbershop_id', barbershopId);
       } else {
-        deleteQuery = deleteQuery.in('user_id', memberIds);
+        deleteQuery = deleteQuery.eq('user_id', userId);
       }
       await deleteQuery;
     } else {
-      // Just a normal update
+      // Atualização normal
       const updatePayload: any = {
         name: customer.name,
         avatar: customer.avatar,
-        cut_count: customer.cutCount,
+        cut_count: customer.cutCount || 0,
         no_show_count: customer.noShowCount || 0
       };
       if (barbershopId) updatePayload.barbershop_id = barbershopId;
 
-      let updateQuery = (supabase.from('customers') as any).update(updatePayload)
-        .eq('phone', customer.phone);
+      let updateQuery = (supabase.from('customers') as any)
+        .update(updatePayload)
+        .eq('phone', normalizedOld);
       if (barbershopId) {
         updateQuery = updateQuery.eq('barbershop_id', barbershopId);
       } else {
-        updateQuery = updateQuery.in('user_id', memberIds);
+        updateQuery = updateQuery.eq('user_id', userId);
       }
       
       const { error } = await updateQuery;
       if (error) throw error;
 
-      // Also update appointments name if it changed
+      // Atualizar nome nos appointments correspondentes dentro da barbearia
       let aptUpdateQuery = (supabase.from('appointments') as any)
-        .update({ client_name: customer.name } as any)
-        .eq('phone', customer.phone);
+        .update({ client_name: customer.name })
+        .eq('phone', normalizedOld);
       if (barbershopId) {
         aptUpdateQuery = aptUpdateQuery.eq('barbershop_id', barbershopId);
       } else {
-        aptUpdateQuery = aptUpdateQuery.in('user_id', memberIds);
+        aptUpdateQuery = aptUpdateQuery.eq('user_id', userId);
       }
       await aptUpdateQuery;
     }
@@ -554,14 +606,13 @@ export const supabaseService = {
 
     const ctx = await this.resolveTenantContext(userId);
     const barbershopId = ctx.barbershopId;
-    const ownerId = ctx.tenantOwnerId || userId;
-    const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, userId];
+    const normalizedPhone = normalizePhone(phone) || phone;
 
-    let query = supabase.from('customers').select('phone, name').eq('phone', phone);
+    let query = supabase.from('customers').select('id, phone, name, barbershop_id').eq('phone', normalizedPhone);
     if (barbershopId) {
-      query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')})`);
+      query = query.eq('barbershop_id', barbershopId);
     } else {
-      query = query.or(`user_id.eq.${userId},user_id.eq.${ownerId}`);
+      query = query.eq('user_id', userId);
     }
 
     const { data, error } = await query.maybeSingle();
