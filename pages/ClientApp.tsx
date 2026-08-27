@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useStore } from '../context/Store';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
-import { generateTimeSlots, getTodayString, formatDate, formatCurrency, formatPhone, getOccupiedSlots, capitalizeName, normalizeTime } from '../utils/helpers';
+import { generateTimeSlots, getTodayString, formatDate, formatCurrency, formatPhone, isValidPhone, getOccupiedSlots, capitalizeName, normalizeTime } from '../utils/helpers';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Clock, X, AlertCircle, Settings2, Edit3, Trash2 } from 'lucide-react';
@@ -123,7 +123,7 @@ export const ClientApp: React.FC = () => {
   const validateWelcome = () => {
     const newErrors: Record<string, string> = {};
     if (!formData.name.trim()) newErrors.name = "Conte-nos seu nome";
-    if (!formData.phone.trim() || formData.phone.length < 14) newErrors.phone = "WhatsApp inválido";
+    if (!formData.phone.trim() || !isValidPhone(formData.phone)) newErrors.phone = "WhatsApp inválido (DDD + 8 ou 9 dígitos)";
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };

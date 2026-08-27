@@ -84,6 +84,16 @@ export const formatPhone = (value: string): string => {
   return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
 };
 
+export const isValidPhone = (phone: string): boolean => {
+  if (!phone) return false;
+  const digits = phone.replace(/\D/g, '');
+  // Must have 10 (fixed) or 11 (mobile) digits
+  if (digits.length !== 10 && digits.length !== 11) return false;
+  const ddd = parseInt(digits.slice(0, 2), 10);
+  if (isNaN(ddd) || ddd < 11 || ddd > 99) return false;
+  return true;
+};
+
 /**
  * Normalizes a Brazilian phone number to a canonical 10-digit format.
  * Removes all non-numeric characters and the extra '9' from 11-digit mobile numbers.

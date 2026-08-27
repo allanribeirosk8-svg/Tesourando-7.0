@@ -4,7 +4,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { supabaseService } from '../services/supabaseService';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
-import { compressImage, formatDate, getTodayString, generateTimeSlots, formatCurrency, formatPhone, getOccupiedSlots, normalizePhone, normalizeTime, formatDateLong, capitalizeName, getInitials, getAvatarColor , calcOccupancySlots, formatProfessionalShortName } from '../utils/helpers';
+import { compressImage, formatDate, getTodayString, generateTimeSlots, formatCurrency, formatPhone, isValidPhone, getOccupiedSlots, normalizePhone, normalizeTime, formatDateLong, capitalizeName, getInitials, getAvatarColor , calcOccupancySlots, formatProfessionalShortName } from '../utils/helpers';
 import { useSwipe } from '../hooks/useSwipe';
 import { Onboarding } from '../components/Onboarding';
 import { SetupWizard } from '../components/SetupWizard';
@@ -3178,18 +3178,44 @@ const AgendaView: React.FC<{
 
 const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string) => void }> = ({ onClose, onSuccess }) => {
   useLockBodyScroll();
-  const { addCustomer } = useStore();
+  const { addCustomer, customers } = useStore();
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [errors, setErrors] = useState<{name?: boolean, phone?: boolean}>({});
+  const [phoneErrorMsg, setPhoneErrorMsg] = useState<string | null>(null);
   const [showErrorMsg, setShowErrorMsg] = useState(false);
   const [duplicateError, setDuplicateError] = useState<string | null>(null);
   const [isValidating, setIsValidating] = useState(false);
   const validatingPromiseRef = useRef<Promise<void> | null>(null);
 
   const checkDuplicate = async (phoneToCheck: string) => {
+    const rawDigits = phoneToCheck.replace(/\D/g, '');
+    if (!rawDigits) {
+      setPhoneErrorMsg(null);
+      setDuplicateError(null);
+      return;
+    }
+
+    if (!isValidPhone(phoneToCheck)) {
+      setPhoneErrorMsg('Telefone inválido. Digite DDD + número (10 ou 11 dígitos).');
+      setDuplicateError(null);
+      return;
+    }
+
+    setPhoneErrorMsg(null);
     const normalized = normalizePhone(phoneToCheck);
-    if (!normalized || !isSupabaseConfigured()) return;
+    
+    // 1. Checar primeiro no estado local de clientes
+    const existingLocal = customers[normalized];
+    if (existingLocal) {
+      setDuplicateError(`Este número já está cadastrado para o cliente ${existingLocal.name}.`);
+      return;
+    }
+
+    if (!isSupabaseConfigured()) {
+      setDuplicateError(null);
+      return;
+    }
     
     setIsValidating(true);
     const promise = (async () => {
@@ -3212,18 +3238,25 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const phoneValid = isValidPhone(phone);
     const newErrors = {
       name: !name.trim(),
-      phone: !phone.trim()
+      phone: !phoneValid
     };
     setErrors(newErrors);
+
+    if (!phoneValid) {
+      setPhoneErrorMsg('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
+    } else {
+      setPhoneErrorMsg(null);
+    }
     
-    // Aguarda validação em andamento antes de prosseguir
+    // Aguarda validação assíncrona se estiver em andamento
     if (validatingPromiseRef.current) {
       await validatingPromiseRef.current;
     }
 
-    if (newErrors.name || newErrors.phone || duplicateError) {
+    if (newErrors.name || !phoneValid || duplicateError) {
       setShowErrorMsg(true);
       return;
     }
@@ -3239,13 +3272,9 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
       onSuccess('Cliente cadastrado com sucesso!');
       onClose();
     } catch (error: any) {
-      if (error?.code === '23505' || error?.message?.includes('duplicate key value')) {
-        const normalized = normalizePhone(phone);
-        const existing = await supabaseService.checkDuplicateCustomer(normalized) as { name: string } | null;
-        setDuplicateError(`Este número já está cadastrado para o cliente ${existing?.name || 'outro cliente'}.`);
-      } else {
-        console.error('Error adding customer:', error);
-      }
+      const errorMsg = error?.message || 'Já existe um cliente cadastrado com este número.';
+      setDuplicateError(errorMsg);
+      setShowErrorMsg(true);
     }
   };
 
@@ -3277,15 +3306,21 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
                   setPhone(formatPhone(e.target.value)); 
                   setErrors(prev => ({...prev, phone: false})); 
                   setShowErrorMsg(false); 
+                  setPhoneErrorMsg(null);
                   setDuplicateError(null);
                 }} 
                 onBlur={() => checkDuplicate(phone)}
                 placeholder="(00) 00000-0000" 
                 maxLength={15} 
                 requiredField
-                error={errors.phone || !!duplicateError}
-                className={duplicateError ? 'border-red-500 ring-red-500' : ''}
+                error={errors.phone || !!duplicateError || !!phoneErrorMsg}
+                className={(duplicateError || phoneErrorMsg) ? 'border-red-500 ring-red-500' : ''}
               />
+              {phoneErrorMsg && (
+                <p className="text-red-500 text-[11px] font-bold ml-1 animate-in slide-in-from-top-1">
+                  {phoneErrorMsg}
+                </p>
+              )}
               {duplicateError && (
                 <p className="text-red-500 text-[11px] font-bold ml-1 animate-in slide-in-from-top-1">
                   {duplicateError}
@@ -3295,11 +3330,11 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
           </div>
           
           <footer className="p-6 border-t border-title/20  shrink-0 bg-surface  sticky bottom-0 z-10 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
-            {showErrorMsg && !duplicateError && <p className="text-red-500 text-[13px] font-bold text-center mb-4">Preencha todos os campos obrigatórios</p>}
+            {showErrorMsg && !duplicateError && !phoneErrorMsg && <p className="text-red-500 text-[13px] font-bold text-center mb-4">Preencha todos os campos obrigatórios corretamente</p>}
             <Button 
               type="submit" 
               fullWidth 
-              disabled={!!duplicateError}
+              disabled={!!duplicateError || !!phoneErrorMsg}
               className="h-14 font-black uppercase tracking-widest shadow-xl shadow-secondary/20 disabled:opacity-50 disabled:shadow-none"
             >
               {isValidating ? 'Validando...' : 'Cadastrar Cliente'}
@@ -5049,19 +5084,36 @@ const CustomerDetail: React.FC<{
     }
   };
 
-  const handleSaveEdit = () => {
-    const oldPhone = customer.phone;
-    updateCustomer(oldPhone, { name: editName, phone: editPhone });
-    if (normalizePhone(editPhone) !== normalizePhone(oldPhone)) {
-      onPhoneChange?.(editPhone);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const handleSaveEdit = async () => {
+    setEditError(null);
+    if (!editName.trim()) {
+      setEditError('Nome é obrigatório.');
+      return;
     }
-    setIsEditing(false);
-    onSuccess?.('Dados atualizados!');
+    if (!isValidPhone(editPhone)) {
+      setEditError('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
+      return;
+    }
+
+    const oldPhone = customer.phone;
+    try {
+      await updateCustomer(oldPhone, { name: editName, phone: editPhone });
+      if (normalizePhone(editPhone) !== normalizePhone(oldPhone)) {
+        onPhoneChange?.(editPhone);
+      }
+      setIsEditing(false);
+      onSuccess?.('Dados atualizados!');
+    } catch (err: any) {
+      setEditError(err?.message || 'Erro ao atualizar dados do cliente.');
+    }
   };
 
   const handleCancelEdit = () => {
     setEditName(customer.name);
     setEditPhone(customer.phone);
+    setEditError(null);
     setIsEditing(false);
   };
   const [showNoShows, setShowNoShows] = useState(false);
@@ -5103,18 +5155,23 @@ const CustomerDetail: React.FC<{
                 <input 
                   type="text" 
                   value={editName} 
-                  onChange={e => setEditName(e.target.value)}
+                  onChange={e => { setEditName(e.target.value); setEditError(null); }}
                   className="w-full bg-primary/40 border-none rounded-xl p-2 text-sm font-bold text-white"
                   placeholder="Nome do cliente"
                 />
                 <input 
                   type="tel" 
                   value={editPhone} 
-                  onChange={e => setEditPhone(formatPhone(e.target.value))}
+                  onChange={e => { setEditPhone(formatPhone(e.target.value)); setEditError(null); }}
                   maxLength={15}
-                  className="w-full bg-primary/40 border-none rounded-xl p-2 text-sm text-title"
+                  className={`w-full bg-primary/40 border-none rounded-xl p-2 text-sm text-title ${editError ? 'ring-1 ring-red-500' : ''}`}
                   placeholder="Telefone"
                 />
+                {editError && (
+                  <p className="text-red-500 text-[11px] font-bold animate-in slide-in-from-top-1">
+                    {editError}
+                  </p>
+                )}
                 <Button fullWidth onClick={handleSaveEdit} className="h-8 rounded-xl bg-green-600 text-xs py-0">Salvar</Button>
               </div>
             ) : (

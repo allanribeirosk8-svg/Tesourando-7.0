@@ -356,22 +356,22 @@ export const supabaseService = {
     if (isNetworkOffline) return [];
     try {
       const idToUse = targetUserId || await this.getUserId();
-      if (!idToUse) return [];
+      if (!idToUse) throw new Error('Usuário não autenticado');
 
       const ctx = await this.resolveTenantContext(idToUse);
       const barbershopId = ctx.barbershopId;
-
-      let query = supabase.from('customers').select('*, customer_photos(*)');
-      if (barbershopId) {
-        query = query.eq('barbershop_id', barbershopId);
-      } else {
-        query = query.eq('user_id', idToUse);
+      if (!barbershopId) {
+        throw new Error('Contexto da barbearia não encontrado para o usuário.');
       }
 
-      const { data, error } = await query;
+      const { data, error } = await supabase
+        .from('customers')
+        .select('*, customer_photos(*)')
+        .eq('barbershop_id', barbershopId);
 
       if (error) throw error;
       if (!data) return [];
+
       return (data as any[]).map(c => ({
         id: c.id,
         phone: c.phone,
@@ -383,72 +383,92 @@ export const supabaseService = {
         totalVisits: c.total_visits || undefined,
         totalSpent: c.total_spent || undefined,
         lastVisit: c.last_visit || undefined,
+        createdAt: c.created_at || undefined,
+        updatedAt: c.updated_at || undefined,
         photos: (c.customer_photos || []).map((p: any) => ({
           url: p.url || p.photo_url,
           description: p.description || '',
           date: p.date ? p.date.substring(0, 10) : ''
         })),
-        history: [] // History can be derived from appointments if needed, or stored separately
+        history: [] // History is dynamically fetched and combined from appointments across all barbershop staff
       })) as Customer[];
     } catch (err: any) {
-      return handleNetworkError('getCustomers', err, []);
+      if (isNetworkOffline) {
+        return handleNetworkError('getCustomers', err, []);
+      }
+      throw err;
     }
   },
   async saveCustomer(customer: Customer, targetUserId?: string) {
     const sessionRes = await supabase.auth.getSession();
     const currentAuthId = sessionRes?.data?.session?.user?.id;
     const userId = targetUserId || currentAuthId || await this.getUserId();
-    if (!userId && !currentAuthId) throw new Error('User not authenticated');
+    if (!userId && !currentAuthId) throw new Error('Usuário não autenticado');
 
     const ctx = await this.resolveTenantContext(userId || currentAuthId!);
     const barbershopId = ctx.barbershopId;
+    if (!barbershopId) {
+      throw new Error('Contexto da barbearia não encontrado ao salvar cliente.');
+    }
+
     const normalizedPhone = normalizePhone(customer.phone) || customer.phone;
 
     const payload: any = {
+      barbershop_id: barbershopId,
       user_id: currentAuthId || userId,
       phone: normalizedPhone,
       name: customer.name,
-      avatar: customer.avatar || null,
-      cut_count: customer.cutCount || 0,
-      no_show_count: customer.noShowCount || 0
+      avatar: customer.avatar ?? null,
+      cut_count: customer.cutCount ?? 0,
+      no_show_count: customer.noShowCount ?? 0
     };
 
-    if (barbershopId) {
-      payload.barbershop_id = barbershopId;
-    }
+    // 1. Pesquisar cliente existente por barbershop_id + telefone normalizado
+    const { data: existing, error: findError } = await supabase
+      .from('customers')
+      .select('id, phone, barbershop_id')
+      .eq('barbershop_id', barbershopId)
+      .eq('phone', normalizedPhone)
+      .maybeSingle();
 
-    // 1. Pesquisar por barbershop_id + telefone normalizado
-    let existingQuery = supabase.from('customers').select('id, phone, barbershop_id');
-    if (barbershopId) {
-      existingQuery = existingQuery.eq('barbershop_id', barbershopId).eq('phone', normalizedPhone);
-    } else {
-      existingQuery = existingQuery.eq('user_id', userId).eq('phone', normalizedPhone);
-    }
-    const { data: existing, error: findError } = await existingQuery.maybeSingle();
     if (findError) throw findError;
 
     if (existing?.id) {
-      // 2. Atualizar registro existente por id + barbershop_id
-      let updateQuery = supabase.from('customers').update(payload).eq('id', existing.id);
-      if (barbershopId) {
-        updateQuery = updateQuery.eq('barbershop_id', barbershopId);
-      }
-      const { data, error } = await updateQuery.select().maybeSingle();
+      // 2. Atualizar registro existente da barbearia por id + barbershop_id
+      const { data, error } = await supabase
+        .from('customers')
+        .update(payload)
+        .eq('id', existing.id)
+        .eq('barbershop_id', barbershopId)
+        .select()
+        .maybeSingle();
+
       if (error) throw error;
       return data;
     }
 
     // 3. Inserir novo registro compartilhado para a barbearia
-    const { data, error } = await supabase.from('customers').insert(payload).select().maybeSingle();
+    const { data, error } = await supabase
+      .from('customers')
+      .insert(payload)
+      .select()
+      .maybeSingle();
+
     if (error) {
-      // Fallback em caso de corrida ou restrição única existente
-      let fallbackUpdate = supabase.from('customers').update(payload).eq('phone', normalizedPhone);
-      if (barbershopId) {
-        fallbackUpdate = fallbackUpdate.eq('barbershop_id', barbershopId);
+      // Se houver conflito concorrente de chave única, tentar atualizar
+      if (error.code === '23505') {
+        const { data: fbData, error: fbErr } = await supabase
+          .from('customers')
+          .update(payload)
+          .eq('barbershop_id', barbershopId)
+          .eq('phone', normalizedPhone)
+          .select()
+          .maybeSingle();
+
+        if (fbErr) throw fbErr;
+        return fbData;
       }
-      const { data: fbData, error: fbErr } = await fallbackUpdate.select().maybeSingle();
-      if (fbErr) throw error;
-      return fbData;
+      throw error;
     }
 
     return data;
@@ -457,145 +477,132 @@ export const supabaseService = {
     const sessionRes = await supabase.auth.getSession();
     const currentAuthId = sessionRes?.data?.session?.user?.id;
     const userId = currentAuthId || await this.getUserId();
-    if (!userId) throw new Error('User not authenticated');
+    if (!userId) throw new Error('Usuário não autenticado');
 
     const ctx = await this.resolveTenantContext(userId);
     const barbershopId = ctx.barbershopId;
-    const normalizedPhone = normalizePhone(phone) || phone;
-
-    // Buscar customer_id se existir
-    let customerId: string | null = null;
-    if (barbershopId) {
-      const { data: cust } = await supabase
-        .from('customers')
-        .select('id')
-        .eq('barbershop_id', barbershopId)
-        .eq('phone', normalizedPhone)
-        .maybeSingle();
-      if (cust?.id) customerId = cust.id;
+    if (!barbershopId) {
+      throw new Error('Contexto da barbearia não encontrado ao adicionar foto.');
     }
 
+    const normalizedPhone = normalizePhone(phone) || phone;
+
+    // Buscar customer_id da barbearia se existir
+    let customerId: string | null = null;
+    const { data: cust } = await supabase
+      .from('customers')
+      .select('id')
+      .eq('barbershop_id', barbershopId)
+      .eq('phone', normalizedPhone)
+      .maybeSingle();
+    if (cust?.id) customerId = cust.id;
+
     const payload: any = {
-      user_id: userId,
+      barbershop_id: barbershopId,
       customer_phone: normalizedPhone,
+      user_id: userId,
       url: photo.url,
       description: photo.description || '',
       date: photo.date || new Date().toISOString()
     };
-    if (barbershopId) {
-      payload.barbershop_id = barbershopId;
-    }
     if (customerId) {
       payload.customer_id = customerId;
     }
 
     const { error } = await supabase.from('customer_photos').insert(payload as any);
-    
     if (error) throw error;
   },
   async updateCustomer(oldPhone: string, customer: Customer) {
     const sessionRes = await supabase.auth.getSession();
     const currentAuthId = sessionRes?.data?.session?.user?.id;
     const userId = currentAuthId || await this.getUserId();
-    if (!userId) throw new Error('User not authenticated');
+    if (!userId) throw new Error('Usuário não autenticado');
 
     const ctx = await this.resolveTenantContext(userId);
     const barbershopId = ctx.barbershopId;
+    if (!barbershopId) {
+      throw new Error('Contexto da barbearia não encontrado ao atualizar cliente.');
+    }
 
     const normalizedOld = normalizePhone(oldPhone) || oldPhone;
     const normalizedNew = normalizePhone(customer.phone) || customer.phone;
 
     if (normalizedOld !== normalizedNew) {
       // 1. Verificar se novo telefone já existe na mesma barbearia
-      let duplicateQuery = supabase.from('customers').select('id');
-      if (barbershopId) {
-        duplicateQuery = duplicateQuery.eq('barbershop_id', barbershopId).eq('phone', normalizedNew);
-      } else {
-        duplicateQuery = duplicateQuery.eq('user_id', userId).eq('phone', normalizedNew);
-      }
-      const { data: duplicate } = await duplicateQuery.maybeSingle();
+      const { data: duplicate, error: dupError } = await supabase
+        .from('customers')
+        .select('id')
+        .eq('barbershop_id', barbershopId)
+        .eq('phone', normalizedNew)
+        .maybeSingle();
+
+      if (dupError) throw dupError;
       if (duplicate) {
         throw new Error(`Já existe um cliente cadastrado com o telefone ${customer.phone} nesta barbearia.`);
       }
 
-      // 2. Inserir novo registro de cliente
+      // 2. Inserir novo registro de cliente com o novo telefone
       const newPayload: any = {
+        barbershop_id: barbershopId,
         user_id: userId,
         phone: normalizedNew,
         name: customer.name,
-        avatar: customer.avatar || null,
-        cut_count: customer.cutCount || 0,
-        no_show_count: customer.noShowCount || 0
+        avatar: customer.avatar ?? null,
+        cut_count: customer.cutCount ?? 0,
+        no_show_count: customer.noShowCount ?? 0
       };
-      if (barbershopId) newPayload.barbershop_id = barbershopId;
 
       const { error: insertError } = await supabase.from('customers').insert(newPayload as any);
       if (insertError) throw insertError;
 
-      // 3. Atualizar fotos para o novo telefone dentro da barbearia
-      let photoQuery = (supabase.from('customer_photos') as any)
+      // 3. Atualizar fotos para o novo telefone dentro da mesma barbearia
+      const { error: photoErr } = await (supabase.from('customer_photos') as any)
         .update({ customer_phone: normalizedNew })
+        .eq('barbershop_id', barbershopId)
         .eq('customer_phone', normalizedOld);
-      if (barbershopId) {
-        photoQuery = photoQuery.eq('barbershop_id', barbershopId);
-      } else {
-        photoQuery = photoQuery.eq('user_id', userId);
-      }
-      await photoQuery;
+      if (photoErr) throw photoErr;
 
-      // 4. Atualizar appointments para o novo telefone dentro da barbearia
-      let aptQuery = (supabase.from('appointments') as any)
+      // 4. Atualizar appointments para o novo telefone dentro da mesma barbearia
+      const { error: aptErr } = await (supabase.from('appointments') as any)
         .update({ phone: normalizedNew, client_name: customer.name })
+        .eq('barbershop_id', barbershopId)
         .eq('phone', normalizedOld);
-      if (barbershopId) {
-        aptQuery = aptQuery.eq('barbershop_id', barbershopId);
-      } else {
-        aptQuery = aptQuery.eq('user_id', userId);
-      }
-      await aptQuery;
+      if (aptErr) throw aptErr;
 
-      // 5. Excluir cliente antigo dentro da barbearia
-      let deleteQuery = (supabase.from('customers') as any)
+      // 5. Excluir cliente antigo dentro da mesma barbearia
+      const { error: deleteErr } = await (supabase.from('customers') as any)
         .delete()
+        .eq('barbershop_id', barbershopId)
         .eq('phone', normalizedOld);
-      if (barbershopId) {
-        deleteQuery = deleteQuery.eq('barbershop_id', barbershopId);
-      } else {
-        deleteQuery = deleteQuery.eq('user_id', userId);
-      }
-      await deleteQuery;
+      if (deleteErr) throw deleteErr;
     } else {
-      // Atualização normal
+      // Atualização normal sem mudança de telefone
       const updatePayload: any = {
         name: customer.name,
-        avatar: customer.avatar,
-        cut_count: customer.cutCount || 0,
-        no_show_count: customer.noShowCount || 0
+        avatar: customer.avatar ?? null,
+        cut_count: customer.cutCount ?? 0,
+        no_show_count: customer.noShowCount ?? 0
       };
-      if (barbershopId) updatePayload.barbershop_id = barbershopId;
 
       let updateQuery = (supabase.from('customers') as any)
         .update(updatePayload)
-        .eq('phone', normalizedOld);
-      if (barbershopId) {
-        updateQuery = updateQuery.eq('barbershop_id', barbershopId);
+        .eq('barbershop_id', barbershopId);
+
+      if (customer.id) {
+        updateQuery = updateQuery.eq('id', customer.id);
       } else {
-        updateQuery = updateQuery.eq('user_id', userId);
+        updateQuery = updateQuery.eq('phone', normalizedOld);
       }
-      
+
       const { error } = await updateQuery;
       if (error) throw error;
 
-      // Atualizar nome nos appointments correspondentes dentro da barbearia
-      let aptUpdateQuery = (supabase.from('appointments') as any)
+      // Atualizar nome nos appointments correspondentes dentro da mesma barbearia
+      const { error: aptErr } = await (supabase.from('appointments') as any)
         .update({ client_name: customer.name })
+        .eq('barbershop_id', barbershopId)
         .eq('phone', normalizedOld);
-      if (barbershopId) {
-        aptUpdateQuery = aptUpdateQuery.eq('barbershop_id', barbershopId);
-      } else {
-        aptUpdateQuery = aptUpdateQuery.eq('user_id', userId);
-      }
-      await aptUpdateQuery;
+      if (aptErr) throw aptErr;
     }
   },
   async checkDuplicateCustomer(phone: string) {
@@ -606,17 +613,23 @@ export const supabaseService = {
 
     const ctx = await this.resolveTenantContext(userId);
     const barbershopId = ctx.barbershopId;
-    const normalizedPhone = normalizePhone(phone) || phone;
-
-    let query = supabase.from('customers').select('id, phone, name, barbershop_id').eq('phone', normalizedPhone);
-    if (barbershopId) {
-      query = query.eq('barbershop_id', barbershopId);
-    } else {
-      query = query.eq('user_id', userId);
+    if (!barbershopId) {
+      throw new Error('Contexto da barbearia não encontrado ao verificar duplicidade.');
     }
 
-    const { data, error } = await query.maybeSingle();
-    if (error) throw error;
+    const normalizedPhone = normalizePhone(phone) || phone;
+
+    const { data, error } = await supabase
+      .from('customers')
+      .select('id, phone, name, barbershop_id')
+      .eq('barbershop_id', barbershopId)
+      .eq('phone', normalizedPhone)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
     return data;
   },
 

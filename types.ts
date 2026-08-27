@@ -89,11 +89,19 @@ export interface Appointment {
 }
 
 export interface Customer {
+  id?: string;
   phone: string;
   name: string;
   tenantId?: string; // Multi-tenant link
+  barbershop_id?: string;
   cutCount: number;
   noShowCount?: number;
+  notes?: string;
+  totalVisits?: number;
+  totalSpent?: number;
+  lastVisit?: string;
+  createdAt?: string;
+  updatedAt?: string;
   history: { date: string; time?: string; service: string; price?: number }[];
   photos: { url: string; description?: string; date: string }[];
   avatar?: string; // Base64

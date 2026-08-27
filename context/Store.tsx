@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
 import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState } from '../types';
-import { normalizePhone } from '../utils/helpers';
+import { normalizePhone, isValidPhone } from '../utils/helpers';
 import { supabaseService } from '../services/supabaseService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { Session } from '@supabase/supabase-js';
@@ -1582,12 +1582,20 @@ export const AppProvider: React.FC<{
     const currentCustomer = customersRef.current[normalizedPhone];
     if (!currentCustomer) return;
 
+    if (updates.phone && !isValidPhone(updates.phone)) {
+      throw new Error('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
+    }
+
     // Montar o objeto atualizado de forma síncrona
     const updatedCustomer: Customer = { ...currentCustomer, ...updates };
     const newPhone = updates.phone
       ? normalizePhone(updates.phone)
       : normalizedPhone;
     const phoneChanged = newPhone !== normalizedPhone;
+
+    if (phoneChanged && customersRef.current[newPhone]) {
+      throw new Error(`Já existe outro cliente cadastrado com o telefone ${updates.phone}.`);
+    }
 
     // Atualizar estado local
     setCustomers(prev => {
@@ -1620,6 +1628,7 @@ export const AppProvider: React.FC<{
         await supabaseService.updateCustomer(phone, updatedCustomer);
       } catch (err) {
         console.error('Erro ao atualizar cliente no Supabase:', err);
+        throw err;
       }
     }
   }, []);
@@ -1794,26 +1803,32 @@ export const AppProvider: React.FC<{
   }, [barberId]);
 
   const addCustomer = useCallback(async (customer: Customer) => {
-    const normalized = normalizePhone(customer.phone);
-    let isNew = false;
-
-    setCustomers(prev => {
-      if (prev[normalized]) return prev;
-      isNew = true;
-      return { ...prev, [normalized]: customer };
-    });
-
-    if (isNew) {
-      try {
-        const targetId = sessionRef.current?.user?.id || barberId;
-        if (targetId) {
-          await supabaseService.saveCustomer(customer, targetId);
-        }
-      } catch (e) {
-        console.error("Supabase sync error in addCustomer", e);
-        throw e;
-      }
+    if (!isValidPhone(customer.phone)) {
+      throw new Error('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
     }
+
+    const normalized = normalizePhone(customer.phone);
+
+    // 1. Verificar se já existe no estado local
+    const existingLocal = customersRef.current[normalized];
+    if (existingLocal) {
+      throw new Error(`Este número já está cadastrado para o cliente ${existingLocal.name || 'outro cliente'}.`);
+    }
+
+    // 2. Verificar se já existe no Supabase para esta barbearia
+    const targetId = sessionRef.current?.user?.id || barberId;
+    if (targetId) {
+      const existingDb = await supabaseService.checkDuplicateCustomer(normalized);
+      if (existingDb) {
+        throw new Error(`Este número já está cadastrado para o cliente ${existingDb.name || 'outro cliente'}.`);
+      }
+      await supabaseService.saveCustomer(customer, targetId);
+    }
+
+    setCustomers(prev => ({
+      ...prev,
+      [normalized]: customer
+    }));
   }, [barberId]);
 
   const reorderServices = useCallback(async (newServices: ServiceItem[]) => {
