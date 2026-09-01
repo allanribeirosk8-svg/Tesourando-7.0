@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
 import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState } from '../types';
-import { normalizePhone, isValidPhone } from '../utils/helpers';
+import { normalizePhone, isValidPhone, validateBrazilianPhone, normalizeBrazilianPhoneForComparison } from '../utils/helpers';
 import { supabaseService } from '../services/supabaseService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { Session } from '@supabase/supabase-js';
@@ -75,9 +75,10 @@ export const AppProvider: React.FC<{
   const [weeklySchedule, setWeeklySchedule] = useState<Record<number, DayConfig>>(DEFAULT_WEEKLY);
   const [services, setServices] = useState<ServiceItem[]>(DEFAULT_SERVICES);
   const [barberProfile, setBarberProfile] = useState<BarberProfile>(DEFAULT_PROFILE);
-    const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
   const [barberId, setBarberId] = useState<string | null>(null);
+  const bootRequestIdRef = useRef<number>(0);
 
   // Multi-tenant & Multi-staff state declarations
   const [activeTenant, setActiveTenant] = useState<any | null>(null);
@@ -210,7 +211,7 @@ export const AppProvider: React.FC<{
     setStaff([]);
     setUserRole(null);
     setSelectedStaffId('all');
-    setIsLoading(true);
+    setIsLoading(false);
     setBarbershop(null);
     setBarbershopMembers([]);
     setBarbershopInvites([]);
@@ -299,39 +300,81 @@ export const AppProvider: React.FC<{
     };
   };
 
-  const loadData = useCallback(async () => {
-    const currentSession = sessionRef.current;
-    if (!currentSession?.user?.id) {
-      return;
-    }
+  const bootstrapSession = useCallback(async (currentSession: Session | null) => {
+    const requestId = ++bootRequestIdRef.current;
+    console.info('[BOOT] Iniciando bootstrapSession', {
+      requestId,
+      hasSession: Boolean(currentSession),
+      userId: currentSession?.user?.id ?? null
+    });
 
     setIsLoading(true);
+
     try {
-      const isConfigured = isSupabaseConfigured();
-      if (!isConfigured) {
+      if (isPublicRoute) {
+        console.info('[BOOT] Rota pública detectada, ignorando carga autenticada');
+        return;
+      }
+
+      if (!isSupabaseConfigured()) {
+        console.info('[BOOT] Supabase não configurado, carregando do localStorage');
         loadFromLocalStorage();
         return;
       }
 
+      if (!currentSession?.user?.id) {
+        console.info('[AUTH] Nenhuma sessão ativa detectada');
+        resetStore();
+        return;
+      }
+
       const sessionUserId = currentSession.user.id;
+      console.info('[ONBOARDING] Iniciando resolução para usuário:', sessionUserId);
+
       const onbState = await supabaseService.resolveOnboardingState(sessionUserId);
+      if (requestId !== bootRequestIdRef.current) return;
+
+      console.info('[ONBOARDING] Estado resolvido', onbState);
       setOnboardingState(onbState);
+
       if (onbState.profile && onbState.hasOwnerMembership) {
         setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
       }
 
       const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
+      if (requestId !== bootRequestIdRef.current) return;
+
+      console.info('[TENANT] Contexto resolvido', {
+        barbershopId: membershipBarbershopId,
+        isStaffMember: onbState?.isStaffMember,
+        hasOwnerMembership: onbState?.hasOwnerMembership
+      });
+
       if (!membershipBarbershopId) {
         setBarberId(null);
         setActiveTenant(null);
         setAppointments([]);
         setStaff([]);
         setCustomers({});
-        setIsLoading(false);
+        console.info('[TENANT] Usuário sem barbearia associada (aguardando onboarding/convite)');
         return;
       }
 
       setBarberId(membershipBarbershopId);
+
+      const tenantInfo = {
+        id: membershipBarbershopId,
+        name: onbState?.barbershop?.name || onbState?.profile?.shopName || 'Meu Corte',
+        slug: onbState?.barbershop?.slug || onbState?.profile?.slug || '',
+        logo: onbState?.profile?.logo,
+        businessPhone: onbState?.profile?.businessPhone,
+        address: onbState?.profile?.address,
+        instagram: onbState?.profile?.instagram,
+        website: onbState?.profile?.website
+      };
+      setActiveTenant(tenantInfo);
+
+      console.info('[STORE] Iniciando carregamento de dados principais');
 
       const [
         dbApts,
@@ -340,51 +383,67 @@ export const AppProvider: React.FC<{
         dbProfile,
         dbWeekly,
         dbBlocked,
-        dbUnblocked
+        dbUnblocked,
+        dbStaff
       ] = await Promise.all([
-        supabaseService.getAppointments(membershipBarbershopId),
-        supabaseService.getCustomers(membershipBarbershopId),
-        supabaseService.getServices(membershipBarbershopId),
-        supabaseService.getProfile(membershipBarbershopId),
-        supabaseService.getWeeklySchedule(membershipBarbershopId),
-        supabaseService.getBlockedSlots(membershipBarbershopId),
-        supabaseService.getUnblockedSlots(membershipBarbershopId)
+        supabaseService.getAppointments(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar agendamentos:', err);
+          return [];
+        }),
+        supabaseService.getCustomers(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar clientes:', err);
+          return [];
+        }),
+        supabaseService.getServices(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar serviços:', err);
+          return [];
+        }),
+        supabaseService.getProfile(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar perfil:', err);
+          return null;
+        }),
+        supabaseService.getWeeklySchedule(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar horários semanais:', err);
+          return null;
+        }),
+        supabaseService.getBlockedSlots(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar slots bloqueados:', err);
+          return {};
+        }),
+        supabaseService.getUnblockedSlots(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar slots desbloqueados:', err);
+          return {};
+        }),
+        supabaseService.getStaff(membershipBarbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar equipe:', err);
+          return [];
+        })
       ]);
+
+      if (requestId !== bootRequestIdRef.current) return;
 
       setAppointments((dbApts || []).map(normalizeAppointment));
       if (dbCustomers) {
         const custMap: Record<string, Customer> = {};
         dbCustomers.forEach((c: any) => {
-          custMap[normalizePhone(c.phone)] = {
+          const key = c.phoneNormalized || normalizePhone(c.phone);
+          custMap[key] = {
             ...c,
+            phoneNormalized: key,
+            phone_normalized: key,
             photos: c.photos || c.customer_photos || []
           };
         });
         setCustomers(custMap);
       }
-      
+
       const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
       setServices(finalServices);
-      
       setBarberProfile(dbProfile || DEFAULT_PROFILE);
       setWeeklySchedule({ ...DEFAULT_WEEKLY, ...(dbWeekly || {}) });
       setBlockedSlots(dbBlocked || {});
       setUnblockedSlots(dbUnblocked || {});
-
-      const tenantInfo = {
-        id: membershipBarbershopId,
-        name: onbState?.barbershop?.name || dbProfile?.shopName || 'Meu Corte',
-        slug: onbState?.barbershop?.slug || dbProfile?.slug || '',
-        logo: dbProfile?.logo,
-        businessPhone: dbProfile?.businessPhone,
-        address: dbProfile?.address,
-        instagram: dbProfile?.instagram,
-        website: dbProfile?.website
-      };
-      setActiveTenant(tenantInfo);
-
-      const dbStaff = await supabaseService.getStaff(membershipBarbershopId);
-      setStaff(dbStaff);
+      setStaff(dbStaff || []);
 
       let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
       const memberRole = onbState?.membership?.role;
@@ -407,11 +466,16 @@ export const AppProvider: React.FC<{
       activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
       setCurrentStaff(activeStaffUser);
 
+      console.info('[STORE] Carregamento principal concluído');
+
+      // Cargas não essenciais (notificações e barbershop metadata secundária)
       if (resolvedRole && resolvedRole !== 'client') {
-        const dbNotifications = await supabaseService.getNotifications(membershipBarbershopId, resolvedRole, sessionUserId);
-        setNotifications(dbNotifications);
-      } else {
-        setNotifications([]);
+        try {
+          const dbNotifications = await supabaseService.getNotifications(membershipBarbershopId, resolvedRole, sessionUserId);
+          if (requestId === bootRequestIdRef.current) setNotifications(dbNotifications);
+        } catch (notifErr) {
+          console.warn('[STORE] Aviso ao buscar notificações secundárias:', notifErr);
+        }
       }
 
       try {
@@ -420,22 +484,35 @@ export const AppProvider: React.FC<{
           supabaseService.getBarbershopMembers(),
           supabaseService.getInvites()
         ]);
-        setBarbershop(bs);
-        setBarbershopMembers(members);
-        setBarbershopInvites(invites);
-      } catch (err) {
-        console.error('[loadBarbershopData] Error:', err);
+        if (requestId === bootRequestIdRef.current) {
+          setBarbershop(bs);
+          setBarbershopMembers(members);
+          setBarbershopInvites(invites);
+        }
+      } catch (bsErr) {
+        console.warn('[STORE] Aviso ao buscar dados secundários da barbearia:', bsErr);
       }
-    } catch (e) {
-      console.error("Failed to load data", e);
+    } catch (error) {
+      console.error('[ERROR] Falha na inicialização', error);
     } finally {
-      setIsLoading(false);
-      if (isFirstLoad.current) {
-        isFirstLoad.current = false;
-        onReadyRef.current?.();
+      if (requestId === bootRequestIdRef.current) {
+        setIsLoading(false);
+        if (isFirstLoad.current) {
+          isFirstLoad.current = false;
+          onReadyRef.current?.();
+        }
+        console.info('[SPLASH] Boot finalizado', {
+          requestId,
+          isLoading: false,
+          hasSession: Boolean(currentSession)
+        });
       }
     }
-  }, []);
+  }, [isPublicRoute, resetStore]);
+
+  const loadData = useCallback(async () => {
+    await bootstrapSession(sessionRef.current);
+  }, [bootstrapSession]);
 
   const loadFromLocalStorage = () => {
     const storedApts = localStorage.getItem(STORAGE_KEY_APTS);
@@ -455,7 +532,7 @@ export const AppProvider: React.FC<{
     if (storedProfile) setBarberProfile(JSON.parse(storedProfile));
   };
 
-  // Auth state listener & session resolution
+  // Auth state listener & unified session bootstrap
   useEffect(() => {
     if (isPublicRoute) {
       setIsLoading(false);
@@ -466,203 +543,69 @@ export const AppProvider: React.FC<{
       return;
     }
 
-    if (isSupabaseConfigured()) {
-      // Fetch initial session
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session?.user?.id) {
-          setSession(session);
-        } else {
-          setSession(null);
-          resetStore();
-        }
-      });
-
-      const authResult = supabase.auth.onAuthStateChange((event, newSession) => {
-        if (event === 'SIGNED_OUT' || !newSession) {
-          setSession(null);
-          resetStore();
-          return;
-        }
-        
-        setSession(newSession);
-      });
-
-      return () => {
-        if (authResult?.data?.subscription) {
-          authResult.data.subscription.unsubscribe();
-        }
-      };
-    } else {
-      loadFromLocalStorage();
-      setIsLoading(false);
-    }
-  }, [isPublicRoute, resetStore]);
-
-  // Main data loader effect with cancelled flag pattern
-  useEffect(() => {
-    let cancelled = false;
-
-    if (isPublicRoute) {
-      setIsLoading(false);
-      return;
-    }
-
     if (!isSupabaseConfigured()) {
       loadFromLocalStorage();
       setIsLoading(false);
-      return;
-    }
-
-    if (!session?.user?.id) {
-      resetStore();
-      setIsLoading(false);
-      return;
-    }
-
-    const loadTenantAndData = async () => {
-      setIsLoading(true);
-      try {
-        const sessionUserId = session.user.id;
-        const onbState = await supabaseService.resolveOnboardingState(sessionUserId);
-        if (cancelled) return;
-
-        setOnboardingState(onbState);
-        if (onbState.profile && onbState.hasOwnerMembership) {
-          setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
-        }
-
-        const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
-        if (cancelled) return;
-
-        if (!membershipBarbershopId) {
-          setBarberId(null);
-          setActiveTenant(null);
-          setAppointments([]);
-          setStaff([]);
-          setCustomers({});
-          setIsLoading(false);
-          return;
-        }
-
-        setBarberId(membershipBarbershopId);
-
-        const tenantInfo = {
-          id: membershipBarbershopId,
-          name: onbState?.barbershop?.name || onbState?.profile?.shopName || 'Meu Corte',
-          slug: onbState?.barbershop?.slug || onbState?.profile?.slug || '',
-          logo: onbState?.profile?.logo,
-          businessPhone: onbState?.profile?.businessPhone,
-          address: onbState?.profile?.address,
-          instagram: onbState?.profile?.instagram,
-          website: onbState?.profile?.website
-        };
-        setActiveTenant(tenantInfo);
-
-        const [
-          dbApts,
-          dbCustomers,
-          dbServices,
-          dbProfile,
-          dbWeekly,
-          dbBlocked,
-          dbUnblocked,
-          dbStaff
-        ] = await Promise.all([
-          supabaseService.getAppointments(membershipBarbershopId),
-          supabaseService.getCustomers(membershipBarbershopId),
-          supabaseService.getServices(membershipBarbershopId),
-          supabaseService.getProfile(membershipBarbershopId),
-          supabaseService.getWeeklySchedule(membershipBarbershopId),
-          supabaseService.getBlockedSlots(membershipBarbershopId),
-          supabaseService.getUnblockedSlots(membershipBarbershopId),
-          supabaseService.getStaff(membershipBarbershopId)
-        ]);
-
-        if (cancelled) return;
-
-        setAppointments((dbApts || []).map(normalizeAppointment));
-        if (dbCustomers) {
-          const custMap: Record<string, Customer> = {};
-          dbCustomers.forEach((c: any) => {
-            custMap[normalizePhone(c.phone)] = {
-              ...c,
-              photos: c.photos || c.customer_photos || []
-            };
-          });
-          setCustomers(custMap);
-        }
-
-        const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
-        setServices(finalServices);
-        setBarberProfile(dbProfile || DEFAULT_PROFILE);
-        setWeeklySchedule({ ...DEFAULT_WEEKLY, ...(dbWeekly || {}) });
-        setBlockedSlots(dbBlocked || {});
-        setUnblockedSlots(dbUnblocked || {});
-        setStaff(dbStaff);
-
-        let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
-        const memberRole = onbState?.membership?.role;
-        if (memberRole === 'owner') {
-          resolvedRole = 'admin_owner';
-        } else if (memberRole === 'admin' || memberRole === 'staff') {
-          resolvedRole = 'staff';
-        } else if (onbState?.isStaffMember) {
-          resolvedRole = 'staff';
-        } else if (onbState?.hasOwnerMembership || onbState?.barbershop?.ownerId === sessionUserId) {
-          resolvedRole = 'admin_owner';
-        } else {
-          const isStaff = dbStaff && dbStaff.some((s: any) => s.userId === sessionUserId);
-          resolvedRole = isStaff ? 'staff' : 'client';
-        }
-
-        setUserRole(resolvedRole);
-
-        let activeStaffUser: Staff | null = null;
-        activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
-        if (!cancelled) setCurrentStaff(activeStaffUser);
-
-        if (resolvedRole && resolvedRole !== 'client') {
-          const dbNotifications = await supabaseService.getNotifications(membershipBarbershopId, resolvedRole, sessionUserId);
-          if (!cancelled) setNotifications(dbNotifications);
-        } else {
-          if (!cancelled) setNotifications([]);
-        }
-
-        try {
-          const [bs, members, invites] = await Promise.all([
-            supabaseService.getBarbershop(),
-            supabaseService.getBarbershopMembers(),
-            supabaseService.getInvites()
-          ]);
-          if (!cancelled) {
-            setBarbershop(bs);
-            setBarbershopMembers(members);
-            setBarbershopInvites(invites);
-          }
-        } catch (err) {
-          console.error('[loadBarbershopData] Error:', err);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          console.error("Failed to load data", e);
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-          if (isFirstLoad.current) {
-            isFirstLoad.current = false;
-            onReadyRef.current?.();
-          }
-        }
+      if (isFirstLoad.current) {
+        isFirstLoad.current = false;
+        onReadyRef.current?.();
       }
-    };
+      return;
+    }
 
-    void loadTenantAndData();
+    console.info('[AUTH] Iniciando getSession');
+
+    // 1. Obter sessão inicial
+    supabase.auth.getSession().then(({ data: { session: initialSession }, error }) => {
+      if (error) {
+        console.error('[AUTH] Erro ao buscar sessão inicial:', error);
+      }
+      console.info('[AUTH] Sessão resolvida', {
+        hasSession: Boolean(initialSession),
+        userId: initialSession?.user?.id ?? null
+      });
+
+      setSession(initialSession);
+      sessionRef.current = initialSession;
+      void bootstrapSession(initialSession);
+    }).catch(err => {
+      console.error('[AUTH] Falha inesperada no getSession:', err);
+      setIsLoading(false);
+      if (isFirstLoad.current) {
+        isFirstLoad.current = false;
+        onReadyRef.current?.();
+      }
+    });
+
+    // 2. Listener de mudanças de auth
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
+      console.info('[AUTH] onAuthStateChange disparado:', event, {
+        hasSession: Boolean(newSession),
+        userId: newSession?.user?.id ?? null
+      });
+
+      if (event === 'INITIAL_SESSION') return;
+
+      sessionRef.current = newSession;
+      setSession(newSession);
+
+      if (event === 'SIGNED_OUT' || !newSession) {
+        resetStore();
+        setIsLoading(false);
+        if (isFirstLoad.current) {
+          isFirstLoad.current = false;
+          onReadyRef.current?.();
+        }
+        return;
+      }
+
+      void bootstrapSession(newSession);
+    });
 
     return () => {
-      cancelled = true;
+      subscription.unsubscribe();
     };
-  }, [session?.user?.id, isPublicRoute, resetStore]);
+  }, [isPublicRoute, bootstrapSession, resetStore]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
@@ -1532,7 +1475,8 @@ export const AppProvider: React.FC<{
   }, [barberId, activeTenant, addNotification]);
 
   const updateCustomerPhoto = useCallback(async (phone: string, base64Photo: string, description?: string) => {
-    const normalizedPhone = normalizePhone(phone);
+    const val = validateBrazilianPhone(phone);
+    const normalizedPhone = val.valid ? val.normalized : normalizePhone(phone);
     const newPhoto = {
       url: base64Photo,
       description: description || '',
@@ -1540,10 +1484,11 @@ export const AppProvider: React.FC<{
     };
 
     setCustomers(prev => {
-      const customer = prev[normalizedPhone];
+      const customer = (Object.values(prev) as Customer[]).find(c => (c.phoneNormalized || normalizePhone(c.phone)) === normalizedPhone) || prev[normalizedPhone];
       if (!customer) return prev;
+      const key = customer.phoneNormalized || normalizedPhone;
       const updatedCust = { ...customer, photos: [newPhoto, ...customer.photos] };
-      return { ...prev, [normalizedPhone]: updatedCust };
+      return { ...prev, [key]: updatedCust };
     });
 
     const currentSession = sessionRef.current;
@@ -1553,14 +1498,16 @@ export const AppProvider: React.FC<{
   }, []);
 
   const updateCustomerAvatar = useCallback(async (phone: string, base64Photo: string) => {
-    const normalizedPhone = normalizePhone(phone);
+    const val = validateBrazilianPhone(phone);
+    const normalizedPhone = val.valid ? val.normalized : normalizePhone(phone);
     let updatedCust: Customer | null = null;
 
     setCustomers(prev => {
-      const customer = prev[normalizedPhone];
+      const customer = (Object.values(prev) as Customer[]).find(c => (c.phoneNormalized || normalizePhone(c.phone)) === normalizedPhone) || prev[normalizedPhone];
       if (!customer) return prev;
+      const key = customer.phoneNormalized || normalizedPhone;
       updatedCust = { ...customer, avatar: base64Photo };
-      return { ...prev, [normalizedPhone]: updatedCust };
+      return { ...prev, [key]: updatedCust };
     });
 
     if (updatedCust) {
@@ -1575,41 +1522,72 @@ export const AppProvider: React.FC<{
     phone: string,
     updates: Partial<Customer>
   ) => {
-    const normalizedPhone = normalizePhone(phone);
+    const valCurrent = validateBrazilianPhone(phone);
+    const normalizedPhone = valCurrent.valid ? valCurrent.normalized : normalizePhone(phone);
 
-    // Ler o cliente atual FORA do setCustomers
-    // usando a ref que mantém o estado atualizado
-    const currentCustomer = customersRef.current[normalizedPhone];
+    // Ler o cliente atual FORA do setCustomers usando a ref
+    const currentCustomer = (Object.values(customersRef.current) as Customer[]).find(c => {
+      const cNorm = c.phoneNormalized || normalizePhone(c.phone);
+      return cNorm === normalizedPhone;
+    }) || customersRef.current[normalizedPhone];
+
     if (!currentCustomer) return;
 
-    if (updates.phone && !isValidPhone(updates.phone)) {
-      throw new Error('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
-    }
-
-    // Montar o objeto atualizado de forma síncrona
-    const updatedCustomer: Customer = { ...currentCustomer, ...updates };
-    const newPhone = updates.phone
-      ? normalizePhone(updates.phone)
-      : normalizedPhone;
-    const phoneChanged = newPhone !== normalizedPhone;
-
-    if (phoneChanged && customersRef.current[newPhone]) {
-      throw new Error(`Já existe outro cliente cadastrado com o telefone ${updates.phone}.`);
-    }
-
-    // Atualizar estado local
-    setCustomers(prev => {
-      if (phoneChanged) {
-        const { [normalizedPhone]: _, ...rest } = prev;
-        return { ...rest, [newPhone]: updatedCustomer };
+    if (updates.phone) {
+      const valUpdate = validateBrazilianPhone(updates.phone);
+      if (!valUpdate.valid) {
+        throw new Error(valUpdate.message || 'Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
       }
-      return { ...prev, [normalizedPhone]: updatedCustomer };
+    }
+
+    const valNew = updates.phone ? validateBrazilianPhone(updates.phone) : valCurrent;
+    const newNormalized = valNew.valid ? valNew.normalized : (updates.phone ? normalizePhone(updates.phone) : normalizedPhone);
+    const phoneChanged = newNormalized !== normalizedPhone;
+
+    if (phoneChanged) {
+      const existingConflict = (Object.values(customersRef.current) as Customer[]).find(c => {
+        const cNorm = c.phoneNormalized || normalizePhone(c.phone);
+        return cNorm === newNormalized && c.id !== currentCustomer.id;
+      });
+      if (existingConflict) {
+        throw new Error(`Já existe outro cliente cadastrado (${existingConflict.name}) com o telefone ${updates.phone}.`);
+      }
+    }
+
+    const updatedCustomer: Customer = {
+      ...currentCustomer,
+      ...updates,
+      phone: updates.phone ?? currentCustomer.phone,
+      phoneNormalized: newNormalized,
+      phone_normalized: newNormalized
+    };
+
+    // Chamar Supabase primeiro
+    const currentSession = sessionRef.current;
+    if (currentSession) {
+      try {
+        await supabaseService.updateCustomer(phone, updatedCustomer);
+      } catch (err) {
+        console.error('Erro ao atualizar cliente no Supabase:', err);
+        throw err;
+      }
+    }
+
+    // Atualizar estado local após sucesso
+    setCustomers(prev => {
+      const newMap = { ...prev };
+      if (phoneChanged) {
+        delete newMap[normalizedPhone];
+      }
+      newMap[newNormalized] = updatedCustomer;
+      return newMap;
     });
 
     // Atualizar appointments
     if (updates.name || updates.phone) {
       setAppointments(prev => prev.map(apt => {
-        if (normalizePhone(apt.phone) === normalizedPhone) {
+        const aptNorm = normalizePhone(apt.phone);
+        if (aptNorm === normalizedPhone) {
           return {
             ...apt,
             clientName: updates.name ?? apt.clientName,
@@ -1618,18 +1596,6 @@ export const AppProvider: React.FC<{
         }
         return apt;
       }));
-    }
-
-    // Chamar Supabase com o objeto já montado (nunca null)
-    const currentSession = sessionRef.current;
-
-    if (currentSession) {
-      try {
-        await supabaseService.updateCustomer(phone, updatedCustomer);
-      } catch (err) {
-        console.error('Erro ao atualizar cliente no Supabase:', err);
-        throw err;
-      }
     }
   }, []);
 
@@ -1701,7 +1667,12 @@ export const AppProvider: React.FC<{
 
   const updateDayConfig = useCallback(async (day: number, config: Partial<DayConfig>) => {
     setWeeklySchedule(prev => {
-      const newConfig = { ...prev[day], ...config };
+      const currentConfig = prev[day] || { start: '08:00', end: '19:00', isOpen: true, breaks: [] };
+      const rawBreaks = (config.breaks !== undefined ? config.breaks : (currentConfig.breaks || []))
+        .map(t => normalizeTime(t))
+        .filter(Boolean);
+      const uniqueBreaks = Array.from(new Set(rawBreaks));
+      const newConfig = { ...currentConfig, ...config, breaks: uniqueBreaks };
       const sync = async () => {
         const currentSession = sessionRef.current;
         if (currentSession) supabaseService.saveWeeklySchedule(day, newConfig).catch(console.error);
@@ -1715,11 +1686,14 @@ export const AppProvider: React.FC<{
   }, []);
 
   const toggleWeeklyBreak = useCallback(async (day: number, time: string) => {
+    const normTime = normalizeTime(time);
     setWeeklySchedule(prev => {
-      const currentConfig = prev[day];
-      const breaks = currentConfig.breaks || [];
-      const newBreaks = breaks.includes(time) ? breaks.filter(t => t !== time) : [...breaks, time];
-      const newConfig = { ...currentConfig, breaks: newBreaks };
+      const currentConfig = prev[day] || { start: '08:00', end: '19:00', isOpen: true, breaks: [] };
+      const breaks = (currentConfig.breaks || []).map(t => normalizeTime(t)).filter(Boolean);
+      const hasBreak = breaks.includes(normTime);
+      const newBreaks = hasBreak ? breaks.filter(t => t !== normTime) : [...breaks, normTime];
+      const uniqueBreaks = Array.from(new Set(newBreaks));
+      const newConfig = { ...currentConfig, breaks: uniqueBreaks };
       const sync = async () => {
         const currentSession = sessionRef.current;
         if (currentSession) supabaseService.saveWeeklySchedule(day, newConfig).catch(console.error);
@@ -1802,33 +1776,49 @@ export const AppProvider: React.FC<{
     }
   }, [barberId]);
 
-  const addCustomer = useCallback(async (customer: Customer) => {
-    if (!isValidPhone(customer.phone)) {
-      throw new Error('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
+  const addCustomer = useCallback(async (customer: Customer): Promise<Customer> => {
+    const validation = validateBrazilianPhone(customer.phone);
+    if (!validation.valid) {
+      throw new Error(validation.message || 'Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
     }
 
-    const normalized = normalizePhone(customer.phone);
+    const normalized = validation.normalized;
 
     // 1. Verificar se já existe no estado local
-    const existingLocal = customersRef.current[normalized];
+    const existingLocal = (Object.values(customersRef.current) as Customer[]).find(c => {
+      const cNorm = c.phoneNormalized || normalizePhone(c.phone);
+      return cNorm === normalized;
+    }) || customersRef.current[normalized];
+
     if (existingLocal) {
       throw new Error(`Este número já está cadastrado para o cliente ${existingLocal.name || 'outro cliente'}.`);
     }
 
     // 2. Verificar se já existe no Supabase para esta barbearia
+    let savedCustomer: any = null;
     const targetId = sessionRef.current?.user?.id || barberId;
     if (targetId) {
-      const existingDb = await supabaseService.checkDuplicateCustomer(normalized);
+      const existingDb = await supabaseService.checkDuplicateCustomer(customer.phone);
       if (existingDb) {
         throw new Error(`Este número já está cadastrado para o cliente ${existingDb.name || 'outro cliente'}.`);
       }
-      await supabaseService.saveCustomer(customer, targetId);
+      savedCustomer = await supabaseService.saveCustomer(customer, targetId);
     }
+
+    const finalCustomer: Customer = {
+      ...customer,
+      id: savedCustomer?.id || customer.id,
+      phone: customer.phone,
+      phoneNormalized: normalized,
+      phone_normalized: normalized
+    };
 
     setCustomers(prev => ({
       ...prev,
-      [normalized]: customer
+      [normalized]: finalCustomer
     }));
+
+    return finalCustomer;
   }, [barberId]);
 
   const reorderServices = useCallback(async (newServices: ServiceItem[]) => {

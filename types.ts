@@ -91,9 +91,12 @@ export interface Appointment {
 export interface Customer {
   id?: string;
   phone: string;
+  phoneNormalized?: string;
+  phone_normalized?: string;
   name: string;
   tenantId?: string; // Multi-tenant link
   barbershop_id?: string;
+  barbershopId?: string;
   cutCount: number;
   noShowCount?: number;
   notes?: string;

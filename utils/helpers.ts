@@ -75,37 +75,228 @@ export const formatCurrency = (value: number): string => {
   }).format(value);
 };
 
+export const digitsOnlyPhone = (value: string): string => {
+  return (value || '').replace(/\D/g, '');
+};
+
+export type PhoneValidationReason = 'empty' | 'too_short' | 'too_long' | 'invalid_ddd' | 'invalid';
+
+export type PhoneValidationResult =
+  | {
+      valid: true;
+      digits: string;
+      normalized: string;
+      message?: string;
+      reason?: undefined;
+    }
+  | {
+      valid: false;
+      reason: PhoneValidationReason;
+      message: string;
+      digits?: string;
+      normalized?: string;
+    };
+
+/**
+ * Regra Canônica de Normalização de Telefone Brasileiro para Comparação e Deduplicação:
+ * 1. Extrai somente dígitos numéricos;
+ * 2. Aceita apenas 10 ou 11 dígitos;
+ * 3. Se tiver 11 dígitos e o 3º dígito for '9' (DDD + 9 + 8 dígitos):
+ *    - Remove o 9 da 3ª posição, retornando 10 dígitos (DDD + 8 dígitos);
+ * 4. Se tiver 10 dígitos:
+ *    - Retorna os 10 dígitos;
+ * 5. Se tiver menos de 10 ou mais de 11: lança erro (nunca trunca).
+ */
+export const normalizeBrazilianPhoneForComparison = (value: string): string => {
+  const digits = digitsOnlyPhone(value);
+  if (!digits) {
+    throw new Error('Telefone não informado para normalização.');
+  }
+  if (digits.length < 10) {
+    throw new Error(`Telefone incompleto (${digits.length} dígitos). Informe DDD + número (10 ou 11 dígitos).`);
+  }
+  if (digits.length > 11) {
+    throw new Error(`Telefone inválido (${digits.length} dígitos). O telefone deve conter no máximo 11 dígitos com DDD.`);
+  }
+
+  // 11 dígitos: DDD + 9 + 8 dígitos -> remove o '9' da 3ª posição
+  if (digits.length === 11 && digits[2] === '9') {
+    return digits.slice(0, 2) + digits.slice(3);
+  }
+
+  // 10 dígitos (ou 11 dígitos sem '9' na 3ª posição)
+  return digits;
+};
+
+export const validateBrazilianPhone = (value: string): PhoneValidationResult => {
+  const digits = digitsOnlyPhone(value);
+  if (!digits) {
+    return {
+      valid: false,
+      reason: 'empty',
+      message: 'Telefone não informado.'
+    };
+  }
+
+  if (digits.length < 10) {
+    return {
+      valid: false,
+      reason: 'too_short',
+      message: 'Telefone incompleto. Digite o DDD + número (10 ou 11 dígitos).'
+    };
+  }
+
+  if (digits.length > 11) {
+    return {
+      valid: false,
+      reason: 'too_long',
+      message: 'O telefone informado possui mais de 11 dígitos. Confira o número antes de continuar.'
+    };
+  }
+
+  const ddd = parseInt(digits.slice(0, 2), 10);
+  if (isNaN(ddd) || ddd < 11 || ddd > 99) {
+    return {
+      valid: false,
+      reason: 'invalid_ddd',
+      message: 'DDD inválido. Informe um DDD brasileiro válido entre 11 e 99.'
+    };
+  }
+
+  try {
+    const normalized = normalizeBrazilianPhoneForComparison(digits);
+    return {
+      valid: true,
+      digits,
+      normalized
+    };
+  } catch (err: any) {
+    return {
+      valid: false,
+      reason: 'invalid',
+      message: err?.message || 'Telefone inválido.'
+    };
+  }
+};
+
 export const formatPhone = (value: string): string => {
-  const numbers = value.replace(/\D/g, '').slice(0, 11);
-  
+  const numbers = digitsOnlyPhone(value);
+  if (!numbers) return '';
+  if (numbers.length > 11) return value;
   if (numbers.length <= 2) return numbers;
   if (numbers.length <= 6) return `(${numbers.slice(0, 2)}) ${numbers.slice(2)}`;
   if (numbers.length <= 10) return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 6)}-${numbers.slice(6)}`;
   return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
 };
 
+export type ClientInputMode = 'name' | 'phone';
+
+export function isPhoneLikeInput(value: string): boolean {
+  const trimmed = (value || '').trim();
+  return Boolean(trimmed) && /^[\d\s()+-]+$/.test(trimmed);
+}
+
+export type ClientInputKind = 'text' | 'phone' | 'invalid-phone' | 'partial-phone';
+
+export interface ParsedClientInput {
+  kind: ClientInputKind;
+  originalValue: string;
+  rawDigits: string;
+  normalizedPhone?: string;
+  formattedPhone?: string;
+  hasLetters: boolean;
+  errorMessage?: string;
+}
+
+export const parseAppointmentClientInput = (value: string): ParsedClientInput => {
+  const originalValue = value || '';
+  const trimmed = originalValue.trim();
+
+  if (!trimmed) {
+    return {
+      kind: 'text',
+      originalValue,
+      rawDigits: '',
+      hasLetters: false
+    };
+  }
+
+  const hasLetters = /[a-zA-ZÀ-ÿ]/.test(trimmed);
+  const rawDigits = digitsOnlyPhone(trimmed);
+
+  if (hasLetters) {
+    return {
+      kind: 'text',
+      originalValue,
+      rawDigits,
+      hasLetters: true
+    };
+  }
+
+  // Entrada exclusivamente numérica ou com caracteres de formatação
+  if (rawDigits.length > 11) {
+    return {
+      kind: 'invalid-phone',
+      originalValue,
+      rawDigits,
+      hasLetters: false,
+      errorMessage: 'O telefone informado possui mais de 11 dígitos. Confira o número e tente novamente.'
+    };
+  }
+
+  if (rawDigits.length === 10 || rawDigits.length === 11) {
+    const validation = validateBrazilianPhone(rawDigits);
+    if (!validation.valid) {
+      return {
+        kind: 'invalid-phone',
+        originalValue,
+        rawDigits,
+        hasLetters: false,
+        errorMessage: validation.message
+      };
+    }
+
+    return {
+      kind: 'phone',
+      originalValue,
+      rawDigits,
+      normalizedPhone: validation.normalized,
+      formattedPhone: formatPhone(rawDigits),
+      hasLetters: false
+    };
+  }
+
+  if (rawDigits.length > 0 && rawDigits.length < 10) {
+    return {
+      kind: 'partial-phone',
+      originalValue,
+      rawDigits,
+      hasLetters: false
+    };
+  }
+
+  return {
+    kind: 'text',
+    originalValue,
+    rawDigits: '',
+    hasLetters: false
+  };
+};
+
 export const isValidPhone = (phone: string): boolean => {
-  if (!phone) return false;
-  const digits = phone.replace(/\D/g, '');
-  // Must have 10 (fixed) or 11 (mobile) digits
-  if (digits.length !== 10 && digits.length !== 11) return false;
-  const ddd = parseInt(digits.slice(0, 2), 10);
-  if (isNaN(ddd) || ddd < 11 || ddd > 99) return false;
-  return true;
+  return validateBrazilianPhone(phone).valid;
 };
 
 /**
- * Normalizes a Brazilian phone number to a canonical 10-digit format.
- * Removes all non-numeric characters and the extra '9' from 11-digit mobile numbers.
+ * Normalizes a Brazilian phone number to canonical 10-digit format for deduplication.
  */
 export const normalizePhone = (phone: string): string => {
-  const numbers = phone.replace(/\D/g, '');
-  // Brazilian mobile numbers with 11 digits: DDD + 9 + 8 digits
-  // We normalize by removing the '9' at the 3rd position if it exists in an 11-digit number
-  if (numbers.length === 11 && numbers[2] === '9') {
-    return numbers.slice(0, 2) + numbers.slice(3);
+  if (!phone) return '';
+  try {
+    return normalizeBrazilianPhoneForComparison(phone);
+  } catch {
+    return digitsOnlyPhone(phone);
   }
-  return numbers;
 };
 
 export const normalizeTime = (time: string | null | undefined): string => {

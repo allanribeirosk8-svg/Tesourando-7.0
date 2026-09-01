@@ -4,26 +4,20 @@ import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft,
 import { useStore } from '../context/Store';
 import { Staff, StaffAvailability } from '../types';
 import { compressImage, formatPhone } from '../utils/helpers';
+import { WorkScheduleModal } from './WorkScheduleModal';
 
 interface StaffConfigModalProps {
   onClose: () => void;
 }
 
-const DIAS_SEMANA = [
-  { value: 0, label: 'Domingo' },
-  { value: 1, label: 'Segunda' },
-  { value: 2, label: 'Terça' },
-  { value: 3, label: 'Quarta' },
-  { value: 4, label: 'Quinta' },
-  { value: 5, label: 'Sexta' },
-  { value: 6, label: 'Sábado' },
-];
-
 export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) => {
-  const { staff, addStaff, createStaffDirectly, updateStaff, deleteStaff, getStaffAvailability, saveStaffAvailability, weeklySchedule, userRole, session, barberProfile, activeTenant, updateBarberProfile } = useStore();
+  const { staff, addStaff, createStaffDirectly, updateStaff, deleteStaff, userRole, session, barberProfile, activeTenant, updateBarberProfile } = useStore();
   
-  // Telas internas: 'list' | 'edit_form' | 'availability_form'
-  const [view, setView] = useState<'list' | 'edit_form' | 'availability_form'>('list');
+  // Telas internas: 'list' | 'edit_form'
+  const [view, setView] = useState<'list' | 'edit_form'>('list');
+
+  // Modal unificado de horários de trabalho
+  const [scheduleModalStaff, setScheduleModalStaff] = useState<Staff | null>(null);
 
   // Identificar se um membro é o dono da barbearia
   const isOwnerMember = React.useCallback((member: Staff) => {
@@ -78,17 +72,6 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
   const [role, setRole] = useState<'staff' | 'admin'>('staff');
   
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Estados da configuração de disponibilidade do profissional
-  const [availabilities, setAvailabilities] = useState<Record<number, {
-    isOpen: boolean;
-    startTime: string;
-    endTime: string;
-    breaks: string[];
-  }>>({});
-  
-  const [loadingAvail, setLoadingAvail] = useState(false);
-  const [savingAvail, setSavingAvail] = useState(false);
 
   // Upload e compressão da foto de perfil
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -205,134 +188,12 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
     }
   };
 
-  // Abrir a tela de horários de trabalho
-  const openAvailabilityForm = async (member: Staff) => {
-    setSelectedStaffMember(member);
-    setLoadingAvail(true);
-    setView('availability_form');
-    
-    try {
-      const dbAvails = await getStaffAvailability(member.id);
-      
-      // Criar mapa com base nos dados do banco ou herdar do padrão da barbearia (fallback)
-      const map: Record<number, { isOpen: boolean; startTime: string; endTime: string; breaks: string[] }> = {};
-      
-      DIAS_SEMANA.forEach(day => {
-        const found = dbAvails.find(a => a.dayOfWeek === day.value);
-        if (found) {
-          map[day.value] = {
-            isOpen: found.isOpen,
-            startTime: found.startTime.substring(0, 5),
-            endTime: found.endTime.substring(0, 5),
-            breaks: found.breaks || []
-          };
-        } else {
-          // Herda do padrão da barbearia (weeklySchedule da store)
-          const tenantDay = weeklySchedule[day.value];
-          map[day.value] = {
-            isOpen: tenantDay ? tenantDay.isOpen : false,
-            startTime: tenantDay ? tenantDay.start : '09:00',
-            endTime: tenantDay ? tenantDay.end : '19:00',
-            breaks: tenantDay ? tenantDay.breaks : []
-          };
-        }
-      });
-      
-      setAvailabilities(map);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoadingAvail(false);
-    }
+  // Abrir o modal unificado de horários de trabalho
+  const openAvailabilityForm = (member: Staff) => {
+    setScheduleModalStaff(member);
   };
 
-  useEffect(() => {
-    if (userRole === 'staff' && session?.user?.id) {
-      const selfMember = staff.find(s => s.userId === session.user.id);
-      if (selfMember) {
-        openAvailabilityForm(selfMember);
-      }
-    }
-  }, [userRole, session, staff]);
-
-  const handleSaveAvailability = async () => {
-    if (!selectedStaffMember) return;
-    setSavingAvail(true);
-    try {
-      const payload: Omit<StaffAvailability, 'id'>[] = Object.keys(availabilities).map(dayKey => {
-        const dayOfWeek = parseInt(dayKey, 10);
-        const config = availabilities[dayOfWeek];
-        return {
-          staffId: selectedStaffMember.id,
-          dayOfWeek,
-          startTime: config.startTime,
-          endTime: config.endTime,
-          breaks: config.breaks,
-          isOpen: config.isOpen
-        };
-      });
-      
-      await saveStaffAvailability(payload);
-      alert('Horários de trabalho salvos com sucesso!');
-      setView('list');
-    } catch (err) {
-      console.error(err);
-      alert('Erro ao salvar horários de trabalho.');
-    } finally {
-      setSavingAvail(false);
-    }
-  };
-
-  const toggleDayOpen = (day: number) => {
-    setAvailabilities(prev => ({
-      ...prev,
-      [day]: {
-        ...prev[day],
-        isOpen: !prev[day].isOpen
-      }
-    }));
-  };
-
-  const updateDayTimes = (day: number, field: 'startTime' | 'endTime', value: string) => {
-    setAvailabilities(prev => ({
-      ...prev,
-      [day]: {
-        ...prev[day],
-        [field]: value
-      }
-    }));
-  };
-
-  const toggleBreakTime = (day: number, timeStr: string) => {
-    setAvailabilities(prev => {
-      const currentBreaks = prev[day].breaks || [];
-      const updatedBreaks = currentBreaks.includes(timeStr)
-        ? currentBreaks.filter(b => b !== timeStr)
-        : [...currentBreaks, timeStr].sort();
-        
-      return {
-        ...prev,
-        [day]: {
-          ...prev[day],
-          breaks: updatedBreaks
-        }
-      };
-    });
-  };
-
-  // Gerar horários sugeridos de pausa (de 1h em 1h ou de 30 em 30 min) entre o horário de expediente
-  const getSuggestedBreaks = (startTime: string, endTime: string) => {
-    const breaks = [];
-    const [startH] = startTime.split(':').map(Number);
-    const [endH] = endTime.split(':').map(Number);
-    
-    for (let h = startH; h < endH; h++) {
-      const hStr = String(h).padStart(2, '0');
-      breaks.push(`${hStr}:00`);
-      breaks.push(`${hStr}:30`);
-    }
-    return breaks;
-  };
+  const isOwnerOrAdmin = userRole === 'admin_owner' || userRole === 'admin';
 
   return (
     <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -749,120 +610,26 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
             </form>
           )}
 
-          {/* VISÃO 3: Disponibilidade Semanal Individual por Profissional */}
-          {view === 'availability_form' && (
-            <div className="space-y-6">
-              {loadingAvail ? (
-                <div className="text-center py-12 text-title text-sm">Carregando horários de trabalho...</div>
-              ) : (
-                <div className="space-y-4">
-                  <p className="text-xs text-title">Dica: Se um dia estiver ativado, o profissional atenderá nesse período. Você também pode marcar os horários que correspondem a pausas individuais.</p>
-                  
-                  <div className="space-y-3">
-                    {DIAS_SEMANA.map((day) => {
-                      const dayConfig = availabilities[day.value];
-                      if (!dayConfig) return null;
-
-                      const suggestedBreaks = getSuggestedBreaks(dayConfig.startTime, dayConfig.endTime);
-
-                      return (
-                        <div key={day.value} className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm font-bold text-white">{day.label}</span>
-                            <button
-                              onClick={() => toggleDayOpen(day.value)}
-                              className={`py-1 px-3.5 rounded-full text-[10px] font-black uppercase transition-all ${
-                                dayConfig.isOpen
-                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                  : 'bg-white/5 text-title border border-white/5'
-                              }`}
-                            >
-                              {dayConfig.isOpen ? 'Ativo' : 'Fechado'}
-                            </button>
-                          </div>
-
-                          {dayConfig.isOpen && (
-                            <div className="space-y-3 pt-2">
-                              {/* Horários de início e fim */}
-                              <div className="grid grid-cols-2 gap-3">
-                                <div className="space-y-1">
-                                  <label className="text-[10px] text-title uppercase font-bold tracking-wide">Início do Turno</label>
-                                  <input
-                                    type="time"
-                                    value={dayConfig.startTime}
-                                    onChange={(e) => updateDayTimes(day.value, 'startTime', e.target.value)}
-                                    className="w-full bg-black/40 text-white rounded-xl py-2 px-3 border border-white/10 focus:outline-none focus:border-primary text-sm font-semibold"
-                                  />
-                                </div>
-                                <div className="space-y-1">
-                                  <label className="text-[10px] text-title uppercase font-bold tracking-wide">Fim do Turno</label>
-                                  <input
-                                    type="time"
-                                    value={dayConfig.endTime}
-                                    onChange={(e) => updateDayTimes(day.value, 'endTime', e.target.value)}
-                                    className="w-full bg-black/40 text-white rounded-xl py-2 px-3 border border-white/10 focus:outline-none focus:border-primary text-sm font-semibold"
-                                  />
-                                </div>
-                              </div>
-
-                              {/* Horários de Pausa */}
-                              <div className="space-y-1.5">
-                                <label className="text-[10px] text-title uppercase font-bold tracking-wide flex items-center gap-1">
-                                  <Coffee size={11} className="text-secondary" />
-                                  Pausas e Intervalos Individuais
-                                </label>
-                                <div className="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto p-1 bg-black/10 rounded-xl">
-                                  {suggestedBreaks.map(time => {
-                                    const isBreak = dayConfig.breaks.includes(time);
-                                    return (
-                                      <button
-                                        key={time}
-                                        type="button"
-                                        onClick={() => toggleBreakTime(day.value, time)}
-                                        className={`py-1 px-2.5 rounded-lg text-xs font-semibold border transition-all ${
-                                          isBreak
-                                            ? 'bg-secondary/15 border-secondary text-secondary'
-                                            : 'bg-black/20 border-white/5 text-title hover:bg-black/30'
-                                        }`}
-                                      >
-                                        {time}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="pt-4 flex gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setView('list')}
-                      className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-white/5 hover:bg-white/10 active:scale-95 transition-all border border-white/5"
-                    >
-                      Cancelar
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSaveAvailability}
-                      disabled={savingAvail}
-                      className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-primary hover:bg-primary/95 active:scale-95 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
-                    >
-                      <Save size={16} />
-                      <span>{savingAvail ? 'Salvando...' : 'Salvar Horários'}</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
         </div>
       </motion.div>
+
+      {/* UNIFIED WORK SCHEDULE MODAL */}
+      {scheduleModalStaff && (
+        <WorkScheduleModal
+          isOpen={!!scheduleModalStaff}
+          onClose={() => setScheduleModalStaff(null)}
+          targetStaffId={scheduleModalStaff.id}
+          targetStaffName={scheduleModalStaff.name}
+          canChooseStaff={isOwnerOrAdmin}
+          staffOptions={staffListToRender}
+          onTargetStaffChange={(newId) => {
+            const nextStaff = staffListToRender.find(s => s.id === newId);
+            if (nextStaff) {
+              setScheduleModalStaff(nextStaff);
+            }
+          }}
+        />
+      )}
     </div>
   );
 };
