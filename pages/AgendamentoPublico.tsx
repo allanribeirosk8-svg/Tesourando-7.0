@@ -22,7 +22,7 @@ import {
   Pencil,
   Users
 } from 'lucide-react';
-import { formatCurrency, generateTimeSlots } from '../utils/helpers';
+import { formatCurrency, generateTimeSlots, validateBrazilianPhone } from '../utils/helpers';
 
 interface BarberProfile {
   id: string;
@@ -416,17 +416,19 @@ export default function AgendamentoPublico() {
 
   const submitAppointment = async (e: React.FormEvent) => {
     e.preventDefault();
-    const phoneObj = clientPhone.replace(/\D/g, '');
     const cleanName = clientName.trim();
     
     if (cleanName.split(' ').length < 2) {
        setErrorMessage('Por favor, insira nome e sobrenome.');
        return;
     }
-    if (phoneObj.length < 10) {
-       setErrorMessage('Por favor, insira um WhatsApp válido.');
+    
+    const valPhone = validateBrazilianPhone(clientPhone);
+    if (!valPhone.valid) {
+       setErrorMessage(valPhone.message || 'Por favor, insira um WhatsApp válido.');
        return;
     }
+    const phoneObj = valPhone.digits;
     
     setIsSubmitting(true);
     setErrorMessage('');

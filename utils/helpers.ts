@@ -79,7 +79,7 @@ export const digitsOnlyPhone = (value: string): string => {
   return (value || '').replace(/\D/g, '');
 };
 
-export type PhoneValidationReason = 'empty' | 'too_short' | 'too_long' | 'invalid_ddd' | 'invalid';
+export type PhoneValidationReason = 'empty' | 'too_short' | 'too_long' | 'invalid_ddd' | 'invalid_mobile_ninth' | 'invalid';
 
 export type PhoneValidationResult =
   | {
@@ -91,7 +91,7 @@ export type PhoneValidationResult =
     }
   | {
       valid: false;
-      reason: PhoneValidationReason;
+      reason?: PhoneValidationReason;
       message: string;
       digits?: string;
       normalized?: string;
@@ -100,12 +100,10 @@ export type PhoneValidationResult =
 /**
  * Regra Canônica de Normalização de Telefone Brasileiro para Comparação e Deduplicação:
  * 1. Extrai somente dígitos numéricos;
- * 2. Aceita apenas 10 ou 11 dígitos;
- * 3. Se tiver 11 dígitos e o 3º dígito for '9' (DDD + 9 + 8 dígitos):
- *    - Remove o 9 da 3ª posição, retornando 10 dígitos (DDD + 8 dígitos);
- * 4. Se tiver 10 dígitos:
- *    - Retorna os 10 dígitos;
- * 5. Se tiver menos de 10 ou mais de 11: lança erro (nunca trunca).
+ * 2. 10 dígitos (DDD + 8 dígitos): válido -> retorna os 10 dígitos;
+ * 3. 11 dígitos (DDD + 9 + 8 dígitos): válido somente se digits[2] === '9' -> remove o 9 (retorna 10 dígitos);
+ * 4. 11 dígitos com digits[2] !== '9': INVÁLIDO (lança erro explicativo);
+ * 5. Menos de 10 ou mais de 11: lança erro (nunca trunca).
  */
 export const normalizeBrazilianPhoneForComparison = (value: string): string => {
   const digits = digitsOnlyPhone(value);
@@ -120,11 +118,14 @@ export const normalizeBrazilianPhoneForComparison = (value: string): string => {
   }
 
   // 11 dígitos: DDD + 9 + 8 dígitos -> remove o '9' da 3ª posição
-  if (digits.length === 11 && digits[2] === '9') {
+  if (digits.length === 11) {
+    if (digits[2] !== '9') {
+      throw new Error('Telefones com 11 dígitos devem ter 9 após o DDD.');
+    }
     return digits.slice(0, 2) + digits.slice(3);
   }
 
-  // 10 dígitos (ou 11 dígitos sem '9' na 3ª posição)
+  // 10 dígitos: DDD + 8 dígitos
   return digits;
 };
 
@@ -160,6 +161,14 @@ export const validateBrazilianPhone = (value: string): PhoneValidationResult => 
       valid: false,
       reason: 'invalid_ddd',
       message: 'DDD inválido. Informe um DDD brasileiro válido entre 11 e 99.'
+    };
+  }
+
+  if (digits.length === 11 && digits[2] !== '9') {
+    return {
+      valid: false,
+      reason: 'invalid_mobile_ninth',
+      message: 'Telefones com 11 dígitos devem ter 9 após o DDD.'
     };
   }
 
@@ -466,4 +475,19 @@ export const formatProfessionalShortName = (name: string): string => {
   const surnameInitial = parts[1].charAt(0).toUpperCase();
   return `${firstName} ${surnameInitial}.`;
 };
+
+/**
+  * Verifica se o erro retornado pelo Supabase/PostgreSQL é uma violação do índice
+  * único de idempotência de agendamento vinculado ("uq_transactions_barbershop_linked_appointment").
+  */
+export function isDuplicateLinkedAppointmentTransactionError(error: unknown): boolean {
+  const err = error as { code?: string; message?: string; details?: string };
+  return (
+    err?.code === '23505' &&
+    (
+      (typeof err?.message === 'string' && err.message.includes('uq_transactions_barbershop_linked_appointment')) ||
+      (typeof err?.details === 'string' && err.details.includes('uq_transactions_barbershop_linked_appointment'))
+    )
+  );
+}
 

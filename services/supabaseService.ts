@@ -426,32 +426,29 @@ export const supabaseService = {
     }
 
     const validation = validateBrazilianPhone(customer.phone);
-    const normalizedPhone = validation.valid ? validation.normalized : normalizePhone(customer.phone);
+    if (!validation.valid) {
+      throw new Error(validation.message || 'Telefone brasileiro inválido.');
+    }
+    const normalizedPhone = validation.normalized;
 
     const payload: any = {
       barbershop_id: barbershopId,
       user_id: currentAuthId || userId,
       phone: customer.phone,
-      phone_normalized: normalizedPhone || null,
+      phone_normalized: normalizedPhone,
       name: customer.name,
       avatar: customer.avatar ?? null,
       cut_count: customer.cutCount ?? 0,
       no_show_count: customer.noShowCount ?? 0
     };
 
-    // 1. Pesquisar cliente existente por barbershop_id + phone_normalized (ou phone caso não normalizado)
-    let findQuery = supabase
+    // 1. Pesquisar cliente existente por barbershop_id + phone_normalized
+    const { data: existing, error: findError } = await supabase
       .from('customers')
-      .select('id, phone, phone_normalized, barbershop_id')
-      .eq('barbershop_id', barbershopId);
-
-    if (normalizedPhone) {
-      findQuery = findQuery.eq('phone_normalized', normalizedPhone);
-    } else {
-      findQuery = findQuery.eq('phone', customer.phone);
-    }
-
-    const { data: existing, error: findError } = await findQuery.maybeSingle();
+      .select('id, phone, phone_normalized, name, barbershop_id')
+      .eq('barbershop_id', barbershopId)
+      .eq('phone_normalized', normalizedPhone)
+      .maybeSingle();
 
     if (findError) throw findError;
 
@@ -477,18 +474,18 @@ export const supabaseService = {
       .maybeSingle();
 
     if (error) {
-      // Se houver conflito concorrente de chave única, tentar atualizar
-      if (error.code === '23505' && normalizedPhone) {
-        const { data: fbData, error: fbErr } = await supabase
+      // Se houver conflito de chave única (23505), buscar e selecionar o cliente existente
+      if (error.code === '23505') {
+        const { data: existingCust, error: getErr } = await supabase
           .from('customers')
-          .update(payload)
+          .select('*')
           .eq('barbershop_id', barbershopId)
           .eq('phone_normalized', normalizedPhone)
-          .select()
           .maybeSingle();
 
-        if (fbErr) throw fbErr;
-        return fbData;
+        if (!getErr && existingCust) {
+          return existingCust;
+        }
       }
       throw error;
     }
@@ -508,23 +505,20 @@ export const supabaseService = {
     }
 
     const validation = validateBrazilianPhone(phone);
-    const normalizedPhone = validation.valid ? validation.normalized : normalizePhone(phone);
+    if (!validation.valid) {
+      throw new Error(validation.message || 'Telefone inválido para foto de cliente.');
+    }
+    const normalizedPhone = validation.normalized;
 
     // Buscar customer_id da barbearia se existir
-    let customerId: string | null = null;
-    let findQuery = supabase
+    const { data: cust } = await supabase
       .from('customers')
       .select('id')
-      .eq('barbershop_id', barbershopId);
+      .eq('barbershop_id', barbershopId)
+      .eq('phone_normalized', normalizedPhone)
+      .maybeSingle();
 
-    if (normalizedPhone) {
-      findQuery = findQuery.eq('phone_normalized', normalizedPhone);
-    } else {
-      findQuery = findQuery.eq('phone', phone);
-    }
-
-    const { data: cust } = await findQuery.maybeSingle();
-    if (cust?.id) customerId = cust.id;
+    const customerId: string | null = cust?.id || null;
 
     const payload: any = {
       barbershop_id: barbershopId,
@@ -555,8 +549,12 @@ export const supabaseService = {
 
     const valOld = validateBrazilianPhone(oldPhone);
     const valNew = validateBrazilianPhone(customer.phone);
+    if (!valNew.valid) {
+      throw new Error(valNew.message || 'Telefone inválido.');
+    }
+
     const normalizedOld = valOld.valid ? valOld.normalized : normalizePhone(oldPhone);
-    const normalizedNew = valNew.valid ? valNew.normalized : normalizePhone(customer.phone);
+    const normalizedNew = valNew.normalized;
 
     if (normalizedOld !== normalizedNew) {
       // 1. Verificar se novo telefone já existe em outro cliente na mesma barbearia
@@ -657,8 +655,8 @@ export const supabaseService = {
     }
 
     const validation = validateBrazilianPhone(phone);
-    const normalizedPhone = validation.valid ? validation.normalized : normalizePhone(phone);
-    if (!normalizedPhone) return null;
+    if (!validation.valid) return null;
+    const normalizedPhone = validation.normalized;
 
     const { data, error } = await supabase
       .from('customers')

@@ -174,6 +174,11 @@ export interface Transaction {
   createdAt: number;
 }
 
+export type AppointmentTransactionResult = {
+  transaction: Transaction;
+  alreadyExisted: boolean;
+};
+
 export interface AppState {
   transactions: Transaction[];
   appointments: Appointment[];
@@ -239,7 +244,7 @@ export interface AppState {
   updateBarberProfile: (profile: BarberProfile) => void;
   addCustomer: (customer: Customer) => void;
   reorderServices: (services: ServiceItem[]) => void;
-  addTransaction: (t: Omit<Transaction, 'id' | 'createdAt'>) => Promise<void>;
+  addTransaction: (t: Omit<Transaction, 'id' | 'createdAt'>) => Promise<AppointmentTransactionResult | void>;
   deleteTransaction: (id: string) => Promise<void>;
   resetStore: () => void;
   loadTransactions: (startDate: string, endDate: string) => Promise<void>;

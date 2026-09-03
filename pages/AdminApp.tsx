@@ -4,7 +4,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { supabaseService } from '../services/supabaseService';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
-import { compressImage, formatDate, getTodayString, generateTimeSlots, formatCurrency, formatPhone, isValidPhone, getOccupiedSlots, normalizePhone, normalizeTime, formatDateLong, capitalizeName, getInitials, getAvatarColor , calcOccupancySlots, formatProfessionalShortName, parseAppointmentClientInput, isPhoneLikeInput, ClientInputMode } from '../utils/helpers';
+import { compressImage, formatDate, getTodayString, generateTimeSlots, formatCurrency, formatPhone, isValidPhone, validateBrazilianPhone, getOccupiedSlots, normalizePhone, normalizeTime, formatDateLong, capitalizeName, getInitials, getAvatarColor , calcOccupancySlots, formatProfessionalShortName, parseAppointmentClientInput, isPhoneLikeInput, ClientInputMode } from '../utils/helpers';
 import { useSwipe } from '../hooks/useSwipe';
 import { Onboarding } from '../components/Onboarding';
 import { SetupWizard } from '../components/SetupWizard';
@@ -785,6 +785,7 @@ export const AdminApp: React.FC = () => {
     appointments, 
     session, 
     isLoading, 
+    activeTenant,
     updateBarberProfile, 
     reloadData, 
     resetStore, 
@@ -989,35 +990,69 @@ export const AdminApp: React.FC = () => {
     return `Boa noite, ${name}! 🌙`;
   };
 
-  if (showOnboarding) {
-    return <Onboarding onComplete={handleOnboardingComplete} />;
-  }
-
-  if (!isAuthenticated) {
-    return <AuthScreen onAuthenticated={() => setIsAuthenticated(true)} initialView={authInitialView} />;
-  }
-
+  // 1. Loading
   if (isLoading) {
     return <div className="fixed inset-0 bg-[#363062]" />;
   }
 
-  // Se o onboarding está incompleto para o usuário autenticado (ex: fechou o app e voltou), abre o SetupWizard direto
+  // 2. Sem sessão / Login
+  if (showOnboarding) {
+    return <Onboarding onComplete={handleOnboardingComplete} />;
+  }
+
+  if (!isAuthenticated && !session) {
+    return <AuthScreen onAuthenticated={() => setIsAuthenticated(true)} initialView={authInitialView} />;
+  }
+
+  // 3. Onboarding incompleto / SetupWizard
   // REGRA OBRIGATÓRIA: Erro de rede (network_error) NUNCA deve abrir SetupWizard.
   // Usuário com membership staff/admin e staff_profile válido NUNCA deve abrir SetupWizard.
-  const shouldOpenSetup = onboardingState && 
+  const shouldOpenSetup = showSetup || (onboardingState && 
     !onboardingState.isComplete && 
     onboardingState.status !== 'network_error' && 
     onboardingState.status !== 'no_session' && 
-    !onboardingState.isStaffMember;
+    !onboardingState.isStaffMember);
 
   if (shouldOpenSetup) {
     return (
       <SetupWizard 
-        initialStep={onboardingState.step} 
+        initialStep={onboardingState?.step || 1} 
         onComplete={async () => {
+          setShowSetup(false);
           await reloadData();
         }} 
       />
+    );
+  }
+
+  // 4/5. Tenant válido / AdminApp (ou erro recuperável se tenant nulo)
+  if (!activeTenant?.id) {
+    return (
+      <div className="h-[100dvh] flex flex-col items-center justify-center bg-[#1E1B4B] p-6 text-center text-white">
+        <div className="max-w-md w-full bg-[#2A2456] rounded-2xl p-6 border border-white/10 shadow-xl space-y-4">
+          <div className="w-12 h-12 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+            <AlertTriangle size={24} />
+          </div>
+          <h2 className="text-lg font-bold text-white">Contexto da barbearia não encontrado</h2>
+          <p className="text-sm text-gray-300">
+            Não encontramos a barbearia vinculada à sua conta. Conclua a configuração inicial ou recarregue os dados.
+          </p>
+          <div className="flex flex-col gap-2 pt-2">
+            <button
+              onClick={() => setShowSetup(true)}
+              className="w-full py-3 bg-[#48C78E] text-[#1E1B4B] font-bold rounded-xl hover:bg-[#3db37d] transition-colors"
+            >
+              Configurar barbearia
+            </button>
+            <button
+              onClick={() => reloadData()}
+              className="w-full py-3 bg-white/10 text-white font-medium rounded-xl hover:bg-white/15 transition-colors"
+            >
+              Recarregar dados
+            </button>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -3205,17 +3240,22 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
       return;
     }
 
-    if (!isValidPhone(phoneToCheck)) {
-      setPhoneErrorMsg('Telefone inválido. Digite DDD + número (10 ou 11 dígitos).');
+    const validation = validateBrazilianPhone(phoneToCheck);
+    if (!validation.valid) {
+      setPhoneErrorMsg(validation.message);
       setDuplicateError(null);
       return;
     }
 
     setPhoneErrorMsg(null);
-    const normalized = normalizePhone(phoneToCheck);
+    const normalized = validation.normalized;
     
     // 1. Checar primeiro no estado local de clientes
-    const existingLocal = customers[normalized];
+    const existingLocal = (Object.values(customers) as Customer[]).find(c => {
+      const cNorm = c.phoneNormalized || normalizePhone(c.phone);
+      return cNorm === normalized;
+    }) || customers[normalized];
+
     if (existingLocal) {
       setDuplicateError(`Este número já está cadastrado para o cliente ${existingLocal.name}.`);
       return;
@@ -3247,15 +3287,15 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const phoneValid = isValidPhone(phone);
+    const val = validateBrazilianPhone(phone);
     const newErrors = {
       name: !name.trim(),
-      phone: !phoneValid
+      phone: !val.valid
     };
     setErrors(newErrors);
 
-    if (!phoneValid) {
-      setPhoneErrorMsg('Telefone inválido. Digite o DDD + número (10 ou 11 dígitos).');
+    if (!val.valid) {
+      setPhoneErrorMsg(val.message);
     } else {
       setPhoneErrorMsg(null);
     }
@@ -3265,7 +3305,7 @@ const AddCustomerModal: React.FC<{ onClose: () => void, onSuccess: (msg: string)
       await validatingPromiseRef.current;
     }
 
-    if (newErrors.name || !phoneValid || duplicateError) {
+    if (newErrors.name || !val.valid || duplicateError) {
       setShowErrorMsg(true);
       return;
     }
@@ -3619,12 +3659,15 @@ const AddAppointmentModal: React.FC<{
   const executeFinalSave = async (data: typeof formData, isNew: boolean, save: boolean) => {
     setIsSubmitting(true);
     try {
-      const normalizedCustomerPhone = normalizePhone(data.phone);
+      const val = validateBrazilianPhone(data.phone);
+      if (!val.valid) {
+        throw new Error(val.message);
+      }
 
       // If new customer and "save to contacts" is checked
       if (isNew && save) {
         await addCustomer({
-          phone: normalizedCustomerPhone,
+          phone: data.phone,
           name: capitalizeName(data.name),
           cutCount: 0,
           history: [],
@@ -3645,7 +3688,7 @@ const AddAppointmentModal: React.FC<{
         tenantId: activeTenant?.id || undefined,
         staffId: effectiveStaffId,
         clientName: capitalizeName(data.name),
-        phone: normalizedCustomerPhone,
+        phone: data.phone,
         date: data.date,
         time: data.time,
         service: selectedServices.map(s => s.name).join(', '),
@@ -3668,10 +3711,10 @@ const AddAppointmentModal: React.FC<{
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const phoneValid = isValidPhone(formData.phone);
+    const phoneVal = validateBrazilianPhone(formData.phone);
     const newErrors = {
       name: !formData.name.trim(),
-      phone: !phoneValid,
+      phone: !phoneVal.valid,
       time: !formData.time,
       services: formData.serviceIds.length === 0
     };
@@ -3682,8 +3725,11 @@ const AddAppointmentModal: React.FC<{
     }
 
     if (isNewCustomer && !duplicateCustomer) {
-      const normalizedInputPhone = normalizePhone(formData.phone);
-      const existing = (Object.values(customers) as Customer[]).find(c => normalizePhone(c.phone) === normalizedInputPhone);
+      const normalizedInputPhone = phoneVal.normalized;
+      const existing = (Object.values(customers) as Customer[]).find(c => {
+        const cNorm = c.phoneNormalized || normalizePhone(c.phone);
+        return cNorm === normalizedInputPhone;
+      });
       
       if (existing) {
         setDuplicateCustomer(existing);

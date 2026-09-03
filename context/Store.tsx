@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
-import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState } from '../types';
-import { normalizePhone, isValidPhone, validateBrazilianPhone, normalizeBrazilianPhoneForComparison } from '../utils/helpers';
+import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState, AppointmentTransactionResult } from '../types';
+import { normalizePhone, isValidPhone, validateBrazilianPhone, normalizeBrazilianPhoneForComparison, isDuplicateLinkedAppointmentTransactionError } from '../utils/helpers';
 import { supabaseService } from '../services/supabaseService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { Session } from '@supabase/supabase-js';
@@ -170,7 +170,9 @@ export const AppProvider: React.FC<{
         return;
       }
 
-      if (!isSupabaseConfigured() || !sessionRef.current) return;
+      const currentSession = sessionRef.current;
+      const barbershopId = activeTenant?.id;
+      if (!isSupabaseConfigured() || !currentSession?.user?.id || !barbershopId) return;
 
       const dbApts = await supabaseService.getAppointmentsByDate(date);
       
@@ -196,7 +198,7 @@ export const AppProvider: React.FC<{
     } catch (e) {
       console.error("Error fetching appointments by date", e);
     }
-  }, []);
+  }, [activeTenant?.id]);
 
   const resetStore = useCallback(() => {
     setBarberProfile(DEFAULT_PROFILE);
@@ -220,7 +222,9 @@ export const AppProvider: React.FC<{
 
   const loadBarbershopData = useCallback(async () => {
     try {
-      if (!isSupabaseConfigured() || !sessionRef.current) return;
+      const currentSession = sessionRef.current;
+      const barbershopId = activeTenant?.id;
+      if (!isSupabaseConfigured() || !currentSession?.user?.id || !barbershopId) return;
       const [bs, members, invites] = await Promise.all([
         supabaseService.getBarbershop(),
         supabaseService.getBarbershopMembers(),
@@ -232,7 +236,7 @@ export const AppProvider: React.FC<{
     } catch (err) {
       console.error('[loadBarbershopData] Error loading barbershop data:', err);
     }
-  }, []);
+  }, [activeTenant?.id]);
 
   const createBarbershop = useCallback(async (name: string) => {
     try {
@@ -331,39 +335,104 @@ export const AppProvider: React.FC<{
       const sessionUserId = currentSession.user.id;
       console.info('[ONBOARDING] Iniciando resolução para usuário:', sessionUserId);
 
+      // 3. Se houver sessão:
+      // - resolver resolveOnboardingState(userId);
+      // - salvar onboardingState.
       const onbState = await supabaseService.resolveOnboardingState(sessionUserId);
       if (requestId !== bootRequestIdRef.current) return;
 
       console.info('[ONBOARDING] Estado resolvido', onbState);
       setOnboardingState(onbState);
 
-      if (onbState.profile && onbState.hasOwnerMembership) {
-        setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
-      }
+      // 4. Se o estado for:
+      // - no_session;
+      // - needs_profile;
+      // - needs_barbershop;
+      // - needs_membership;
+      // - needs_completion;
+      // não carregar dados operacionais.
+      // Limpar appointments, customers, services, transactions, staff e activeTenant.
+      // Mostrar o fluxo correspondente do onboarding.
+      // Garantir setIsLoading(false).
+      const incompleteStatuses = [
+        'no_session',
+        'needs_profile',
+        'needs_barbershop',
+        'needs_membership',
+        'needs_completion'
+      ];
+      const isIncomplete = !onbState.isComplete || incompleteStatuses.includes(onbState.status);
 
-      const membershipBarbershopId = onbState?.membership?.barbershopId || onbState?.barbershop?.id || (await supabaseService.getTenantIdForUser(sessionUserId));
-      if (requestId !== bootRequestIdRef.current) return;
-
-      console.info('[TENANT] Contexto resolvido', {
-        barbershopId: membershipBarbershopId,
-        isStaffMember: onbState?.isStaffMember,
-        hasOwnerMembership: onbState?.hasOwnerMembership
-      });
-
-      if (!membershipBarbershopId) {
+      if (isIncomplete) {
+        console.info('[BOOT] Usuário com onboarding incompleto ou sem barbearia associada. Status:', onbState.status);
         setBarberId(null);
         setActiveTenant(null);
         setAppointments([]);
         setStaff([]);
         setCustomers({});
-        console.info('[TENANT] Usuário sem barbearia associada (aguardando onboarding/convite)');
+        setServices(DEFAULT_SERVICES);
+        setTransactions([]);
+        setUserRole(null);
+        setCurrentStaff(null);
+        setBarbershop(null);
+        setBarbershopMembers([]);
+        setBarbershopInvites([]);
+        if (onbState.profile) {
+          setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+        }
         return;
       }
 
-      setBarberId(membershipBarbershopId);
+      // 5. Somente se:
+      // onboardingState.isComplete === true
+      // e onboardingState.barbershop?.id existir
+      // resolver o contexto do tenant e carregar os dados.
+      const candidateBarbershopId = onbState.barbershop?.id || onbState.membership?.barbershopId;
+      if (!candidateBarbershopId) {
+        console.warn('[BOOT] Onboarding completo mas sem barbershop válida identificada');
+        setBarberId(null);
+        setActiveTenant(null);
+        setAppointments([]);
+        setStaff([]);
+        setCustomers({});
+        setTransactions([]);
+        return;
+      }
+
+      if (onbState.profile) {
+        setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+      }
+
+      const tenantContext = await supabaseService.resolveTenantContext(sessionUserId);
+      if (requestId !== bootRequestIdRef.current) return;
+
+      const barbershopId = tenantContext.barbershopId || candidateBarbershopId;
+
+      // 6. Se resolveTenantContext não retornar barbershopId:
+      // - não chamar queries operacionais;
+      // - registrar erro de contexto;
+      // - mostrar SetupWizard ou tela de erro recuperável;
+      // - não prender na splash.
+      if (!barbershopId) {
+        console.error('[TENANT] Erro de contexto: barbershopId não encontrado para o usuário:', sessionUserId);
+        setBarberId(null);
+        setActiveTenant(null);
+        setAppointments([]);
+        setStaff([]);
+        setCustomers({});
+        setTransactions([]);
+        return;
+      }
+
+      // GUARDA OBRIGATÓRIA antes de cada carga operacional:
+      if (!currentSession?.user?.id || !barbershopId) {
+        return;
+      }
+
+      setBarberId(barbershopId);
 
       const tenantInfo = {
-        id: membershipBarbershopId,
+        id: barbershopId,
         name: onbState?.barbershop?.name || onbState?.profile?.shopName || 'Meu Corte',
         slug: onbState?.barbershop?.slug || onbState?.profile?.slug || '',
         logo: onbState?.profile?.logo,
@@ -374,7 +443,7 @@ export const AppProvider: React.FC<{
       };
       setActiveTenant(tenantInfo);
 
-      console.info('[STORE] Iniciando carregamento de dados principais');
+      console.info('[STORE] Iniciando carregamento de dados principais para barbearia:', barbershopId);
 
       const [
         dbApts,
@@ -386,35 +455,35 @@ export const AppProvider: React.FC<{
         dbUnblocked,
         dbStaff
       ] = await Promise.all([
-        supabaseService.getAppointments(membershipBarbershopId).catch(err => {
+        supabaseService.getAppointments(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar agendamentos:', err);
           return [];
         }),
-        supabaseService.getCustomers(membershipBarbershopId).catch(err => {
+        supabaseService.getCustomers(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar clientes:', err);
           return [];
         }),
-        supabaseService.getServices(membershipBarbershopId).catch(err => {
+        supabaseService.getServices(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar serviços:', err);
           return [];
         }),
-        supabaseService.getProfile(membershipBarbershopId).catch(err => {
+        supabaseService.getProfile(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar perfil:', err);
           return null;
         }),
-        supabaseService.getWeeklySchedule(membershipBarbershopId).catch(err => {
+        supabaseService.getWeeklySchedule(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar horários semanais:', err);
           return null;
         }),
-        supabaseService.getBlockedSlots(membershipBarbershopId).catch(err => {
+        supabaseService.getBlockedSlots(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar slots bloqueados:', err);
           return {};
         }),
-        supabaseService.getUnblockedSlots(membershipBarbershopId).catch(err => {
+        supabaseService.getUnblockedSlots(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar slots desbloqueados:', err);
           return {};
         }),
-        supabaseService.getStaff(membershipBarbershopId).catch(err => {
+        supabaseService.getStaff(barbershopId).catch(err => {
           console.warn('[STORE] Aviso ao buscar equipe:', err);
           return [];
         })
@@ -471,7 +540,7 @@ export const AppProvider: React.FC<{
       // Cargas não essenciais (notificações e barbershop metadata secundária)
       if (resolvedRole && resolvedRole !== 'client') {
         try {
-          const dbNotifications = await supabaseService.getNotifications(membershipBarbershopId, resolvedRole, sessionUserId);
+          const dbNotifications = await supabaseService.getNotifications(barbershopId, resolvedRole, sessionUserId);
           if (requestId === bootRequestIdRef.current) setNotifications(dbNotifications);
         } catch (notifErr) {
           console.warn('[STORE] Aviso ao buscar notificações secundárias:', notifErr);
@@ -727,35 +796,51 @@ export const AppProvider: React.FC<{
 
   const loadTransactions = async (startDate: string, endDate: string) => {
     const currentSession = sessionRef.current;
-    if (!currentSession) return;
+    const barbershopId = activeTenant?.id;
+    if (!currentSession?.user?.id || !barbershopId) {
+      return;
+    }
     
-    const resolvedTenantId = barberId || currentSession.user.id;
-    const ctx = await supabaseService.resolveTenantContext(resolvedTenantId);
-    const barbershopId = ctx.barbershopId;
-    const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ctx.tenantOwnerId || resolvedTenantId];
+    const ctx = await supabaseService.resolveTenantContext(currentSession.user.id);
+    if (!ctx.barbershopId) {
+      console.warn('[loadTransactions] barbershop_id não encontrado para o usuário:', currentSession.user.id);
+      return;
+    }
 
     let query = supabase
       .from('transactions')
       .select('*')
+      .eq('barbershop_id', barbershopId)
       .gte('date', `${startDate}T00:00:00`)
       .lte('date', `${endDate}T23:59:59`);
 
-    if (barbershopId) {
-      query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')})`);
-    } else {
-      query = query.in('user_id', memberIds);
+    // Regra de leitura: Staff consulta apenas a própria produção
+    if (ctx.role === 'staff') {
+      if (ctx.staffProfileId) {
+        query = query.eq('staff_id', ctx.staffProfileId);
+      } else {
+        // Staff sem perfil vinculado não deve acessar transações globais
+        setTransactions([]);
+        return;
+      }
     }
 
     const { data, error } = await query.order('date', { ascending: false });
-    if (!error && data) {
+    if (error) {
+      console.error('[loadTransactions] Erro ao carregar transações:', error);
+      throw error;
+    }
+
+    if (data) {
       setTransactions(data.map((t: any) => ({
         id: t.id,
+        tenantId: t.barbershop_id,
         type: t.type,
         amount: Number(t.amount),
         description: t.description,
         category: t.category,
         date: t.date,
-        staffId: t.staff_id || t.staffId || undefined,
+        staffId: t.staff_id || undefined,
         linkedAppointmentId: t.linked_appointment_id,
         paymentMethod: t.payment_method,
         createdAt: new Date(t.created_at).getTime(),
@@ -763,21 +848,81 @@ export const AppProvider: React.FC<{
     }
   };
 
-  const addTransaction = async (t: Omit<Transaction, 'id' | 'createdAt'>) => {
+  const addTransaction = async (t: Omit<Transaction, 'id' | 'createdAt'>): Promise<AppointmentTransactionResult | void> => {
     const currentSession = sessionRef.current;
-    if (!currentSession) return;
+    if (!currentSession) {
+      throw new Error("Usuário não autenticado.");
+    }
 
     if (userRole === 'client') {
       throw new Error("Não autorizado. Apenas administradores e colaboradores podem gerenciar transações.");
     }
     
-    const resolvedTenantId = barberId || currentSession.user.id;
-    const ctx = await supabaseService.resolveTenantContext(resolvedTenantId);
-    const barbershopId = ctx.barbershopId;
-    const tenantOwnerId = ctx.tenantOwnerId || resolvedTenantId;
+    const currentUserId = currentSession.user.id;
+    const barbershopId = activeTenant?.id;
+    if (!currentUserId || !barbershopId) {
+      throw new Error("Identificador da barbearia (barbershop_id) não encontrado.");
+    }
+    const ctx = await supabaseService.resolveTenantContext(currentUserId);
+    if (!ctx.barbershopId) {
+      throw new Error("Identificador da barbearia (barbershop_id) não encontrado.");
+    }
+
+    const tenantOwnerId = ctx.tenantOwnerId || barbershopId;
+
+    // Resolução de staff_id: Se o usuário logado for staff, o staff_id deve ser o seu próprio profile
+    let effectiveStaffId: string | null = t.staffId ?? null;
+    if (ctx.role === 'staff' && ctx.staffProfileId) {
+      effectiveStaffId = ctx.staffProfileId;
+    }
+
+    // Se for transação vinculada a agendamento, verificar idempotência no banco antes de inserir
+    if (t.linkedAppointmentId) {
+      const { data: existingTx, error: checkErr } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('barbershop_id', barbershopId)
+        .eq('linked_appointment_id', t.linkedAppointmentId)
+        .maybeSingle();
+
+      if (checkErr) {
+        console.error('[ADD_TRANSACTION] Erro ao verificar transação existente:', checkErr);
+        throw checkErr;
+      }
+
+      if (existingTx) {
+        // Já existe transação registrada para este agendamento; sincronizar e retornar
+        const formattedTx: Transaction = {
+          id: existingTx.id,
+          tenantId: existingTx.barbershop_id,
+          staffId: existingTx.staff_id || undefined,
+          type: existingTx.type,
+          amount: Number(existingTx.amount),
+          description: existingTx.description,
+          category: existingTx.category,
+          date: existingTx.date,
+          linkedAppointmentId: existingTx.linked_appointment_id,
+          paymentMethod: existingTx.payment_method,
+          createdAt: new Date(existingTx.created_at).getTime()
+        };
+
+        setTransactions(prev => {
+          const exists = prev.some(item => item.id === formattedTx.id);
+          if (exists) {
+            return prev.map(item => item.id === formattedTx.id ? formattedTx : item);
+          }
+          return [formattedTx, ...prev];
+        });
+
+        return { transaction: formattedTx, alreadyExisted: true };
+      }
+    }
 
     const insertPayload: any = {
+      barbershop_id: barbershopId,
+      staff_id: effectiveStaffId,
       user_id: tenantOwnerId,
+      created_by: currentUserId,
       type: t.type,
       amount: t.amount,
       description: t.description ?? null,
@@ -786,61 +931,173 @@ export const AppProvider: React.FC<{
       linked_appointment_id: t.linkedAppointmentId ?? null,
       payment_method: t.paymentMethod ?? null,
     };
-    if (barbershopId) {
-      insertPayload.barbershop_id = barbershopId;
-    }
-    if (t.staffId) {
-      insertPayload.staff_id = t.staffId;
-    }
 
-    let { data, error } = await supabase
-      .from('transactions')
-      .insert(insertPayload)
-      .select()
-      .single();
-
-    if (error && (t.staffId || barbershopId)) {
-      console.warn('[ADD_TRANSACTION] Erro na inserção com colunas estendidas, tentando payload básico:', error);
-      delete insertPayload.staff_id;
-      delete insertPayload.barbershop_id;
-      const fallbackRes = await supabase
+    try {
+      const { data, error } = await supabase
         .from('transactions')
         .insert(insertPayload)
         .select()
         .single();
-      data = fallbackRes.data;
-      error = fallbackRes.error;
-    }
 
-    if (!error && data) {
-      setTransactions(state => [{ ...t, staffId: data.staff_id || t.staffId, id: data.id, createdAt: Date.now() }, ...state]);
-    } else if (error) {
-      console.error('[ADD_TRANSACTION] Erro ao salvar no Supabase:', error);
-      // Salvar localmente em fallback se erro de rede/permissão do banco
-      setTransactions(state => [{ ...t, id: `tx_local_${Date.now()}`, createdAt: Date.now() }, ...state]);
+      if (error) {
+        if (t.linkedAppointmentId && isDuplicateLinkedAppointmentTransactionError(error)) {
+          const { data: existingTx, error: fetchErr } = await supabase
+            .from('transactions')
+            .select('*')
+            .eq('barbershop_id', barbershopId)
+            .eq('linked_appointment_id', t.linkedAppointmentId)
+            .maybeSingle();
+
+          if (fetchErr) {
+            console.error('[ADD_TRANSACTION] Erro ao consultar transação existente após 23505:', fetchErr);
+            throw fetchErr;
+          }
+
+          if (!existingTx) {
+            throw error;
+          }
+
+          const formattedTx: Transaction = {
+            id: existingTx.id,
+            tenantId: existingTx.barbershop_id,
+            staffId: existingTx.staff_id || undefined,
+            type: existingTx.type,
+            amount: Number(existingTx.amount),
+            description: existingTx.description,
+            category: existingTx.category,
+            date: existingTx.date,
+            linkedAppointmentId: existingTx.linked_appointment_id,
+            paymentMethod: existingTx.payment_method,
+            createdAt: new Date(existingTx.created_at).getTime()
+          };
+
+          setTransactions(prev => {
+            const exists = prev.some(item => item.id === formattedTx.id);
+            if (exists) {
+              return prev.map(item => item.id === formattedTx.id ? formattedTx : item);
+            }
+            return [formattedTx, ...prev];
+          });
+
+          return { transaction: formattedTx, alreadyExisted: true };
+        }
+
+        console.error('[ADD_TRANSACTION] Erro ao salvar no Supabase:', error);
+        throw error;
+      }
+
+      if (data) {
+        const formattedTx: Transaction = {
+          id: data.id,
+          tenantId: data.barbershop_id,
+          staffId: data.staff_id || undefined,
+          type: data.type,
+          amount: Number(data.amount),
+          description: data.description,
+          category: data.category,
+          date: data.date,
+          linkedAppointmentId: data.linked_appointment_id,
+          paymentMethod: data.payment_method,
+          createdAt: new Date(data.created_at).getTime()
+        };
+
+        setTransactions(prev => {
+          const exists = prev.some(item => item.id === formattedTx.id);
+          if (exists) {
+            return prev.map(item => item.id === formattedTx.id ? formattedTx : item);
+          }
+          return [formattedTx, ...prev];
+        });
+
+        return { transaction: formattedTx, alreadyExisted: false };
+      }
+    } catch (error) {
+      if (t.linkedAppointmentId && isDuplicateLinkedAppointmentTransactionError(error)) {
+        const { data: existingTx, error: fetchErr } = await supabase
+          .from('transactions')
+          .select('*')
+          .eq('barbershop_id', barbershopId)
+          .eq('linked_appointment_id', t.linkedAppointmentId)
+          .maybeSingle();
+
+        if (fetchErr) {
+          throw fetchErr;
+        }
+
+        if (!existingTx) {
+          throw error;
+        }
+
+        const formattedTx: Transaction = {
+          id: existingTx.id,
+          tenantId: existingTx.barbershop_id,
+          staffId: existingTx.staff_id || undefined,
+          type: existingTx.type,
+          amount: Number(existingTx.amount),
+          description: existingTx.description,
+          category: existingTx.category,
+          date: existingTx.date,
+          linkedAppointmentId: existingTx.linked_appointment_id,
+          paymentMethod: existingTx.payment_method,
+          createdAt: new Date(existingTx.created_at).getTime()
+        };
+
+        setTransactions(prev => {
+          const exists = prev.some(item => item.id === formattedTx.id);
+          if (exists) {
+            return prev.map(item => item.id === formattedTx.id ? formattedTx : item);
+          }
+          return [formattedTx, ...prev];
+        });
+
+        return { transaction: formattedTx, alreadyExisted: true };
+      }
+
+      throw error;
     }
   };
 
   const deleteTransaction = async (id: string) => {
     const currentSession = sessionRef.current;
-    if (!currentSession) return;
+    if (!currentSession) {
+      throw new Error("Usuário não autenticado.");
+    }
     
     if (userRole === 'client') {
-      console.error('[DELETE_TRANSACTION] Não autorizado: usuário é cliente');
       throw new Error("Não autorizado. Apenas administradores e colaboradores podem excluir transações.");
     }
 
-    const { error } = await supabase
+    const currentUserId = currentSession.user.id;
+    const barbershopId = activeTenant?.id;
+    if (!currentUserId || !barbershopId) {
+      throw new Error("Identificador da barbearia (barbershop_id) não encontrado.");
+    }
+    const ctx = await supabaseService.resolveTenantContext(currentUserId);
+    if (!ctx.barbershopId) {
+      throw new Error("Identificador da barbearia (barbershop_id) não encontrado.");
+    }
+
+    let query = supabase
       .from('transactions')
       .delete()
-      .eq('id', id);
+      .eq('id', id)
+      .eq('barbershop_id', barbershopId);
 
-    if (!error) {
-      setTransactions(state => state.filter(t => t.id !== id));
-    } else {
-      console.error('[DELETE_TRANSACTION] Erro ao excluir no Supabase:', error);
-      setTransactions(state => state.filter(t => t.id !== id));
+    // Se for staff, só pode excluir se for do seu próprio staff_id
+    if (ctx.role === 'staff') {
+      if (!ctx.staffProfileId) {
+        throw new Error("Perfil de colaborador não localizado para realizar a exclusão.");
+      }
+      query = query.eq('staff_id', ctx.staffProfileId);
     }
+
+    const { error } = await query;
+    if (error) {
+      console.error('[DELETE_TRANSACTION] Erro ao excluir no Supabase:', error);
+      throw error;
+    }
+
+    setTransactions(state => state.filter(t => t.id !== id));
   };
 
   const addNotification = useCallback(async (n: Omit<AppNotification, 'id' | 'createdAt' | 'read'>) => {
@@ -1209,8 +1466,59 @@ export const AppProvider: React.FC<{
     finishingRef.current.add(id);
 
     const apt = appointmentsRef.current.find(a => a.id === id);
-    if (!apt || apt.status === 'completed') {
+    if (!apt) {
       finishingRef.current.delete(id);
+      return;
+    }
+
+    // Se o appointment já estiver completed ao iniciar:
+    // - não tentar inserir nova receita;
+    // - consultar/sincronizar a receita existente, se necessário;
+    // - não bloquear visualmente o usuário com erro.
+    if (apt.status === 'completed') {
+      try {
+        const currentSession = sessionRef.current;
+        const barbershopId = activeTenant?.id;
+        if (currentSession?.user?.id && barbershopId) {
+          const { data: existingTx, error: txFetchErr } = await supabase
+            .from('transactions')
+            .select('*')
+            .eq('barbershop_id', barbershopId)
+            .eq('linked_appointment_id', id)
+            .maybeSingle();
+
+            if (txFetchErr) {
+              console.warn('[finishAppointment] Erro ao consultar transação de agendamento já concluído:', txFetchErr);
+            } else if (existingTx) {
+              const formattedTx: Transaction = {
+                id: existingTx.id,
+                tenantId: existingTx.barbershop_id,
+                staffId: existingTx.staff_id || undefined,
+                type: existingTx.type,
+                amount: Number(existingTx.amount),
+                description: existingTx.description,
+                category: existingTx.category,
+                date: existingTx.date,
+                linkedAppointmentId: existingTx.linked_appointment_id,
+                paymentMethod: existingTx.payment_method,
+                createdAt: new Date(existingTx.created_at).getTime()
+              };
+
+              setTransactions(prev => {
+                const exists = prev.some(item => item.id === formattedTx.id);
+                if (exists) {
+                  return prev.map(item => item.id === formattedTx.id ? formattedTx : item);
+                }
+                return [formattedTx, ...prev];
+              });
+              console.info('[finishAppointment] Receita já existia; estado sincronizado.');
+            }
+          }
+      } catch (err) {
+        console.warn('[finishAppointment] Aviso ao sincronizar transação de agendamento já concluído:', err);
+      } finally {
+        finishingRef.current.delete(id);
+      }
       return;
     }
 
@@ -1236,14 +1544,8 @@ export const AppProvider: React.FC<{
             setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
             supabaseService.saveCustomer(updatedCust).catch(console.error);
 
-            const { data: existingTx } = await supabase
-              .from('transactions')
-              .select('id')
-              .eq('linked_appointment_id', apt.id)
-              .maybeSingle();
-
-            if (!existingTx) {
-              addTransaction({
+            try {
+              const res = await addTransaction({
                 type: 'income',
                 category: 'walk_in',
                 amount: apt.price,
@@ -1252,6 +1554,17 @@ export const AppProvider: React.FC<{
                 linkedAppointmentId: apt.id,
                 staffId: apt.staffId,
               });
+
+              if (res && res.alreadyExisted) {
+                console.info('[finishAppointment] Receita já existia; estado sincronizado.');
+              }
+            } catch (txErr) {
+              if (isDuplicateLinkedAppointmentTransactionError(txErr)) {
+                console.info('[finishAppointment] Receita já existia; estado sincronizado.');
+              } else {
+                console.error('[finishAppointment] Erro ao registrar receita de agendamento:', txErr);
+                throw txErr;
+              }
             }
           }
         } catch (err) {
@@ -1268,7 +1581,7 @@ export const AppProvider: React.FC<{
         [normalizedPhone]: updatedCust
       };
     });
-  }, []);
+  }, [addTransaction, barberId]);
 
   const markNoShow = useCallback(async (id: string) => {
     const apt = appointmentsRef.current.find(a => a.id === id);
@@ -1382,6 +1695,19 @@ export const AppProvider: React.FC<{
           const savedApt = await supabaseService.revertAppointment(id);
           setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
           supabaseService.saveCustomer(updatedCust).catch(console.error);
+
+          // Se o agendamento estava concluído, remover transação de receita vinculada
+          if (currentStatus === 'completed') {
+            const { error: delTxErr } = await supabase
+              .from('transactions')
+              .delete()
+              .eq('linked_appointment_id', id);
+            
+            if (delTxErr) {
+              console.warn('[revertAppointment] Erro ao remover transação vinculada:', delTxErr);
+            }
+            setTransactions(prev => prev.filter(t => t.linkedAppointmentId !== id));
+          }
         }
       };
       sync();

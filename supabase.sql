@@ -142,8 +142,8 @@ begin
 end;
 $$;
 
-revoke all on function public.add_or_group_notification(uuid, text, text, text, jsonb, text) from public;
-grant execute on function public.add_or_group_notification(uuid, text, text, text, jsonb, text) to authenticated;
+revoke all on function public.add_or_group_notification(uuid, text, text, text, jsonb, text) from public, anon;
+grant execute on function public.add_or_group_notification(uuid, text, text, text, jsonb, text) to authenticated, service_role;
 
 -- =========================================================
 -- Multi-tenancy structure: Barbershops, Members & Invites
@@ -203,6 +203,9 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.get_user_barbershop_ids(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_user_barbershop_ids(UUID) TO authenticated, service_role;
+
 CREATE OR REPLACE FUNCTION public.get_owned_barbershop_ids(p_user_id UUID)
 RETURNS TABLE (barbershop_id UUID)
 LANGUAGE plpgsql
@@ -214,6 +217,9 @@ BEGIN
   SELECT b.id FROM public.barbershops b WHERE b.owner_id = p_user_id;
 END;
 $$;
+
+REVOKE ALL ON FUNCTION public.get_owned_barbershop_ids(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_owned_barbershop_ids(UUID) TO authenticated, service_role;
 
 -- Diagnostic Functions
 CREATE OR REPLACE FUNCTION public.inspect_active_policies()
@@ -271,8 +277,11 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.inspect_active_policies() TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.inspect_active_functions() TO anon, authenticated;
+REVOKE ALL ON FUNCTION public.inspect_active_policies() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.inspect_active_policies() TO postgres, service_role;
+
+REVOKE ALL ON FUNCTION public.inspect_active_functions() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.inspect_active_functions() TO postgres, service_role;
 
 -- Barbershops Policies
 DROP POLICY IF EXISTS "members_select_barbershop" ON public.barbershops;
@@ -350,6 +359,9 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.handle_new_barbershop() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.handle_new_barbershop() TO postgres, service_role;
+
 DROP TRIGGER IF EXISTS on_barbershop_created ON public.barbershops;
 CREATE TRIGGER on_barbershop_created
   AFTER INSERT ON public.barbershops
@@ -403,8 +415,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.accept_barbershop_invite(TEXT) FROM public;
-GRANT EXECUTE ON FUNCTION public.accept_barbershop_invite(TEXT) TO authenticated;
+REVOKE ALL ON FUNCTION public.accept_barbershop_invite(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.accept_barbershop_invite(TEXT) TO authenticated, service_role;
 
 -- =========================================================
 -- staff_profiles: Table, RLS and policies

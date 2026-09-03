@@ -29,7 +29,7 @@ interface SetupWizardProps {
 const DEFAULT_SCHEDULE: Record<string, DaySchedule> = {
   SEG: { enabled: true,  open: '09:00', close: '18:00', breakStart: '12:00', breakEnd: '14:00' },
   TER: { enabled: true,  open: '09:00', close: '18:00', breakStart: '12:00', breakEnd: '14:00' },
-  QUA: { enabled: true,  open: '09:00', close: '18:00', breakStart: null,    breakEnd: null    },
+  QUA: { enabled: true,  open: '09:00', close: '18:00', breakStart: '12:00', breakEnd: '14:00' },
   QUI: { enabled: true,  open: '09:00', close: '18:00', breakStart: '12:00', breakEnd: '14:00' },
   SEX: { enabled: true,  open: '09:00', close: '18:00', breakStart: '12:00', breakEnd: '14:00' },
   SAB: { enabled: false, open: '09:00', close: '18:00', breakStart: null,    breakEnd: null    },

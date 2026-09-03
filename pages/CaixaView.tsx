@@ -325,7 +325,21 @@ export const CaixaView: React.FC = () => {
   }, [dateRange]);
 
   const renderResumo = () => {
-    const prevCompleted = appointments.filter(a => a.status === 'completed' && a.date >= prevRange.start && a.date <= prevRange.end);
+    const prevCompleted = appointments.filter(a => {
+      if (a.status !== 'completed') return false;
+      const aptDate = a.date.split('T')[0];
+      if (aptDate < prevRange.start || aptDate > prevRange.end) return false;
+      if (financeScope === 'staff' && selectedStaffScopeId) {
+        const s = selectedStaff;
+        const targetId = selectedStaffScopeId;
+        if (a.staffId === targetId) return true;
+        if (s?.userId && (a.staffId === s.userId || a.userId === s.userId)) return true;
+        if (s?.id && (a.staffId === s.id || a.barberId === s.id)) return true;
+        return false;
+      }
+      return true;
+    });
+
     const prevFaturamento = prevCompleted.reduce((s, a) => s + (a.price || 0), 0);
     const faturamentoDiff = prevFaturamento > 0 ? ((faturamento - prevFaturamento) / prevFaturamento * 100) : null;
     const prevTicket = prevCompleted.length > 0 ? prevFaturamento / prevCompleted.length : 0;
@@ -333,13 +347,25 @@ export const CaixaView: React.FC = () => {
     const prevAtend = prevCompleted.length;
     const atendDiff = prevAtend > 0 ? ((atendimentos - prevAtend) / prevAtend * 100) : null;
 
+    // Filtro de transações do período anterior respeitando o escopo ativo
+    const prevTxScoped = transactions.filter(t => {
+      const txDate = (t.date || '').split('T')[0];
+      if (txDate < prevRange.start || txDate > prevRange.end) return false;
+      if (financeScope === 'staff' && selectedStaffScopeId) {
+        const s = selectedStaff;
+        const targetId = selectedStaffScopeId;
+        if (t.staffId === targetId || (s?.userId && t.staffId === s.userId)) return true;
+        if (t.category === 'commission' && (t.description?.includes(s?.name || '') || t.staffId === targetId)) return true;
+        return false;
+      }
+      return true;
+    });
+
     // Entrada avulsa do período anterior (para comparação)
-    const prevManualIncome = transactions
+    const prevManualIncome = prevTxScoped
       .filter(t =>
         t.type === 'income' &&
-        !(t as any).linkedAppointmentId &&
-        t.date >= prevRange.start &&
-        t.date <= prevRange.end
+        !(t as any).linkedAppointmentId
       )
       .reduce((s, t) => s + t.amount, 0);
     const manualIncomeDiff = prevManualIncome > 0
@@ -347,12 +373,8 @@ export const CaixaView: React.FC = () => {
       : null;
 
     // Despesa avulsa do período anterior (para comparação)
-    const prevExpenseTotal = transactions
-      .filter(t =>
-        t.type === 'expense' &&
-        t.date >= prevRange.start &&
-        t.date <= prevRange.end
-      )
+    const prevExpenseTotal = prevTxScoped
+      .filter(t => t.type === 'expense')
       .reduce((s, t) => s + t.amount, 0);
     const expenseDiff = prevExpenseTotal > 0
       ? ((expenseTotal - prevExpenseTotal) / prevExpenseTotal * 100)
@@ -366,11 +388,20 @@ export const CaixaView: React.FC = () => {
 
     // Faltas: valor perdido e comparação
     const valorPerdido = faltas * ticketMedio;
-    const prevFaltas = appointments.filter(
-      a => a.status === 'no-show' &&
-      a.date >= prevRange.start &&
-      a.date <= prevRange.end
-    ).length;
+    const prevFaltas = appointments.filter(a => {
+      if (a.status !== 'no-show') return false;
+      const aptDate = a.date.split('T')[0];
+      if (aptDate < prevRange.start || aptDate > prevRange.end) return false;
+      if (financeScope === 'staff' && selectedStaffScopeId) {
+        const s = selectedStaff;
+        const targetId = selectedStaffScopeId;
+        if (a.staffId === targetId) return true;
+        if (s?.userId && (a.staffId === s.userId || a.userId === s.userId)) return true;
+        if (s?.id && (a.staffId === s.id || a.barberId === s.id)) return true;
+        return false;
+      }
+      return true;
+    }).length;
     const faltasDiff = prevFaltas > 0
       ? ((faltas - prevFaltas) / prevFaltas * 100)
       : null;
