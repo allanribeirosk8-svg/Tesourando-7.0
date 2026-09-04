@@ -22,6 +22,7 @@ export interface TenantMember {
 export interface Staff {
   id: string;
   tenantId: string;
+  barbershopId?: string;
   userId?: string | null;
   name: string;
   phone: string;

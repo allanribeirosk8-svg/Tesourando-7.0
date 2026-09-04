@@ -799,6 +799,7 @@ export const AdminApp: React.FC = () => {
     onboardingState
   } = useStore();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'servicos' | 'caixa' | 'configuracoes'>('agenda');
   const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [showAddModal, setShowAddModal] = useState(false);
@@ -944,12 +945,18 @@ export const AdminApp: React.FC = () => {
   }, []);
 
   const handleLogout = async () => {
-    resetStore();
-    if (isSupabaseConfigured()) {
-      await supabase.auth.signOut();
-    }
+    setIsLoggingOut(true);
     setIsAuthenticated(false);
-    
+    resetStore();
+    try {
+      if (isSupabaseConfigured()) {
+        await supabase.auth.signOut();
+      }
+    } catch (err) {
+      console.error('[AUTH] Erro ao deslogar:', err);
+    } finally {
+      setIsLoggingOut(false);
+    }
   };
 
   const handleNavigateToCustomer = (phone: string) => {
@@ -990,8 +997,8 @@ export const AdminApp: React.FC = () => {
     return `Boa noite, ${name}! 🌙`;
   };
 
-  // 1. Loading
-  if (isLoading) {
+  // 1. Loading ou efetuando logout
+  if (isLoading || isLoggingOut) {
     return <div className="fixed inset-0 bg-[#363062]" />;
   }
 
@@ -1000,7 +1007,7 @@ export const AdminApp: React.FC = () => {
     return <Onboarding onComplete={handleOnboardingComplete} />;
   }
 
-  if (!isAuthenticated && !session) {
+  if (!isAuthenticated || !session) {
     return <AuthScreen onAuthenticated={() => setIsAuthenticated(true)} initialView={authInitialView} />;
   }
 
@@ -1027,6 +1034,9 @@ export const AdminApp: React.FC = () => {
 
   // 4/5. Tenant válido / AdminApp (ou erro recuperável se tenant nulo)
   if (!activeTenant?.id) {
+    if (!isAuthenticated || !session || isLoggingOut) {
+      return <AuthScreen onAuthenticated={() => setIsAuthenticated(true)} initialView={authInitialView} />;
+    }
     return (
       <div className="h-[100dvh] flex flex-col items-center justify-center bg-[#1E1B4B] p-6 text-center text-white">
         <div className="max-w-md w-full bg-[#2A2456] rounded-2xl p-6 border border-white/10 shadow-xl space-y-4">

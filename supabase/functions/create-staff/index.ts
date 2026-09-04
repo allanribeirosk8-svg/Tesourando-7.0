@@ -259,6 +259,7 @@ serve(async (req) => {
       .from('staff_profiles')
       .insert({
         id: staffId,
+        barbershop_id: barbershop_id,
         tenant_id: barbershop.owner_id, // Linked to owner/tenant id of the barbershop
         user_id: newUserId,
         name: name,

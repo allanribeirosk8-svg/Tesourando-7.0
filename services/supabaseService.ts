@@ -1266,26 +1266,32 @@ export const supabaseService = {
     }
   },
 
-  async getStaff(tenantId: string): Promise<Staff[]> {
+  async getStaff(tenantOrBarbershopId: string): Promise<Staff[]> {
     try {
-      let ownerUserId = tenantId;
-      let barbershopId = tenantId;
+      let barbershopId = tenantOrBarbershopId;
 
       const { data: shop } = await supabase
         .from('barbershops')
         .select('id, owner_id')
-        .or(`id.eq.${tenantId},owner_id.eq.${tenantId}`)
+        .or(`id.eq.${tenantOrBarbershopId},owner_id.eq.${tenantOrBarbershopId}`)
         .maybeSingle();
 
       if (shop) {
         barbershopId = shop.id;
-        ownerUserId = shop.owner_id;
       }
 
-      const { data, error } = await supabase
+      // Buscar por barbershop_id direto ou recuperar registros legados não migrados (com barbershop_id null)
+      let query = supabase
         .from('staff_profiles')
-        .select('*')
-        .eq('barbershop_id', barbershopId);
+        .select('*');
+
+      if (shop?.owner_id) {
+        query = query.or(`barbershop_id.eq.${barbershopId},and(barbershop_id.is.null,tenant_id.eq.${shop.owner_id}),and(barbershop_id.is.null,tenant_id.eq.${barbershopId})`);
+      } else {
+        query = query.or(`barbershop_id.eq.${barbershopId},and(barbershop_id.is.null,tenant_id.eq.${barbershopId})`);
+      }
+
+      const { data, error } = await query.order('created_at', { ascending: true });
 
       if (error) {
         if (
@@ -1297,6 +1303,42 @@ export const supabaseService = {
           return [];
         }
         throw error;
+      }
+
+      // Migração e reconciliação automática: Se algum registro antigo estiver com barbershop_id nulo, atualizar agora
+      if (data && data.length > 0) {
+        for (const s of data) {
+          if (!s.barbershop_id) {
+            try {
+              await supabase
+                .from('staff_profiles')
+                .update({ barbershop_id: barbershopId })
+                .eq('id', s.id);
+              s.barbershop_id = barbershopId;
+            } catch (patchErr) {
+              console.warn(`[getStaff] Aviso ao reconciliar barbershop_id para registro ${s.id}:`, patchErr);
+            }
+          }
+        }
+      }
+
+      // Buscar membership para resolver os papéis com precisão
+      const { data: memberRows } = await supabase
+        .from('barbershop_members')
+        .select('user_id, role')
+        .eq('barbershop_id', barbershopId);
+
+      const memberRoleMap = new Map<string, 'admin' | 'staff'>();
+      if (shop?.owner_id) {
+        memberRoleMap.set(shop.owner_id, 'admin');
+      }
+      if (memberRows) {
+        for (const m of memberRows) {
+          if (m.user_id) {
+            const resolvedRole = (m.role === 'owner' || m.role === 'admin') ? 'admin' : 'staff';
+            memberRoleMap.set(m.user_id, resolvedRole);
+          }
+        }
       }
 
       const rawMembers: any[] = data || [];
@@ -1318,29 +1360,22 @@ export const supabaseService = {
         }
         seenIds.add(s.id);
 
-        const isOwner = s.user_id === ownerUserId || s.role === 'admin' || s.role === 'admin_owner';
+        const resolvedRole = (s.user_id && memberRoleMap.get(s.user_id)) || (s.user_id === shop?.owner_id ? 'admin' : 'staff');
+
         deduplicatedStaff.push({
           id: s.id,
           tenantId: s.barbershop_id || barbershopId,
+          barbershopId: s.barbershop_id || barbershopId,
           userId: s.user_id || undefined,
           name: s.name || 'Profissional',
-          phone: s.phone || '',
-          photo: s.photo ?? null,
-          status: s.status || 'active',
-          commissionRate: Number(s.commission_rate || 0),
-          role: (isOwner ? 'admin' : 'staff') as 'admin' | 'staff'
+          phone: s.phone ?? '',
+          photo: s.photo ?? undefined,
+          status: s.status ?? 'active',
+          commissionRate: Number(s.commission_rate ?? 0),
+          role: resolvedRole,
+          createdAt: s.created_at
         });
       }
-
-      // Ordenar para que o Administrador/Owner fique sempre no topo da lista
-      deduplicatedStaff.sort((a, b) => {
-        const aIsAdmin = (a.role === 'admin' || a.userId === ownerUserId) ? 1 : 0;
-        const bIsAdmin = (b.role === 'admin' || b.userId === ownerUserId) ? 1 : 0;
-        if (aIsAdmin !== bIsAdmin) {
-          return bIsAdmin - aIsAdmin; // Administrador primeiro
-        }
-        return (a.name || '').localeCompare(b.name || '');
-      });
 
       isNetworkOffline = false;
       return deduplicatedStaff;
@@ -1362,77 +1397,105 @@ export const supabaseService = {
       throw new Error('Apenas o proprietário do salão (admin_owner) pode gerenciar ou salvar equipe.');
     }
 
-    const tenantId = staff.tenantId || await this.getTenantIdForUser(currentUserId || '') || await this.getUserId();
-    if (!tenantId) throw new Error('Tenant ID not authenticated');
-
-    const id = staff.id || crypto.randomUUID();
-    const staffRole = staff.role === 'admin' || staff.role === 'admin_owner' ? 'admin' : 'staff';
-
-    const tenantContext = await this.resolveTenantContext(currentUserId || undefined);
-    const activeBarbershopId = staff.barbershopId || tenantContext.barbershopId || staff.tenantId || await this.getTenantIdForUser(currentUserId || '') || await this.getUserId();
-    const tenantOwnerId = tenantContext.tenantOwnerId || tenantId;
-
-    console.log('[PHOTO_FLOW_UPDATE]', {
-      userId: isSelf ? currentUserId : (staff.userId || null),
-      staffProfileId: id,
-      barbershopId: activeBarbershopId || tenantId,
-      table: 'staff_profiles',
-      photoSize: staff.photo ? `${staff.photo.length} bytes` : '0 bytes'
-    });
-
-    const payload: any = {
-      id: id,
-      tenant_id: tenantOwnerId || tenantId,
-      barbershop_id: activeBarbershopId || tenantId,
-      user_id: staff.userId || (isSelf ? currentUserId : null),
-      name: staff.name,
-      phone: staff.phone,
-      photo: staff.photo || null,
-      status: staff.status || 'active',
-      role: staffRole
-    };
-
-    if (role === 'admin_owner') {
-      payload.commission_rate = staff.commissionRate || 0;
-    } else if (staff.commissionRate !== undefined) {
-      payload.commission_rate = staff.commissionRate;
+    // Resolver barbershopId real
+    let barbershopId = staff.barbershopId;
+    if (!barbershopId) {
+      const tenantContext = await this.resolveTenantContext(currentUserId || undefined);
+      barbershopId = tenantContext.barbershopId || undefined;
+    }
+    if (!barbershopId && staff.tenantId) {
+      const { data: bs } = await supabase
+        .from('barbershops')
+        .select('id, owner_id')
+        .or(`id.eq.${staff.tenantId},owner_id.eq.${staff.tenantId}`)
+        .maybeSingle();
+      if (bs) {
+        barbershopId = bs.id;
+      }
     }
 
+    if (!barbershopId) {
+      throw new Error('Contexto da barbearia (barbershop_id) não encontrado.');
+    }
+
+    const { data: shop } = await supabase
+      .from('barbershops')
+      .select('id, owner_id')
+      .eq('id', barbershopId)
+      .maybeSingle();
+
+    const staffRole = staff.role === 'admin' || staff.role === 'admin_owner' ? 'admin' : 'staff';
     let resultData: any = null;
 
     if (role === 'admin_owner' && !isSelf) {
-      try {
-        const { data, error } = await supabase.from('staff_profiles').upsert(payload).select().single();
-        if (error) throw error;
-        resultData = data;
+      const staffId = staff.id || crypto.randomUUID();
+      const payload: any = {
+        id: staffId,
+        barbershop_id: barbershopId,
+        user_id: staff.userId || null,
+        name: staff.name,
+        phone: staff.phone || '',
+        photo: staff.photo !== undefined ? (staff.photo || null) : null,
+        status: staff.status || 'active',
+        commission_rate: staff.commissionRate !== undefined ? Number(staff.commissionRate) : 0
+      };
 
-        // Se houver userId e for admin_owner, atualiza o papel em barbershop_members
-        if (staff.userId) {
-          try {
+      // Retrocompatibilidade: preencher tenant_id com owner_id da barbearia apenas se existir
+      if (shop?.owner_id) {
+        payload.tenant_id = shop.owner_id;
+      }
+
+      const { data, error } = await supabase
+        .from('staff_profiles')
+        .upsert(payload)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('[saveStaff] Erro ao fazer upsert em staff_profiles:', error);
+        throw error;
+      }
+      resultData = data;
+
+      // Sincronizar role em barbershop_members se houver user_id
+      if (staff.userId) {
+        try {
+          const { data: existingMember } = await supabase
+            .from('barbershop_members')
+            .select('id, role')
+            .eq('barbershop_id', barbershopId)
+            .eq('user_id', staff.userId)
+            .maybeSingle();
+
+          if (existingMember) {
+            if (existingMember.role !== 'owner' && existingMember.role !== staffRole) {
+              await supabase
+                .from('barbershop_members')
+                .update({ role: staffRole })
+                .eq('barbershop_id', barbershopId)
+                .eq('user_id', staff.userId);
+            }
+          } else {
             await supabase
               .from('barbershop_members')
-              .update({ role: staffRole })
-              .eq('barbershop_id', tenantId)
-              .eq('user_id', staff.userId);
-          } catch (memberErr) {
-            console.warn('[saveStaff] Warning updating barbershop_members role:', memberErr);
+              .insert({
+                barbershop_id: barbershopId,
+                user_id: staff.userId,
+                role: staffRole
+              });
           }
+        } catch (memberErr) {
+          console.warn('[saveStaff] Aviso ao sincronizar papel em barbershop_members:', memberErr);
         }
-      } catch (upsertErr) {
-        console.warn('[saveStaff] Erro ao fazer upsert em staff_profiles como admin:', upsertErr);
-        throw upsertErr;
       }
     } else if (currentUserId) {
-      // Validação do UUID do funcionário
+      // Fluxo restrito: funcionário atualizando a própria foto
       const userId = currentUserId;
       if (staff.userId && staff.userId !== userId) {
         throw new Error('Operação não permitida: user_id não corresponde ao funcionário autenticado');
       }
 
       let staffProfileId = staff.id;
-      let barbershopId = staff.barbershopId || activeBarbershopId || tenantContext.barbershopId || tenantId;
-
-      // Localizar o registro em staff_profiles correspondente ao usuário atual
       const { data: existingStaffRow } = await supabase
         .from('staff_profiles')
         .select('id, user_id, barbershop_id')
@@ -1441,51 +1504,14 @@ export const supabaseService = {
 
       if (existingStaffRow) {
         staffProfileId = existingStaffRow.id;
-        if (existingStaffRow.barbershop_id) {
-          barbershopId = existingStaffRow.barbershop_id;
-        }
-      }
-
-      if (!barbershopId) {
-        const { data: memberRow } = await supabase
-          .from('barbershop_members')
-          .select('barbershop_id')
-          .eq('user_id', userId)
-          .maybeSingle();
-        if (memberRow?.barbershop_id) {
-          barbershopId = memberRow.barbershop_id;
-        }
-      }
-
-      // Validação de barbershop_id correspondente ao tenant atual
-      const expectedTenant = activeBarbershopId || tenantContext.barbershopId || tenantId;
-      if (!barbershopId || (expectedTenant && barbershopId !== expectedTenant && barbershopId !== tenantContext.barbershopId)) {
-        if (!barbershopId && expectedTenant) {
-          barbershopId = expectedTenant;
-        }
       }
 
       if (!staffProfileId) {
         throw new Error('staff_profile id não encontrado para o funcionário');
       }
 
-      if (!barbershopId) {
-        throw new Error('barbershop_id não encontrado para o tenant atual');
-      }
-
-      // Payload estritamente restrito a { photo: photoValue } sem alterar tenant_id, user_id, barbershop_id
       const photoValue = staff.photo !== undefined ? (staff.photo || null) : null;
       const updatePayload = { photo: photoValue };
-      const photoSize = photoValue ? photoValue.length : 0;
-
-      console.log('[PHOTO_FLOW_UPDATE]', {
-        userId,
-        staffProfileId,
-        barbershopId,
-        table: 'staff_profiles',
-        payloadKeys: Object.keys(updatePayload),
-        photoSize: `${photoSize} bytes`
-      });
 
       const { data, error } = await supabase
         .from('staff_profiles')
@@ -1493,108 +1519,32 @@ export const supabaseService = {
         .eq('id', staffProfileId)
         .eq('user_id', userId)
         .eq('barbershop_id', barbershopId)
-        .select('id, user_id, barbershop_id, photo')
+        .select()
         .single();
 
       if (error) {
-        console.error('[PHOTO_FLOW_UPDATE_ERROR]', {
-          userId,
-          staffProfileId,
-          barbershopId,
-          table: 'staff_profiles',
-          errorCode: error.code,
-          errorMessage: error.message
-        });
-        // Repassar erro original, especialmente 42501, sem mascaramento
+        console.error('[saveStaff_self_photo] Erro ao atualizar foto:', error);
         throw error;
       }
-
-      if (!data) {
-        throw new Error('Nenhum staff_profile atualizado');
-      }
-
-      const returnedPhotoSize = data.photo ? data.photo.length : 0;
-      console.log('[PHOTO_FLOW_AFTER_UPDATE]', {
-        userId,
-        staffProfileId,
-        barbershopId,
-        table: 'staff_profiles',
-        photoSize: `${returnedPhotoSize} bytes`
-      });
-
-      // Leitura de verificação pelo mesmo: id, user_id, barbershop_id
-      const { data: verifyData, error: verifyError } = await supabase
-        .from('staff_profiles')
-        .select('id, user_id, barbershop_id, photo')
-        .eq('id', staffProfileId)
-        .eq('user_id', userId)
-        .eq('barbershop_id', barbershopId)
-        .single();
-
-      console.log('[PHOTO_FLOW_VERIFY]', {
-        userId,
-        staffProfileId,
-        barbershopId,
-        table: 'staff_profiles',
-        photoSize: verifyData?.photo ? `${verifyData.photo.length} bytes` : '0 bytes',
-        error: verifyError ? { code: verifyError.code, message: verifyError.message } : null
-      });
-
-      resultData = {
-        id: staffProfileId,
-        tenant_id: tenantOwnerId || tenantId,
-        barbershop_id: barbershopId,
-        user_id: userId,
-        name: staff.name,
-        phone: staff.phone,
-        photo: data.photo,
-        status: staff.status || 'active',
-        commission_rate: staff.commissionRate || 0,
-        role: staffRole
-      };
+      resultData = data;
     }
 
     if (!resultData) {
-      resultData = {
-        id: id,
-        tenant_id: tenantId,
-        barbershop_id: tenantId,
-        user_id: staff.userId || (isSelf ? currentUserId : null),
-        name: staff.name,
-        phone: staff.phone,
-        photo: staff.photo || null,
-        status: staff.status || 'active',
-        commission_rate: staff.commissionRate || 0,
-        role: staffRole
-      };
+      throw new Error('Erro ao salvar registro de profissional no banco de dados.');
     }
 
-    // Atualizar cache local do tenant
-    const localKey = `meucorte_staff_${tenantId}`;
-    try {
-      const stored = localStorage.getItem(localKey);
-      let list: Staff[] = stored ? JSON.parse(stored) : [];
-      const mappedStaff: Staff = {
-        id: resultData.id,
-        tenantId: resultData.tenant_id || resultData.barbershop_id || tenantId,
-        userId: resultData.user_id,
-        name: resultData.name,
-        phone: resultData.phone,
-        photo: resultData.photo || undefined,
-        status: resultData.status || 'active',
-        commissionRate: resultData.commission_rate || 0,
-        role: (resultData.role === 'admin' ? 'admin' : 'staff') as 'admin' | 'staff'
-      };
-      const index = list.findIndex((s: any) => s.id === id || (s.userId && s.userId === mappedStaff.userId));
-      if (index > -1) {
-        list[index] = mappedStaff;
-      } else {
-        list.push(mappedStaff);
-      }
-      localStorage.setItem(localKey, JSON.stringify(list));
-    } catch {}
-
-    return resultData;
+    return {
+      id: resultData.id,
+      tenantId: resultData.barbershop_id || barbershopId,
+      barbershopId: resultData.barbershop_id || barbershopId,
+      userId: resultData.user_id,
+      name: resultData.name,
+      phone: resultData.phone || '',
+      photo: resultData.photo || null,
+      status: resultData.status || 'active',
+      commissionRate: Number(resultData.commission_rate || 0),
+      role: staffRole
+    };
   },
 
   async deleteStaff(id: string) {
@@ -1606,34 +1556,7 @@ export const supabaseService = {
     try {
       const { error } = await supabase.from('staff_profiles').delete().eq('id', id);
       if (error) throw error;
-
-      // Update local storage
-      const tenantId = await this.getUserId();
-      if (tenantId) {
-        const localKey = `meucorte_staff_${tenantId}`;
-        try {
-          const stored = localStorage.getItem(localKey);
-          if (stored) {
-            let list: Staff[] = JSON.parse(stored);
-            list = list.filter((s: any) => s.id !== id);
-            localStorage.setItem(localKey, JSON.stringify(list));
-          }
-        } catch {}
-      }
     } catch (error: any) {
-      const tenantId = await this.getUserId();
-      if (tenantId) {
-        const localKey = `meucorte_staff_${tenantId}`;
-        try {
-          const stored = localStorage.getItem(localKey);
-          if (stored) {
-            let list: Staff[] = JSON.parse(stored);
-            list = list.filter((s: any) => s.id !== id);
-            localStorage.setItem(localKey, JSON.stringify(list));
-          }
-        } catch {}
-      }
-
       if (
         error.code === '42P01' || 
         error.message?.includes('does not exist') || 
@@ -1641,7 +1564,8 @@ export const supabaseService = {
       ) {
         return;
       }
-      console.warn('[deleteStaff] Warning deleting staff:', error);
+      console.error('[deleteStaff] Erro ao excluir membro da equipe:', error);
+      throw error;
     }
   },
 
@@ -1758,14 +1682,14 @@ export const supabaseService = {
       if (!barbershopId) {
         const { data: staffData } = await supabase
           .from('staff_profiles')
-          .select('id, barbershop_id, user_id, role')
+          .select('id, barbershop_id, user_id')
           .eq('user_id', inputId)
           .maybeSingle();
 
         if (staffData) {
           barbershopId = (staffData as any).barbershop_id || null;
           staffProfileId = (staffData as any).id || null;
-          detectedRole = (staffData as any).role === 'admin' || (staffData as any).role === 'owner' ? 'admin_owner' : 'staff';
+          detectedRole = 'staff';
           
           if (barbershopId) {
             const { data: shopFromStaff } = await supabase
@@ -2726,11 +2650,11 @@ export const supabaseService = {
       // 6. Verificar se tem staff_profiles mesmo sem barbershop_members (compatibilidade)
       if (staffRows && staffRows.length > 0) {
         const rawStaff = staffRows[0];
-        const targetShopId = rawStaff.tenant_id;
+        const targetShopId = rawStaff.barbershop_id || rawStaff.tenant_id;
         const { data: shopData } = await supabase
           .from('barbershops')
           .select('*')
-          .eq('id', targetShopId)
+          .or(`id.eq.${targetShopId},owner_id.eq.${targetShopId}`)
           .maybeSingle();
 
         const barbershopObj: Barbershop | null = shopData ? {
@@ -2743,14 +2667,15 @@ export const supabaseService = {
 
         const mappedStaffProfile: Staff = {
           id: rawStaff.id,
-          tenantId: rawStaff.tenant_id,
+          tenantId: rawStaff.barbershop_id || rawStaff.tenant_id,
+          barbershopId: rawStaff.barbershop_id || (shopData ? shopData.id : undefined),
           userId: rawStaff.user_id || userId,
           name: rawStaff.name || profileObj.name || 'Profissional',
           phone: rawStaff.phone || profileObj.personalPhone || '',
           photo: rawStaff.photo || profileObj.photo || undefined,
           status: rawStaff.status || 'active',
           commissionRate: Number(rawStaff.commission_rate || 0),
-          role: (rawStaff.role === 'admin' ? 'admin' : 'staff')
+          role: 'staff'
         };
 
         const state: OnboardingState = {
@@ -3129,6 +3054,47 @@ export const supabaseService = {
           (customErr as any).isValidationError = true;
         }
         throw customErr;
+      }
+
+      if (data && data.success) {
+        const staffId = data.staff?.id || data.staff_id;
+        const newUserId = data.user_id;
+
+        // 1. Garantir explicitamente que staff_profiles.barbershop_id foi preenchido corretamente
+        if (staffId && barbershopId) {
+          try {
+            await supabase
+              .from('staff_profiles')
+              .update({ barbershop_id: barbershopId })
+              .eq('id', staffId);
+          } catch (updateErr) {
+            console.warn('[createStaffDirectly] Aviso ao assegurar barbershop_id em staff_profiles:', updateErr);
+          }
+        }
+
+        // 2. Garantir que barbershop_members foi criado
+        if (newUserId && barbershopId) {
+          try {
+            const { data: existingMember } = await supabase
+              .from('barbershop_members')
+              .select('id, role')
+              .eq('barbershop_id', barbershopId)
+              .eq('user_id', newUserId)
+              .maybeSingle();
+
+            if (!existingMember) {
+              await supabase
+                .from('barbershop_members')
+                .insert({
+                  barbershop_id: barbershopId,
+                  user_id: newUserId,
+                  role: params.role === 'admin' ? 'admin' : 'staff'
+                });
+            }
+          } catch (memberErr) {
+            console.warn('[createStaffDirectly] Aviso ao assegurar barbershop_members:', memberErr);
+          }
+        }
       }
 
       return data;

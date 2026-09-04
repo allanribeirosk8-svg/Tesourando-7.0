@@ -218,6 +218,9 @@ export const AppProvider: React.FC<{
     setBarbershopMembers([]);
     setBarbershopInvites([]);
     setOnboardingState(null);
+    setSession(null);
+    sessionRef.current = null;
+    setBarberId(null);
   }, []);
 
   const loadBarbershopData = useCallback(async () => {
@@ -2166,26 +2169,22 @@ export const AppProvider: React.FC<{
   // Multi-staff helper callbacks
   const addStaff = useCallback(async (s: Omit<Staff, 'id' | 'tenantId'>) => {
     try {
-      const targetId = sessionRef.current?.user?.id || barberId;
-      if (!targetId) return;
-      const newStaff = await supabaseService.saveStaff({
+      const currentBarbershopId = activeTenant?.id || barbershop?.id || barberId;
+      if (!currentBarbershopId) {
+        throw new Error('Contexto da barbearia não encontrado ao adicionar profissional.');
+      }
+      await supabaseService.saveStaff({
         ...s,
-        tenantId: targetId
+        tenantId: currentBarbershopId,
+        barbershopId: currentBarbershopId
       });
-      setStaff(prev => [...prev, {
-        id: newStaff.id,
-        tenantId: newStaff.tenant_id,
-        userId: newStaff.user_id,
-        name: newStaff.name,
-        phone: newStaff.phone,
-        photo: newStaff.photo || undefined,
-        status: newStaff.status || 'active',
-        commissionRate: newStaff.commission_rate || 0
-      }]);
+      const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+      setStaff(freshStaff);
     } catch (err) {
       console.error('Error adding staff member:', err);
+      throw err;
     }
-  }, [barberId]);
+  }, [activeTenant?.id, barbershop?.id, barberId]);
 
   const createStaffDirectly = useCallback(async (params: {
     email: string;
@@ -2197,36 +2196,35 @@ export const AppProvider: React.FC<{
     barbershopId?: string;
   }) => {
     try {
-      const targetBarbershopId = params.barbershopId || barbershop?.id || undefined;
+      const currentBarbershopId = params.barbershopId || activeTenant?.id || barbershop?.id || barberId;
+      if (!currentBarbershopId) {
+        throw new Error('Contexto da barbearia não encontrado.');
+      }
       const res = await supabaseService.createStaffDirectly({
         ...params,
-        barbershopId: targetBarbershopId
+        barbershopId: currentBarbershopId
       });
 
-      if (res && res.staff) {
-        setStaff(prev => [...prev, {
-          id: res.staff.id,
-          tenantId: res.staff.tenant_id,
-          userId: res.staff.user_id,
-          name: res.staff.name,
-          phone: res.staff.phone,
-          photo: res.staff.photo || undefined,
-          status: res.staff.status || 'active',
-          commissionRate: res.staff.commission_rate || 0
-        }]);
+      // Passo obrigatório: executar getStaff(context.barbershopId) e atualizar a lista com o retorno do banco
+      const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+      setStaff(freshStaff);
 
-        setBarbershopMembers(prev => [...prev, {
-          barbershopId: res.staff.tenant_id,
-          userId: res.user_id,
-          role: params.role,
-          joinedAt: new Date().toISOString(),
-          name: params.name,
-          phone: params.phone || ''
-        }]);
+      if (res && res.user_id) {
+        setBarbershopMembers(prev => {
+          const exists = prev.some(m => m.userId === res.user_id);
+          if (exists) return prev;
+          return [...prev, {
+            barbershopId: currentBarbershopId,
+            userId: res.user_id,
+            role: params.role,
+            joinedAt: new Date().toISOString(),
+            name: params.name,
+            phone: params.phone || ''
+          }];
+        });
       }
       return res;
     } catch (err: any) {
-      // Log [CREATE_STAFF_STORE_04]
       console.error('[CREATE_STAFF_STORE_04] Erro capturado no callback createStaffDirectly do Store:', {
         message: err?.message || String(err),
         stack: err?.stack || 'Sem stack disponível',
@@ -2234,74 +2232,38 @@ export const AppProvider: React.FC<{
       });
       throw err;
     }
-  }, [barbershop]);
+  }, [activeTenant?.id, barbershop?.id, barberId]);
 
   const updateStaff = useCallback(async (id: string, updates: Partial<Staff>) => {
     try {
-      const activeTenantId = activeTenant?.id || barbershop?.id || barberProfile?.id || barberId;
-      const currentSessionUserId = sessionRef.current?.user?.id;
-      const existing = staff.find(s => s.id === id || s.userId === id || (currentSessionUserId && (s.userId === currentSessionUserId || s.id === currentSessionUserId)));
-      
-      let payload: Staff;
-      if (existing) {
-        payload = { ...existing, ...updates };
-      } else {
-        const isOwnerRole = updates.role === 'admin' || updates.role === 'admin_owner';
-        payload = {
-          id: id,
-          tenantId: activeTenantId || id,
-          userId: updates.userId || (id === currentSessionUserId ? id : undefined) || currentSessionUserId,
-          name: updates.name || (isOwnerRole ? barberProfile?.name : 'Profissional') || 'Profissional',
-          phone: updates.phone || (isOwnerRole ? barberProfile?.personalPhone : '') || '',
-          photo: updates.photo || (isOwnerRole ? barberProfile?.photo : undefined),
-          status: updates.status || 'active',
-          commissionRate: updates.commissionRate ?? 100,
-          role: updates.role || 'staff',
-          ...updates
-        };
+      const currentBarbershopId = activeTenant?.id || barbershop?.id || barberId;
+      if (!currentBarbershopId) {
+        throw new Error('Contexto da barbearia não encontrado ao atualizar profissional.');
       }
+      const existing = staff.find(s => s.id === id || s.userId === id);
       
-      const savedStaff = await supabaseService.saveStaff(payload);
-      const finalPayload: Staff = savedStaff ? {
-        id: savedStaff.id || payload.id,
-        tenantId: savedStaff.tenant_id || payload.tenantId,
-        userId: savedStaff.user_id || payload.userId,
-        name: savedStaff.name || payload.name,
-        phone: savedStaff.phone || payload.phone,
-        photo: savedStaff.photo || payload.photo,
-        status: (savedStaff.status as any) || payload.status,
-        commissionRate: savedStaff.commission_rate ?? payload.commissionRate,
-        role: (savedStaff.role === 'admin' ? 'admin' : 'staff') as 'admin' | 'staff'
-      } : payload;
+      const payload: any = {
+        ...(existing || {}),
+        ...updates,
+        id: id,
+        barbershopId: currentBarbershopId,
+        tenantId: currentBarbershopId
+      };
+      
+      await supabaseService.saveStaff(payload);
+      const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+      setStaff(freshStaff);
 
-      setStaff(prev => {
-        const index = prev.findIndex(s => s.id === id || s.userId === id || (finalPayload.userId && s.userId === finalPayload.userId));
-        if (index > -1) {
-          const next = [...prev];
-          next[index] = finalPayload;
-          return next;
-        }
-        return [...prev, finalPayload];
-      });
-
-      setCurrentStaff(prev => {
-        if (!prev) return finalPayload;
-        if (prev.id === id || prev.userId === id || (finalPayload.userId && prev.userId === finalPayload.userId) || (currentSessionUserId && (prev.userId === currentSessionUserId || prev.id === currentSessionUserId))) {
-          return { ...prev, ...finalPayload };
-        }
-        return prev;
-      });
-
-      if (finalPayload.userId || id) {
-        const targetUserId = finalPayload.userId || id;
+      const targetUserId = updates.userId || existing?.userId;
+      if (targetUserId) {
         setBarbershopMembers(prev => {
           return prev.map(m => {
             if (m.userId === targetUserId) {
               return {
                 ...m,
-                role: finalPayload.role === 'admin' ? 'admin' : 'staff',
-                name: finalPayload.name,
-                phone: finalPayload.phone
+                role: updates.role === 'admin' ? 'admin' : 'staff',
+                name: updates.name || m.name,
+                phone: updates.phone || m.phone
               };
             }
             return m;
@@ -2310,17 +2272,25 @@ export const AppProvider: React.FC<{
       }
     } catch (err) {
       console.error('Error updating staff member:', err);
+      throw err;
     }
-  }, [staff, barberId, barberProfile, activeTenant, barbershop]);
+  }, [staff, activeTenant?.id, barbershop?.id, barberId]);
 
   const deleteStaff = useCallback(async (id: string) => {
     try {
       await supabaseService.deleteStaff(id);
-      setStaff(prev => prev.filter(s => s.id !== id));
+      const currentBarbershopId = activeTenant?.id || barbershop?.id || barberId;
+      if (currentBarbershopId) {
+        const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+        setStaff(freshStaff);
+      } else {
+        setStaff(prev => prev.filter(s => s.id !== id));
+      }
     } catch (err) {
       console.error('Error deleting staff member:', err);
+      throw err;
     }
-  }, []);
+  }, [activeTenant?.id, barbershop?.id, barberId]);
 
   const getStaffAvailability = useCallback(async (staffId: string) => {
     try {
