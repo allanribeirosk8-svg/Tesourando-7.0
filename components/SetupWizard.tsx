@@ -65,7 +65,7 @@ const generateDurationOptions = () => {
 };
 
 export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
-  const { updateBarberProfile, addService, updateDayConfig, services, removeService, barberProfile, barbershop, onboardingState, checkOnboardingState } = useStore();
+  const { updateBarberProfile, addService, updateDayConfig, services, removeService, barberProfile, barbershop, onboardingState, checkOnboardingState, reloadData } = useStore();
   const [step, setStep] = useState(initialStep || 1);
   const [isFinishing, setIsFinishing] = useState(false);
   const [isFinished, setIsFinished] = useState(false);
@@ -136,6 +136,14 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
             duration: Number(s.duration)
           })));
         }
+        if (ownedShop) {
+          if (initialStep && initialStep >= 1 && initialStep <= 4) {
+            setStep(initialStep);
+          }
+        } else {
+          // Sem barbearia cadastrada: SEMPRE iniciar no passo 1 (Nome da conta obrigatório)
+          setStep(1);
+        }
       } catch (err) {
         console.warn('[SetupWizard] Erro ao carregar dados prévios para retomada:', err);
       }
@@ -143,12 +151,17 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
 
     loadExistingProgress();
 
-    if (initialStep && initialStep >= 1 && initialStep <= 4) {
+    // Se o usuário não possui barbearia própria ativa, a etapa 1 é estritamente mandatória
+    if (!barbershop) {
+      setStep(1);
+    } else if (initialStep && initialStep >= 1 && initialStep <= 4) {
       setStep(initialStep);
-    } else if (onboardingState?.step) {
+    } else if (onboardingState?.step && onboardingState.step >= 1 && onboardingState.step <= 4) {
       setStep(onboardingState.step);
+    } else {
+      setStep(1);
     }
-  }, [initialStep, onboardingState?.step]);
+  }, [initialStep, onboardingState?.step, barbershop]);
   const checkHandleAvailability = async (value: string) => {
     const normalized = normalizeRequestedSlug(value);
     if (normalized.length < 3) {
@@ -348,8 +361,13 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
       // 8. Reler o estado real do banco de dados
       await supabaseService.resolveOnboardingState(userId);
 
-      // 9. Atualizar Store
+      // 9. Atualizar Store e sincronizar a nova barbearia ativa com activeTenant antes de finalizar
       await checkOnboardingState();
+      try {
+        await reloadData();
+      } catch (reloadErr) {
+        console.warn('[SetupWizard] Aviso ao recarregar dados após setup:', reloadErr);
+      }
 
       setIsFinishing(false);
       setIsFinished(true);

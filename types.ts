@@ -12,10 +12,66 @@ export interface Tenant {
   createdAt?: string;
 }
 
+export type MembershipRole = 'owner' | 'admin' | 'staff';
+
+export interface TenantContext {
+  barbershopId: string;
+  barbershopName: string;
+  barbershopSlug: string;
+  role: MembershipRole;
+  staffProfileId: string | null;
+  isOwner: boolean;
+  logoUrl?: string | null;
+}
+
+export interface AuthContext {
+  authenticatedUserId: string;
+  contexts: TenantContext[];
+  activeContext: TenantContext | null;
+  status:
+    | 'unauthenticated'
+    | 'needs_onboarding'
+    | 'needs_context_selection'
+    | 'ready'
+    | 'access_revoked'
+    | 'inconsistent';
+}
+
+export type SetupMode = 'first_barbershop' | 'additional_barbershop';
+
+export type ActiveContext =
+  | {
+      kind: 'owner' | 'admin' | 'staff';
+      userId: string;
+      barbershopId: string;
+      membershipRole: MembershipRole;
+      staffProfileId: string | null;
+      barbershopName?: string;
+    }
+  | {
+      kind: 'needs_onboarding';
+      userId: string;
+    }
+  | {
+      kind: 'multiple_contexts_not_supported';
+      userId: string;
+      contexts: Array<{
+        barbershopId: string;
+        barbershopName: string;
+        role: MembershipRole;
+        staffProfileId: string | null;
+      }>;
+    }
+  | {
+      kind: 'access_revoked';
+      userId: string;
+      reason: string;
+    };
+
 export interface TenantMember {
   tenantId: string;
   userId: string;
-  role: 'admin_owner' | 'staff' | 'client';
+  role: MembershipRole;
   createdAt?: string;
 }
 
@@ -24,12 +80,14 @@ export interface Staff {
   tenantId: string;
   barbershopId?: string;
   userId?: string | null;
+  staffProfileId?: string | null;
+  membershipRole?: MembershipRole;
   name: string;
   phone: string;
   photo?: string;
   status: 'active' | 'inactive';
   commissionRate: number; // e.g. 50 for 50%
-  role?: 'admin' | 'admin_owner' | 'staff';
+  role?: MembershipRole;
   createdAt?: string;
 }
 
@@ -145,6 +203,33 @@ export interface BarberProfile {
   slug?: string;
 }
 
+export type AccessKind =
+  | 'owner_needs_barbershop'
+  | 'owner_ready'
+  | 'admin_ready'
+  | 'staff_ready'
+  | 'multi_tenant_selection'
+  | 'no_membership';
+
+export interface UserBarbershopContext {
+  barbershop: Barbershop;
+  role: 'owner' | 'admin' | 'staff';
+  staffProfile?: Staff | null;
+}
+
+export interface AuthContextResult {
+  userId: string | null;
+  profile: BarberProfile | null;
+  memberships: BarbershopMember[];
+  ownedBarbershops: Barbershop[];
+  userContexts: UserBarbershopContext[];
+  activeMembership: BarbershopMember | null;
+  activeBarbershopId: string | null;
+  activeBarbershop: Barbershop | null;
+  staffProfile: Staff | null;
+  accessKind: AccessKind;
+}
+
 export interface OnboardingState {
   userId: string;
   isAuthenticated: boolean;
@@ -195,10 +280,21 @@ export interface AppState {
   checkOnboardingState: () => Promise<OnboardingState>;
   
   // Multi-tenant & Multi-staff state extensions
+  activeContext: ActiveContext | null;
+  authenticatedUserId: string | null;
+  activeBarbershopId: string | null;
+  activeMembershipRole: MembershipRole | null;
+  activeStaffProfileId: string | null;
   activeTenant: Tenant | null;
+  authContext: AuthContext | null;
+  authContextResult: AuthContextResult | null;
+  userContexts: UserBarbershopContext[];
+  switchBarbershopContext: (barbershopId: string) => Promise<void>;
+  selectActiveContext: (barbershopId: string) => Promise<void>;
+  openContextSelector: () => void;
   staff: Staff[];
   currentStaff: Staff | null;
-  userRole: 'admin_owner' | 'staff' | 'client' | null;
+  userRole: MembershipRole | null;
   permissions: {
     canManageStaff: boolean;
     canManageServices: boolean;
@@ -214,15 +310,17 @@ export interface AppState {
   addStaff: (s: Omit<Staff, 'id' | 'tenantId'>) => Promise<void>;
   createStaffDirectly: (params: {
     email: string;
-    password?: string;
-    role: 'staff' | 'admin';
+    password: string;
+    role?: 'staff' | 'admin';
     name: string;
     phone?: string;
+    photo?: string;
     commissionRate?: number;
     barbershopId?: string;
   }) => Promise<any>;
   updateStaff: (id: string, updates: Partial<Staff>) => Promise<void>;
   deleteStaff: (id: string) => Promise<void>;
+  removeStaffFromBarbershop: (params: { staffProfileId: string; staffUserId?: string | null; barbershopId: string }) => Promise<void>;
   getStaffAvailability: (staffId: string) => Promise<StaffAvailability[]>;
   saveStaffAvailability: (availabilities: Omit<StaffAvailability, 'id'>[]) => Promise<void>;
   

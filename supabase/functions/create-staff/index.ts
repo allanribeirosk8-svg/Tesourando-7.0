@@ -170,9 +170,164 @@ serve(async (req) => {
       }
     })
 
-    // 4. Create the new user in Supabase Auth with confirmed email
+    // 4. Check if a user with this email already exists in Supabase Auth
+    console.log(`[CREATE_STAFF_EDGE_09] Verificando se o usuário com email: ${email} já existe no sistema...`);
+    let existingUser: any = null;
+    try {
+      const { data: userListData } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      if (userListData && userListData.users) {
+        existingUser = userListData.users.find((u: any) => u.email?.toLowerCase() === email.toLowerCase()) || null;
+      }
+    } catch (listErr: any) {
+      console.warn("[CREATE_STAFF_EDGE_09_WARN] Aviso ao listar usuários Auth:", listErr?.message);
+    }
+
+    // Se o usuário já existe em auth.users
+    if (existingUser) {
+      console.log(`[CREATE_STAFF_EDGE_09_EXISTS] Usuário já registrado no Auth encontrado: ID ${existingUser.id}`);
+
+      // Validação: não permitir adicionar o próprio dono como colaborador
+      if (existingUser.id === barbershop.owner_id) {
+        return new Response(JSON.stringify({ error: 'Este e-mail pertence ao proprietário deste estabelecimento.' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Verificar se já tem membership ativa e staff_profile ativo nesta mesma barbearia
+      const { data: existingMember } = await supabaseAdmin
+        .from('barbershop_members')
+        .select('role')
+        .eq('barbershop_id', barbershop_id)
+        .eq('user_id', existingUser.id)
+        .maybeSingle();
+
+      const { data: existingStaffRecord } = await supabaseAdmin
+        .from('staff_profiles')
+        .select('id, status')
+        .eq('barbershop_id', barbershop_id)
+        .eq('user_id', existingUser.id)
+        .maybeSingle();
+
+      if (existingMember && existingStaffRecord && existingStaffRecord.status === 'active') {
+        console.log(`[CREATE_STAFF_EDGE_09_CONFLICT] Profissional já vinculado e ativo na barbearia ${barbershop_id}`);
+        return new Response(JSON.stringify({ 
+          error: 'Este profissional já está cadastrado e ativo nesta barbearia.',
+          code: 'STAFF_ALREADY_MEMBER',
+          alreadyMember: true,
+          staff_id: existingStaffRecord.id
+        }), {
+          status: 409,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // VINCULAÇÃO / REATIVAÇÃO DO PROFISSIONAL NESTA BARBEARIA
+      // Nota arquitetural: O usuário já possui conta global. NUNCA alterar sua senha sem fluxo próprio.
+      console.log(`[CREATE_STAFF_EDGE_09_LINK] Vinculando/reativando profissional ${existingUser.id} na barbearia ${barbershop_id}...`);
+
+      // 1. Garantir membership nesta barbearia
+      const targetRole = role === 'admin' ? 'admin' : 'staff';
+      const { error: memberUpsertErr } = await supabaseAdmin
+        .from('barbershop_members')
+        .upsert({
+          barbershop_id: barbershop_id,
+          user_id: existingUser.id,
+          role: targetRole
+        }, { onConflict: 'barbershop_id,user_id' });
+
+      if (memberUpsertErr) {
+        console.error("[CREATE_STAFF_EDGE_MEMBER_ERR] Erro ao vincular barbershop_members:", memberUpsertErr.message);
+        return new Response(JSON.stringify({ error: `Erro ao vincular membro: ${memberUpsertErr.message}` }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // 2. Garantir profile básico se ausente
+      await supabaseAdmin
+        .from('profiles')
+        .upsert({
+          id: existingUser.id,
+          name: name,
+          personal_phone: phone || '',
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'id', ignoreDuplicates: false });
+
+      // 3. Criar ou reativar staff_profiles na barbearia
+      let finalStaffRecord: any = null;
+      let finalStaffId = existingStaffRecord?.id;
+
+      if (existingStaffRecord) {
+        const { data: updatedStaff, error: updateStaffErr } = await supabaseAdmin
+          .from('staff_profiles')
+          .update({
+            status: 'active',
+            name: name,
+            phone: phone || '',
+            commission_rate: commissionRate !== undefined ? Number(commissionRate) : 30
+          })
+          .eq('id', existingStaffRecord.id)
+          .select()
+          .single();
+
+        if (updateStaffErr) {
+          console.error("[CREATE_STAFF_EDGE_STAFF_UPDATE_ERR] Erro ao reativar staff_profiles:", updateStaffErr.message);
+          return new Response(JSON.stringify({ error: `Erro ao reativar registro profissional: ${updateStaffErr.message}` }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        finalStaffRecord = updatedStaff;
+      } else {
+        finalStaffId = crypto.randomUUID();
+        const { data: createdStaff, error: createStaffErr } = await supabaseAdmin
+          .from('staff_profiles')
+          .insert({
+            id: finalStaffId,
+            barbershop_id: barbershop_id,
+            tenant_id: barbershop.owner_id,
+            user_id: existingUser.id,
+            name: name,
+            phone: phone || '',
+            status: 'active',
+            commission_rate: commissionRate !== undefined ? Number(commissionRate) : 30
+          })
+          .select()
+          .single();
+
+        if (createStaffErr) {
+          console.error("[CREATE_STAFF_EDGE_STAFF_INSERT_ERR] Erro ao criar staff_profiles:", createStaffErr.message);
+          return new Response(JSON.stringify({ error: `Erro ao criar perfil profissional: ${createStaffErr.message}` }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        finalStaffRecord = createdStaff;
+      }
+
+      console.log(`[CREATE_STAFF_EDGE_LINKED] Profissional vinculado com sucesso (Staff ID: ${finalStaffId})`);
+      const successPayload = {
+        success: true,
+        linked: true,
+        reactivated: Boolean(existingStaffRecord),
+        user_id: existingUser.id,
+        email,
+        name,
+        role: targetRole,
+        staff_id: finalStaffId,
+        staff: finalStaffRecord || null
+      };
+
+      return new Response(JSON.stringify(successPayload), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // 5. Novo usuário: criar no Supabase Auth com email confirmado
     // Log [CREATE_STAFF_EDGE_09]
-    console.log(`[CREATE_STAFF_EDGE_09] Solicitando criação do usuário no Supabase Auth com email: ${email}...`);
+    console.log(`[CREATE_STAFF_EDGE_09] Solicitando criação do novo usuário no Supabase Auth com email: ${email}...`);
     const { data: authUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
@@ -185,7 +340,13 @@ serve(async (req) => {
         message: createError?.message,
         errorObject: createError
       });
-      return new Response(JSON.stringify({ error: `Erro ao criar usuário em Auth: ${createError?.message}` }), {
+      const isDuplicate = createError?.message?.includes('already been registered') || 
+                          createError?.message?.includes('already registered') ||
+                          createError?.message?.includes('already exists');
+      const errorMsg = isDuplicate 
+        ? 'Este e-mail já está sendo utilizado por outro profissional no sistema.'
+        : `Erro ao criar usuário em Auth: ${createError?.message}`;
+      return new Response(JSON.stringify({ error: errorMsg }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })

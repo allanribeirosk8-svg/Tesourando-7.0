@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
-import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState, AppointmentTransactionResult } from '../types';
+import { Appointment, AppState, BarberProfile, Customer, DayConfig, ServiceItem, Transaction, Staff, Tenant, StaffAvailability, AppNotification, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState, AppointmentTransactionResult, AuthContextResult, UserBarbershopContext, ActiveContext, MembershipRole, AuthContext, TenantContext, SetupMode } from '../types';
 import { normalizePhone, isValidPhone, validateBrazilianPhone, normalizeBrazilianPhoneForComparison, isDuplicateLinkedAppointmentTransactionError } from '../utils/helpers';
 import { supabaseService } from '../services/supabaseService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
@@ -77,7 +77,11 @@ export const AppProvider: React.FC<{
   const [barberProfile, setBarberProfile] = useState<BarberProfile>(DEFAULT_PROFILE);
   const [isLoading, setIsLoading] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
-  const [barberId, setBarberId] = useState<string | null>(null);
+  const [activeContext, setActiveContext] = useState<ActiveContext | null>(null);
+  const [activeBarbershopId, setActiveBarbershopId] = useState<string | null>(null);
+  const [activeMembershipRole, setActiveMembershipRole] = useState<MembershipRole | null>(null);
+  const [activeStaffProfileId, setActiveStaffProfileId] = useState<string | null>(null);
+  const [authenticatedUserId, setAuthenticatedUserId] = useState<string | null>(null);
   const bootRequestIdRef = useRef<number>(0);
 
   // Multi-tenant & Multi-staff state declarations
@@ -91,6 +95,10 @@ export const AppProvider: React.FC<{
   const [barbershopMembers, setBarbershopMembers] = useState<BarbershopMember[]>([]);
   const [barbershopInvites, setBarbershopInvites] = useState<BarbershopInvite[]>([]);
   const [onboardingState, setOnboardingState] = useState<OnboardingState | null>(null);
+  const [authContext, setAuthContext] = useState<AuthContext | null>(null);
+  const [authContextResult, setAuthContextResult] = useState<AuthContextResult | null>(null);
+  const [userContexts, setUserContexts] = useState<UserBarbershopContext[]>([]);
+  const selectedBarbershopIdRef = useRef<string | null>(null);
 
   const checkOnboardingState = useCallback(async (): Promise<OnboardingState> => {
     if (!isSupabaseConfigured() || !sessionRef.current?.user?.id) {
@@ -201,6 +209,11 @@ export const AppProvider: React.FC<{
   }, [activeTenant?.id]);
 
   const resetStore = useCallback(() => {
+    setActiveContext(null);
+    setActiveBarbershopId(null);
+    setActiveMembershipRole(null);
+    setActiveStaffProfileId(null);
+    setAuthenticatedUserId(null);
     setBarberProfile(DEFAULT_PROFILE);
     setAppointments([]);
     setCustomers({});
@@ -212,26 +225,29 @@ export const AppProvider: React.FC<{
     setActiveTenant(null);
     setStaff([]);
     setUserRole(null);
+    setCurrentStaff(null);
     setSelectedStaffId('all');
     setIsLoading(false);
     setBarbershop(null);
     setBarbershopMembers([]);
     setBarbershopInvites([]);
     setOnboardingState(null);
+    setAuthContext(null);
+    setUserContexts([]);
+    selectedBarbershopIdRef.current = null;
     setSession(null);
     sessionRef.current = null;
-    setBarberId(null);
   }, []);
 
   const loadBarbershopData = useCallback(async () => {
     try {
       const currentSession = sessionRef.current;
-      const barbershopId = activeTenant?.id;
+      const barbershopId = activeBarbershopId || activeTenant?.id;
       if (!isSupabaseConfigured() || !currentSession?.user?.id || !barbershopId) return;
       const [bs, members, invites] = await Promise.all([
         supabaseService.getBarbershop(),
-        supabaseService.getBarbershopMembers(),
-        supabaseService.getInvites()
+        supabaseService.getBarbershopMembers(barbershopId),
+        supabaseService.getInvites(barbershopId)
       ]);
       setBarbershop(bs);
       setBarbershopMembers(members);
@@ -239,38 +255,7 @@ export const AppProvider: React.FC<{
     } catch (err) {
       console.error('[loadBarbershopData] Error loading barbershop data:', err);
     }
-  }, [activeTenant?.id]);
-
-  const createBarbershop = useCallback(async (name: string) => {
-    try {
-      const bs = await supabaseService.createBarbershop(name);
-      setBarbershop(bs);
-      await loadBarbershopData();
-    } catch (err) {
-      console.error('[createBarbershop] Error:', err);
-      throw err;
-    }
-  }, [loadBarbershopData]);
-
-  const createInvite = useCallback(async (email: string, role: 'staff' | 'admin' = 'staff') => {
-    try {
-      await supabaseService.createInvite(email, role);
-      await loadBarbershopData();
-    } catch (err) {
-      console.error('[createInvite] Error:', err);
-      throw err;
-    }
-  }, [loadBarbershopData]);
-
-  const acceptInvite = useCallback(async (token: string) => {
-    try {
-      await supabaseService.acceptInvite(token);
-      await loadBarbershopData();
-    } catch (err) {
-      console.error('[acceptInvite] Error:', err);
-      throw err;
-    }
-  }, [loadBarbershopData]);
+  }, [activeBarbershopId, activeTenant?.id]);
 
   const sanitizeSessionLog = (user: any) => {
     if (!user) return null;
@@ -336,39 +321,78 @@ export const AppProvider: React.FC<{
       }
 
       const sessionUserId = currentSession.user.id;
-      console.info('[ONBOARDING] Iniciando resolução para usuário:', sessionUserId);
+      console.info('[AUTH_CONTEXT] Iniciando resolução para usuário:', sessionUserId, {
+        selectedBarbershopId: selectedBarbershopIdRef.current
+      });
 
-      // 3. Se houver sessão:
-      // - resolver resolveOnboardingState(userId);
-      // - salvar onboardingState.
-      const onbState = await supabaseService.resolveOnboardingState(sessionUserId);
+      // 3. Resolver contexto de autenticação completo:
+      // Diferenciação clara entre:
+      // 1. Conta de usuário (auth.users / profiles)
+      // 2. Barbearia / tenant (barbershops.id)
+      // 3. Vínculo do usuário com a barbearia (barbershop_members)
+      const [resolvedAuthCtx, resolvedSingleCtx, resolvedAuthContexts] = await Promise.all([
+        supabaseService.resolveAuthContext(sessionUserId, selectedBarbershopIdRef.current || undefined),
+        supabaseService.resolveSingleActiveContext(sessionUserId),
+        supabaseService.resolveAuthContexts(sessionUserId)
+      ]);
       if (requestId !== bootRequestIdRef.current) return;
 
-      console.info('[ONBOARDING] Estado resolvido', onbState);
+      console.info('[AUTH_CONTEXT] Contexto resolvido:', resolvedAuthCtx.accessKind, {
+        activeBarbershopId: resolvedAuthCtx.activeBarbershopId,
+        userContextsCount: resolvedAuthCtx.userContexts.length,
+        singleContextKind: resolvedSingleCtx.kind
+      });
+
+      setAuthContext(resolvedAuthContexts);
+      setAuthContextResult(resolvedAuthCtx);
+      setUserContexts(resolvedAuthCtx.userContexts);
+      setActiveContext(resolvedSingleCtx);
+      setAuthenticatedUserId(sessionUserId);
+
+      // Compatibilidade retroativa para onboardingState
+      const onbState: OnboardingState = {
+        userId: sessionUserId,
+        isAuthenticated: true,
+        hasProfile: !!resolvedAuthCtx.profile,
+        profile: resolvedAuthCtx.profile,
+        hasBarbershop: !!resolvedAuthCtx.activeBarbershop,
+        barbershop: resolvedAuthCtx.activeBarbershop,
+        hasOwnerMembership: resolvedAuthCtx.accessKind === 'owner_ready',
+        isStaffMember: resolvedAuthCtx.accessKind === 'staff_ready',
+        status: resolvedAuthCtx.accessKind === 'owner_needs_barbershop' 
+          ? 'needs_barbershop' 
+          : (resolvedAuthCtx.accessKind === 'no_membership' ? 'no_session' : 'complete'),
+        isComplete: resolvedAuthCtx.accessKind === 'owner_ready' || resolvedAuthCtx.accessKind === 'admin_ready' || resolvedAuthCtx.accessKind === 'staff_ready',
+        step: resolvedAuthCtx.accessKind === 'owner_needs_barbershop' ? 1 : 4,
+        membership: resolvedAuthCtx.activeMembership,
+        staffProfile: resolvedAuthCtx.staffProfile
+      };
       setOnboardingState(onbState);
 
-      // 4. Se o estado for:
-      // - no_session;
-      // - needs_profile;
-      // - needs_barbershop;
-      // - needs_membership;
-      // - needs_completion;
-      // não carregar dados operacionais.
-      // Limpar appointments, customers, services, transactions, staff e activeTenant.
-      // Mostrar o fluxo correspondente do onboarding.
-      // Garantir setIsLoading(false).
-      const incompleteStatuses = [
-        'no_session',
-        'needs_profile',
-        'needs_barbershop',
-        'needs_membership',
-        'needs_completion'
-      ];
-      const isIncomplete = !onbState.isComplete || incompleteStatuses.includes(onbState.status);
+      // 4. Se o usuário tem múltiplos contextos, verificar se já há um selecionado explicitamente
+      let effectiveSingleCtx = resolvedSingleCtx;
+      if (resolvedSingleCtx.kind === 'multiple_contexts_not_supported' && selectedBarbershopIdRef.current) {
+        const found = resolvedSingleCtx.contexts.find(c => c.barbershopId === selectedBarbershopIdRef.current);
+        if (found) {
+          effectiveSingleCtx = {
+            kind: found.role,
+            userId: sessionUserId,
+            barbershopId: found.barbershopId,
+            barbershopName: found.barbershopName,
+            membershipRole: found.role,
+            staffProfileId: found.staffProfileId
+          };
+          console.info('[BOOT] Contexto selecionado explicitamente adotado:', effectiveSingleCtx.barbershopId);
+        }
+      }
 
-      if (isIncomplete) {
-        console.info('[BOOT] Usuário com onboarding incompleto ou sem barbearia associada. Status:', onbState.status);
-        setBarberId(null);
+      // Bloqueios estritos: se o usuário precisa de onboarding, tem acesso revogado ou múltiplos contextos sem seleção:
+      // NÃO carregar dados operacionais.
+      if (effectiveSingleCtx.kind === 'needs_onboarding') {
+        console.info('[BOOT] Usuário precisa criar barbearia ou sem memberships ativas');
+        setActiveBarbershopId(null);
+        setActiveMembershipRole(null);
+        setActiveStaffProfileId(null);
         setActiveTenant(null);
         setAppointments([]);
         setStaff([]);
@@ -380,45 +404,58 @@ export const AppProvider: React.FC<{
         setBarbershop(null);
         setBarbershopMembers([]);
         setBarbershopInvites([]);
-        if (onbState.profile) {
-          setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+        if (resolvedAuthCtx.profile) {
+          setBarberProfile(prev => ({ ...prev, ...resolvedAuthCtx.profile }));
         }
         return;
       }
 
-      // 5. Somente se:
-      // onboardingState.isComplete === true
-      // e onboardingState.barbershop?.id existir
-      // resolver o contexto do tenant e carregar os dados.
-      const candidateBarbershopId = onbState.barbershop?.id || onbState.membership?.barbershopId;
-      if (!candidateBarbershopId) {
-        console.warn('[BOOT] Onboarding completo mas sem barbershop válida identificada');
-        setBarberId(null);
+      if (effectiveSingleCtx.kind === 'multiple_contexts_not_supported') {
+        console.info('[BOOT] Múltiplas barbearias detectadas sem seleção prévia. Bloqueando dados até seleção de contexto.');
+        setActiveBarbershopId(null);
+        setActiveMembershipRole(null);
+        setActiveStaffProfileId(null);
         setActiveTenant(null);
         setAppointments([]);
         setStaff([]);
         setCustomers({});
         setTransactions([]);
+        setUserRole(null);
+        setCurrentStaff(null);
+        setBarbershop(null);
+        setBarbershopMembers([]);
+        setBarbershopInvites([]);
+        if (resolvedAuthCtx.profile) {
+          setBarberProfile(prev => ({ ...prev, ...resolvedAuthCtx.profile }));
+        }
         return;
       }
 
-      if (onbState.profile) {
-        setBarberProfile(prev => ({ ...prev, ...onbState.profile }));
+      if (effectiveSingleCtx.kind === 'access_revoked') {
+        console.warn('[BOOT] Usuário teve o acesso revogado à barbearia.');
+        setActiveBarbershopId(null);
+        setActiveMembershipRole(null);
+        setActiveStaffProfileId(null);
+        setActiveTenant(null);
+        setAppointments([]);
+        setStaff([]);
+        setCustomers({});
+        setTransactions([]);
+        setUserRole(null);
+        setCurrentStaff(null);
+        setBarbershop(null);
+        setBarbershopMembers([]);
+        setBarbershopInvites([]);
+        return;
       }
 
-      const tenantContext = await supabaseService.resolveTenantContext(sessionUserId);
-      if (requestId !== bootRequestIdRef.current) return;
-
-      const barbershopId = tenantContext.barbershopId || candidateBarbershopId;
-
-      // 6. Se resolveTenantContext não retornar barbershopId:
-      // - não chamar queries operacionais;
-      // - registrar erro de contexto;
-      // - mostrar SetupWizard ou tela de erro recuperável;
-      // - não prender na splash.
+      // 5. Contexto ativo único resolvido com sucesso:
+      const barbershopId = effectiveSingleCtx.barbershopId;
       if (!barbershopId) {
-        console.error('[TENANT] Erro de contexto: barbershopId não encontrado para o usuário:', sessionUserId);
-        setBarberId(null);
+        console.warn('[BOOT] Contexto pronto mas barbershopId ausente');
+        setActiveBarbershopId(null);
+        setActiveMembershipRole(null);
+        setActiveStaffProfileId(null);
         setActiveTenant(null);
         setAppointments([]);
         setStaff([]);
@@ -432,17 +469,19 @@ export const AppProvider: React.FC<{
         return;
       }
 
-      setBarberId(barbershopId);
+      setActiveBarbershopId(barbershopId);
+      setActiveMembershipRole(effectiveSingleCtx.membershipRole);
+      setActiveStaffProfileId(effectiveSingleCtx.staffProfileId);
 
       const tenantInfo = {
         id: barbershopId,
-        name: onbState?.barbershop?.name || onbState?.profile?.shopName || 'Meu Corte',
-        slug: onbState?.barbershop?.slug || onbState?.profile?.slug || '',
-        logo: onbState?.profile?.logo,
-        businessPhone: onbState?.profile?.businessPhone,
-        address: onbState?.profile?.address,
-        instagram: onbState?.profile?.instagram,
-        website: onbState?.profile?.website
+        name: resolvedAuthCtx.activeBarbershop?.name || resolvedAuthCtx.profile?.shopName || 'Meu Corte',
+        slug: resolvedAuthCtx.activeBarbershop?.slug || resolvedAuthCtx.profile?.slug || '',
+        logo: resolvedAuthCtx.profile?.logo,
+        businessPhone: resolvedAuthCtx.profile?.businessPhone,
+        address: resolvedAuthCtx.profile?.address,
+        instagram: resolvedAuthCtx.profile?.instagram,
+        website: resolvedAuthCtx.profile?.website
       };
       setActiveTenant(tenantInfo);
 
@@ -517,31 +556,28 @@ export const AppProvider: React.FC<{
       setUnblockedSlots(dbUnblocked || {});
       setStaff(dbStaff || []);
 
-      let resolvedRole: 'admin_owner' | 'staff' | 'client' | null = null;
-      const memberRole = onbState?.membership?.role;
-      if (memberRole === 'owner') {
+      let resolvedRole: 'admin_owner' | 'staff' | 'client' = 'staff';
+      if (resolvedAuthCtx.accessKind === 'owner_ready' || resolvedAuthCtx.accessKind === 'admin_ready') {
         resolvedRole = 'admin_owner';
-      } else if (memberRole === 'admin' || memberRole === 'staff') {
+      } else if (resolvedAuthCtx.accessKind === 'staff_ready') {
         resolvedRole = 'staff';
-      } else if (onbState?.isStaffMember) {
-        resolvedRole = 'staff';
-      } else if (onbState?.hasOwnerMembership || onbState?.barbershop?.ownerId === sessionUserId) {
-        resolvedRole = 'admin_owner';
-      } else {
-        const isStaff = dbStaff && dbStaff.some((s: any) => s.userId === sessionUserId);
-        resolvedRole = isStaff ? 'staff' : 'client';
       }
 
       setUserRole(resolvedRole);
 
-      let activeStaffUser: Staff | null = null;
-      activeStaffUser = (dbStaff && dbStaff.find((s: any) => s.userId === sessionUserId || (onbState?.staffProfile && s.id === onbState.staffProfile.id))) || onbState?.staffProfile || null;
+      let activeStaffUser: Staff | null = resolvedAuthCtx.staffProfile || null;
+      if (!activeStaffUser && dbStaff) {
+        activeStaffUser = dbStaff.find((s: any) => s.userId === sessionUserId) || null;
+      }
       setCurrentStaff(activeStaffUser);
+      if (resolvedRole === 'staff' && activeStaffUser?.id) {
+        setSelectedStaffId(activeStaffUser.id);
+      }
 
       console.info('[STORE] Carregamento principal concluído');
 
       // Cargas não essenciais (notificações e barbershop metadata secundária)
-      if (resolvedRole && resolvedRole !== 'client') {
+      if (resolvedRole) {
         try {
           const dbNotifications = await supabaseService.getNotifications(barbershopId, resolvedRole, sessionUserId);
           if (requestId === bootRequestIdRef.current) setNotifications(dbNotifications);
@@ -585,6 +621,39 @@ export const AppProvider: React.FC<{
   const loadData = useCallback(async () => {
     await bootstrapSession(sessionRef.current);
   }, [bootstrapSession]);
+
+  const createBarbershop = useCallback(async (name: string, requestedSlug?: string, mode?: SetupMode): Promise<Barbershop> => {
+    try {
+      const bs = await supabaseService.createBarbershop(name, requestedSlug, mode);
+      setBarbershop(bs);
+      selectedBarbershopIdRef.current = bs.id;
+      await bootstrapSession(sessionRef.current);
+      return bs;
+    } catch (err) {
+      console.error('[createBarbershop] Error:', err);
+      throw err;
+    }
+  }, [bootstrapSession]);
+
+  const createInvite = useCallback(async (email: string, role: 'staff' | 'admin' = 'staff') => {
+    try {
+      await supabaseService.createInvite(email, role);
+      await loadBarbershopData();
+    } catch (err) {
+      console.error('[createInvite] Error:', err);
+      throw err;
+    }
+  }, [loadBarbershopData]);
+
+  const acceptInvite = useCallback(async (token: string) => {
+    try {
+      await supabaseService.acceptInvite(token);
+      await loadBarbershopData();
+    } catch (err) {
+      console.error('[acceptInvite] Error:', err);
+      throw err;
+    }
+  }, [loadBarbershopData]);
 
   const loadFromLocalStorage = () => {
     const storedApts = localStorage.getItem(STORAGE_KEY_APTS);
@@ -1104,7 +1173,7 @@ export const AppProvider: React.FC<{
   };
 
   const addNotification = useCallback(async (n: Omit<AppNotification, 'id' | 'createdAt' | 'read'>) => {
-    const resolvedTenantId = n.tenantId || activeTenant?.id || barberId || '';
+    const resolvedTenantId = n.tenantId || activeBarbershopId || activeTenant?.id || '';
     if (!resolvedTenantId) return;
 
     try {
@@ -1186,10 +1255,10 @@ export const AppProvider: React.FC<{
     } catch (e) {
       console.error('Erro ao adicionar notificação no Store:', e);
     }
-  }, [activeTenant, barberId, userRole]);
+  }, [activeTenant, activeBarbershopId, userRole]);
 
   const markNotificationAsRead = useCallback(async (id: string) => {
-    const resolvedTenantId = activeTenant?.id || barberId || '';
+    const resolvedTenantId = activeBarbershopId || activeTenant?.id || '';
     if (!resolvedTenantId) return;
 
     try {
@@ -1209,10 +1278,10 @@ export const AppProvider: React.FC<{
     } catch (e) {
       console.error('Erro ao marcar notificação como lida no Store:', e);
     }
-  }, [activeTenant, barberId]);
+  }, [activeTenant, activeBarbershopId]);
 
   const markAllNotificationsAsRead = useCallback(async () => {
-    const resolvedTenantId = activeTenant?.id || barberId || '';
+    const resolvedTenantId = activeBarbershopId || activeTenant?.id || '';
     if (!resolvedTenantId) return;
 
     try {
@@ -1234,10 +1303,10 @@ export const AppProvider: React.FC<{
     } catch (e) {
       console.error('Erro ao marcar todas notificações como lidas no Store:', e);
     }
-  }, [activeTenant, barberId, userRole]);
+  }, [activeTenant, activeBarbershopId, userRole]);
 
   const deleteNotification = useCallback(async (id: string) => {
-    const resolvedTenantId = activeTenant?.id || barberId || '';
+    const resolvedTenantId = activeBarbershopId || activeTenant?.id || '';
     if (!resolvedTenantId) return;
 
     try {
@@ -1257,7 +1326,7 @@ export const AppProvider: React.FC<{
     } catch (e) {
       console.error('Erro ao deletar notificação no Store:', e);
     }
-  }, [activeTenant, barberId]);
+  }, [activeTenant, activeBarbershopId]);
 
   const addAppointment = useCallback(async (apt: Appointment, isExceptional?: boolean) => {
     // 1. Time normalization
@@ -1273,7 +1342,7 @@ export const AppProvider: React.FC<{
       finalObservation = `[EXCEPCIONAL] ${finalObservation}`.trim();
     }
 
-    const resolvedTenantId = apt.tenantId || activeTenant?.id || barberId || '';
+    const resolvedTenantId = apt.tenantId || activeBarbershopId || activeTenant?.id || '';
     const currentUserId = sessionRef.current?.user?.id;
     
     const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
@@ -1348,11 +1417,11 @@ export const AppProvider: React.FC<{
     }
 
     try {
-      const targetId = sessionRef.current?.user?.id || barberId;
+      const targetBarbershopId = resolvedTenantId || activeBarbershopId || activeTenant?.id;
 
-      if (targetId) {
+      if (targetBarbershopId) {
         try {
-          const savedApt = await supabaseService.saveAppointment(finalApt, targetId);
+          const savedApt = await supabaseService.saveAppointment(finalApt, targetBarbershopId);
           const normalizedSavedApt = normalizeAppointment(savedApt);
 
           // Update state with the real ID from Supabase
@@ -1365,15 +1434,13 @@ export const AppProvider: React.FC<{
           skipNextFetchRef.current[finalApt.date] = true;
           
           // Also save/update customer
-          // Instead of fetching all customers, we just upsert the current one.
-          // Supabase upsert will handle creation or update based on the phone (PK).
           await supabaseService.saveCustomer({ 
             phone: finalApt.phone, 
             name: finalApt.clientName, 
             cutCount: 0, 
             history: [], 
             photos: [] 
-          }, targetId);
+          }, targetBarbershopId);
         } catch (err) {
           throw err;
         }
@@ -1431,7 +1498,7 @@ export const AppProvider: React.FC<{
     };
     createAptNotifications();
 
-  }, [barberId, staff, addNotification, activeTenant]);
+  }, [activeBarbershopId, staff, addNotification, activeTenant]);
 
   const updateAppointment = useCallback(async (id: string, updates: Partial<Appointment>) => {
     let updatedApt: Appointment | undefined;
@@ -1584,7 +1651,7 @@ export const AppProvider: React.FC<{
         [normalizedPhone]: updatedCust
       };
     });
-  }, [addTransaction, barberId]);
+  }, [addTransaction, activeBarbershopId]);
 
   const markNoShow = useCallback(async (id: string) => {
     const apt = appointmentsRef.current.find(a => a.id === id);
@@ -1615,7 +1682,7 @@ export const AppProvider: React.FC<{
       sync();
 
       // Disparar notificações automáticas
-      const resolvedTenantId = apt.tenantId || activeTenant?.id || barberId || '';
+      const resolvedTenantId = apt.tenantId || activeBarbershopId || activeTenant?.id || '';
       if (resolvedTenantId) {
         const formattedDate = apt.date.split('-').reverse().join('/');
         addNotification({
@@ -1660,7 +1727,7 @@ export const AppProvider: React.FC<{
         [normalizedPhone]: updatedCust
       };
     });
-  }, [barberId, activeTenant, addNotification]);
+  }, [activeBarbershopId, activeTenant, addNotification]);
 
   const revertAppointment = useCallback(async (id: string) => {
     const apt = appointmentsRef.current.find(a => a.id === id);
@@ -1761,7 +1828,7 @@ export const AppProvider: React.FC<{
     }
 
     if (aptToDelete) {
-      const resolvedTenantId = aptToDelete.tenantId || activeTenant?.id || barberId || '';
+      const resolvedTenantId = aptToDelete.tenantId || activeBarbershopId || activeTenant?.id || '';
       if (resolvedTenantId) {
         const formattedDate = aptToDelete.date.split('-').reverse().join('/');
         addNotification({
@@ -1801,7 +1868,7 @@ export const AppProvider: React.FC<{
         }
       }
     }
-  }, [barberId, activeTenant, addNotification]);
+  }, [activeBarbershopId, activeTenant, addNotification]);
 
   const updateCustomerPhoto = useCallback(async (phone: string, base64Photo: string, description?: string) => {
     const val = validateBrazilianPhone(phone);
@@ -2083,7 +2150,7 @@ export const AppProvider: React.FC<{
 
   const updateBarberProfile = useCallback(async (profile: BarberProfile) => {
     setBarberProfile(profile);
-    const ownerUserId = sessionRef.current?.user?.id || barberId;
+    const ownerUserId = authenticatedUserId || sessionRef.current?.user?.id;
     if (ownerUserId) {
       setStaff(prev => prev.map(s => {
         if (s.userId === ownerUserId || s.id === ownerUserId) {
@@ -2103,7 +2170,7 @@ export const AppProvider: React.FC<{
     } catch (e) {
       console.error("Supabase sync error in updateBarberProfile", e);
     }
-  }, [barberId]);
+  }, [authenticatedUserId]);
 
   const addCustomer = useCallback(async (customer: Customer): Promise<Customer> => {
     const validation = validateBrazilianPhone(customer.phone);
@@ -2125,13 +2192,13 @@ export const AppProvider: React.FC<{
 
     // 2. Verificar se já existe no Supabase para esta barbearia
     let savedCustomer: any = null;
-    const targetId = sessionRef.current?.user?.id || barberId;
-    if (targetId) {
-      const existingDb = await supabaseService.checkDuplicateCustomer(customer.phone);
+    const targetBarbershopId = activeBarbershopId || activeTenant?.id;
+    if (targetBarbershopId) {
+      const existingDb = await supabaseService.checkDuplicateCustomer(customer.phone, targetBarbershopId);
       if (existingDb) {
         throw new Error(`Este número já está cadastrado para o cliente ${existingDb.name || 'outro cliente'}.`);
       }
-      savedCustomer = await supabaseService.saveCustomer(customer, targetId);
+      savedCustomer = await supabaseService.saveCustomer(customer, targetBarbershopId);
     }
 
     const finalCustomer: Customer = {
@@ -2148,7 +2215,7 @@ export const AppProvider: React.FC<{
     }));
 
     return finalCustomer;
-  }, [barberId]);
+  }, [activeBarbershopId, activeTenant?.id]);
 
   const reorderServices = useCallback(async (newServices: ServiceItem[]) => {
     setServices(newServices);
@@ -2169,7 +2236,7 @@ export const AppProvider: React.FC<{
   // Multi-staff helper callbacks
   const addStaff = useCallback(async (s: Omit<Staff, 'id' | 'tenantId'>) => {
     try {
-      const currentBarbershopId = activeTenant?.id || barbershop?.id || barberId;
+      const currentBarbershopId = activeBarbershopId || activeTenant?.id || barbershop?.id;
       if (!currentBarbershopId) {
         throw new Error('Contexto da barbearia não encontrado ao adicionar profissional.');
       }
@@ -2184,28 +2251,49 @@ export const AppProvider: React.FC<{
       console.error('Error adding staff member:', err);
       throw err;
     }
-  }, [activeTenant?.id, barbershop?.id, barberId]);
+  }, [activeBarbershopId, activeTenant?.id, barbershop?.id]);
+
+  const switchBarbershopContext = useCallback(async (barbershopId: string) => {
+    console.info('[STORE] Alternando contexto de barbearia para:', barbershopId);
+    selectedBarbershopIdRef.current = barbershopId;
+    setIsLoading(true);
+    await bootstrapSession(sessionRef.current);
+  }, [bootstrapSession]);
 
   const createStaffDirectly = useCallback(async (params: {
-    email: string;
+    email?: string;
     password?: string;
-    role: 'staff' | 'admin';
+    role?: 'staff' | 'admin';
     name: string;
     phone?: string;
+    photo?: string;
     commissionRate?: number;
     barbershopId?: string;
   }) => {
     try {
-      const currentBarbershopId = params.barbershopId || activeTenant?.id || barbershop?.id || barberId;
+      const currentBarbershopId = params.barbershopId || activeBarbershopId || activeTenant?.id || barbershop?.id;
       if (!currentBarbershopId) {
         throw new Error('Contexto da barbearia não encontrado.');
       }
+
+      const trimmedEmail = params.email?.trim().toLowerCase();
+      const trimmedPassword = params.password?.trim();
+
+      if (!trimmedEmail || !trimmedEmail.includes('@') || !trimmedPassword) {
+        throw new Error('E-mail e senha são obrigatórios. Todo profissional deve possuir credenciais de login para acessar o sistema.');
+      }
+
       const res = await supabaseService.createStaffDirectly({
-        ...params,
+        email: trimmedEmail,
+        password: trimmedPassword,
+        role: params.role || 'staff',
+        name: params.name.trim(),
+        phone: params.phone?.trim(),
+        commissionRate: params.commissionRate,
         barbershopId: currentBarbershopId
       });
 
-      // Passo obrigatório: executar getStaff(context.barbershopId) e atualizar a lista com o retorno do banco
+      // Atualizar a lista de profissionais diretamente com os dados autoritativos do banco
       const freshStaff = await supabaseService.getStaff(currentBarbershopId);
       setStaff(freshStaff);
 
@@ -2216,7 +2304,7 @@ export const AppProvider: React.FC<{
           return [...prev, {
             barbershopId: currentBarbershopId,
             userId: res.user_id,
-            role: params.role,
+            role: params.role || 'staff',
             joinedAt: new Date().toISOString(),
             name: params.name,
             phone: params.phone || ''
@@ -2225,18 +2313,18 @@ export const AppProvider: React.FC<{
       }
       return res;
     } catch (err: any) {
-      console.error('[CREATE_STAFF_STORE_04] Erro capturado no callback createStaffDirectly do Store:', {
-        message: err?.message || String(err),
-        stack: err?.stack || 'Sem stack disponível',
-        errorObject: err
-      });
+      if (err?.isValidationError) {
+        console.warn('[CREATE_STAFF_STORE] Validação ao criar profissional:', err.message);
+      } else {
+        console.error('[CREATE_STAFF_STORE] Erro inesperado no callback createStaffDirectly:', err);
+      }
       throw err;
     }
-  }, [activeTenant?.id, barbershop?.id, barberId]);
+  }, [activeBarbershopId, activeTenant?.id, barbershop?.id, barbershop?.ownerId]);
 
   const updateStaff = useCallback(async (id: string, updates: Partial<Staff>) => {
     try {
-      const currentBarbershopId = activeTenant?.id || barbershop?.id || barberId;
+      const currentBarbershopId = activeBarbershopId || activeTenant?.id || barbershop?.id;
       if (!currentBarbershopId) {
         throw new Error('Contexto da barbearia não encontrado ao atualizar profissional.');
       }
@@ -2274,23 +2362,47 @@ export const AppProvider: React.FC<{
       console.error('Error updating staff member:', err);
       throw err;
     }
-  }, [staff, activeTenant?.id, barbershop?.id, barberId]);
+  }, [staff, activeBarbershopId, activeTenant?.id, barbershop?.id]);
 
-  const deleteStaff = useCallback(async (id: string) => {
+  const removeStaffFromBarbershop = useCallback(async (params: {
+    staffProfileId: string;
+    staffUserId?: string | null;
+    barbershopId: string;
+  }) => {
     try {
-      await supabaseService.deleteStaff(id);
-      const currentBarbershopId = activeTenant?.id || barbershop?.id || barberId;
+      await supabaseService.removeStaffFromBarbershop(params);
+      const currentBarbershopId = params.barbershopId || activeBarbershopId || activeTenant?.id || barbershop?.id;
       if (currentBarbershopId) {
         const freshStaff = await supabaseService.getStaff(currentBarbershopId);
         setStaff(freshStaff);
       } else {
-        setStaff(prev => prev.filter(s => s.id !== id));
+        setStaff(prev => prev.map(s => s.id === params.staffProfileId ? { ...s, status: 'inactive' } : s));
       }
+    } catch (err) {
+      console.error('[removeStaffFromBarbershop] Erro:', err);
+      throw err;
+    }
+  }, [activeBarbershopId, activeTenant?.id, barbershop?.id]);
+
+  const deleteStaff = useCallback(async (id: string) => {
+    try {
+      const currentBarbershopId = activeBarbershopId || activeTenant?.id || barbershop?.id;
+      if (!currentBarbershopId) {
+        throw new Error('Contexto da barbearia não encontrado ao remover profissional.');
+      }
+      const target = staff.find(s => s.id === id);
+      await supabaseService.removeStaffFromBarbershop({
+        staffProfileId: id,
+        staffUserId: target?.userId,
+        barbershopId: currentBarbershopId
+      });
+      const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+      setStaff(freshStaff);
     } catch (err) {
       console.error('Error deleting staff member:', err);
       throw err;
     }
-  }, [activeTenant?.id, barbershop?.id, barberId]);
+  }, [activeBarbershopId, activeTenant?.id, barbershop?.id, staff]);
 
   const getStaffAvailability = useCallback(async (staffId: string) => {
     try {
@@ -2325,7 +2437,19 @@ export const AppProvider: React.FC<{
       isLoading,
       
       // Multi-tenant & Multi-staff state exports
+      activeContext,
+      activeBarbershopId,
+      activeMembershipRole,
+      activeStaffProfileId,
+      authenticatedUserId,
+      barberId: activeBarbershopId,
       activeTenant,
+      authContext,
+      authContextResult,
+      userContexts,
+      switchBarbershopContext,
+      selectActiveContext: switchBarbershopContext,
+      openContextSelector: () => {},
       staff,
       currentStaff,
       userRole,
@@ -2336,6 +2460,7 @@ export const AppProvider: React.FC<{
       createStaffDirectly,
       updateStaff,
       deleteStaff,
+      removeStaffFromBarbershop,
       getStaffAvailability,
       saveStaffAvailability,
 

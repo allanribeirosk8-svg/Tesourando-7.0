@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft, Calendar, Coffee, ArrowLeft, Mail, Lock, Shield, Camera } from 'lucide-react';
+import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft, Calendar, Coffee, ArrowLeft, Mail, Lock, Shield, Camera, AlertTriangle, AlertCircle } from 'lucide-react';
 import { useStore } from '../context/Store';
 import { Staff, StaffAvailability } from '../types';
 import { compressImage, formatPhone } from '../utils/helpers';
@@ -11,7 +11,7 @@ interface StaffConfigModalProps {
 }
 
 export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) => {
-  const { staff, addStaff, createStaffDirectly, updateStaff, deleteStaff, userRole, session, barberProfile, activeTenant, updateBarberProfile } = useStore();
+  const { staff, addStaff, createStaffDirectly, updateStaff, deleteStaff, removeStaffFromBarbershop, userRole, session, barberProfile, activeTenant, updateBarberProfile } = useStore();
   
   // Telas internas: 'list' | 'edit_form'
   const [view, setView] = useState<'list' | 'edit_form'>('list');
@@ -25,8 +25,8 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
     return (
       member.id === tenantOwnerId || 
       member.userId === tenantOwnerId || 
+      member.role === 'owner' ||
       member.role === 'admin' ||
-      member.role === 'admin_owner' ||
       (userRole === 'admin_owner' && (member.userId === session?.user?.id || member.id === session?.user?.id))
     );
   }, [activeTenant?.id, barberProfile?.id, session?.user?.id, userRole]);
@@ -65,12 +65,34 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
   const [photo, setPhoto] = useState('');
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const emailContainerRef = useRef<HTMLDivElement>(null);
+  const emailInputRef = useRef<HTMLInputElement>(null);
   
-  // Novos campos para criação direta com email e senha
+  // Campos para login obrigatório do profissional
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<'staff' | 'admin'>('staff');
   
+  // Mensagem de erro visual do formulário (exibida exclusivamente na caixa do e-mail)
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // Rolar suavemente e posicionar a visão diretamente na caixa de e-mail ao ocorrer erro
+  const scrollToEmail = () => {
+    setTimeout(() => {
+      if (emailContainerRef.current) {
+        emailContainerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else if (emailInputRef.current) {
+        emailInputRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      emailInputRef.current?.focus({ preventScroll: true });
+    }, 50);
+  };
+
+  // Estado para modal de confirmação de remoção
+  const [staffToRemove, setStaffToRemove] = useState<Staff | null>(null);
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Upload e compressão da foto de perfil
@@ -88,9 +110,10 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
   // Inicializar formulário de cadastro/edição
   const openEditForm = (member: Staff | null) => {
     setSelectedStaffMember(member);
+    setFormError(null);
     if (member) {
       const isOwner = isOwnerMember(member);
-      const currentRole = isOwner ? 'admin' : (member.role === 'admin' || member.role === 'admin_owner' ? 'admin' : 'staff');
+      const currentRole = isOwner ? 'admin' : (member.role === 'admin' || member.role === 'owner' ? 'admin' : 'staff');
 
       setName(member.name);
       setPhone(formatPhone(member.phone || ''));
@@ -115,7 +138,48 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
 
   const handleSaveStaff = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    setFormError(null);
+
+    if (!name.trim()) {
+      setFormError('Por favor, informe o nome do profissional.');
+      return;
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPass = password.trim();
+
+    // Validações exclusivas para novos colaboradores com login obrigatório
+    if (!selectedStaffMember) {
+      if (!trimmedEmail || !trimmedEmail.includes('@')) {
+        setFormError('Por favor, informe um e-mail válido para criar o login do profissional.');
+        scrollToEmail();
+        return;
+      }
+
+      // Validação de e-mail do proprietário
+      if (session?.user?.email && session.user.email.toLowerCase() === trimmedEmail) {
+        setFormError('Este e-mail pertence à sua conta de proprietário. Digite um e-mail exclusivo para o profissional.');
+        scrollToEmail();
+        return;
+      }
+
+      // Validação local imediata caso o e-mail já esteja registrado em outro profissional da lista
+      const emailAlreadyInStaffList = staff.some(s => 
+        (s.email && s.email.toLowerCase() === trimmedEmail) ||
+        (s.userId && s.userId === session?.user?.id && session?.user?.email?.toLowerCase() === trimmedEmail)
+      );
+      if (emailAlreadyInStaffList) {
+        setFormError('Este e-mail já está sendo utilizado por outro profissional nesta barbearia.');
+        scrollToEmail();
+        return;
+      }
+
+      if (!trimmedPass || trimmedPass.length < 6) {
+        setFormError('A senha provisória do profissional deve ter no mínimo 6 caracteres.');
+        return;
+      }
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -143,38 +207,47 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
           });
         }
       } else {
-        // Se preencheu e-mail, cria direto com e-mail e senha!
-        if (email.trim()) {
-          await createStaffDirectly({
-            email: email.trim(),
-            password: password.trim() || undefined,
-            role: role,
-            name: name.trim(),
-            phone: phone.trim(),
-            commissionRate: commRate
-          });
-        } else {
-          // Fallback se não preencheu e-mail
-          await addStaff({
-            name: name.trim(),
-            phone: phone.trim(),
-            commissionRate: commRate,
-            status: 'active',
-            photo: photo || undefined,
-            role: role
-          });
-        }
+        await createStaffDirectly({
+          email: trimmedEmail,
+          password: trimmedPass,
+          role: role,
+          name: name.trim(),
+          phone: phone.trim(),
+          photo: photo || undefined,
+          commissionRate: commRate
+        });
       }
       setView('list');
     } catch (err: any) {
-      console.error('[CREATE_STAFF_UI_02] Erro capturado na UI durante a criação de profissional:', {
-        message: err?.message || String(err),
-        stack: err?.stack || 'Sem stack disponível',
-        errorObject: err
-      });
-      alert(err?.message || 'Erro ao salvar profissional. Verifique os dados e tente novamente.');
+      if (err?.isValidationError) {
+        console.warn('[CREATE_STAFF_UI] Validação impediu o cadastro:', err.message);
+      } else {
+        console.error('[CREATE_STAFF_UI] Erro inesperado ao salvar profissional:', err);
+      }
+      const errorMsg = err?.message || 'Erro ao salvar profissional. Verifique os dados e tente novamente.';
+      setFormError(errorMsg);
+      scrollToEmail();
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleConfirmRemoveStaff = async () => {
+    if (!staffToRemove) return;
+    setIsRemoving(true);
+    setRemoveError(null);
+    try {
+      await removeStaffFromBarbershop({
+        staffProfileId: staffToRemove.id,
+        staffUserId: staffToRemove.userId,
+        barbershopId: activeTenant?.id || ''
+      });
+      setStaffToRemove(null);
+    } catch (err: any) {
+      console.error('[REMOVE_STAFF] Erro ao remover profissional:', err);
+      setRemoveError(err?.message || 'Erro ao remover profissional. Tente novamente.');
+    } finally {
+      setIsRemoving(false);
     }
   };
 
@@ -241,11 +314,14 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
           {/* VISÃO 1: Listagem de Profissionais */}
           {view === 'list' && (
             <div className="space-y-4">
-              <div className="flex justify-between items-center">
-                <span className="text-xs font-bold text-title uppercase tracking-wider">{staffListToRender.length} profissionais na equipe</span>
+              <div className="flex justify-between items-center gap-2">
+                <span className="text-[8px] font-bold text-title uppercase tracking-wider">
+                  {staffListToRender.length} profissionais na equipe
+                </span>
                 <button
                   onClick={() => openEditForm(null)}
-                  className="flex items-center gap-1.5 py-2 px-4 rounded-xl bg-primary hover:bg-primary/95 text-xs font-bold text-white transition-all active:scale-95"
+                  style={{ width: '152.953px', height: '31px' }}
+                  className="w-[153px] h-[31px] flex items-center justify-center gap-1.5 rounded-xl bg-primary hover:bg-primary/95 text-xs font-bold text-white transition-all active:scale-95 shrink-0"
                 >
                   <Plus size={14} />
                   <span>Novo Profissional</span>
@@ -330,8 +406,12 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                           </button>
                           {!isOwner && (
                             <button
-                              onClick={() => handleDeleteStaff(member.id)}
-                              className="w-8 h-8 rounded-lg bg-red-500/10 hover:bg-red-500/20 flex items-center justify-center text-red-500"
+                              onClick={() => {
+                                setStaffToRemove(member);
+                                setRemoveError(null);
+                              }}
+                              title="Remover profissional"
+                              className="w-8 h-8 rounded-lg bg-red-500/10 hover:bg-red-500/20 active:scale-95 flex items-center justify-center text-red-500 transition-all"
                             >
                               <Trash2 size={12} />
                             </button>
@@ -425,37 +505,74 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
               </div>
 
               {!selectedStaffMember && (
-                <div className="pt-2 mt-2 border-t border-white/5 space-y-4">
-                  <div className="text-xs font-black text-secondary uppercase tracking-widest flex items-center gap-1.5">
-                    <Shield size={12} className="text-primary" />
-                    Acesso ao Sistema (Opcional)
-                  </div>
-                  <p className="text-[11px] text-title leading-relaxed">
-                    Preencha o e-mail e a senha abaixo se quiser criar uma conta de acesso para que o profissional faça login no aplicativo. Se deixado em branco, ele será cadastrado apenas localmente/para fins de agenda.
-                  </p>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-title uppercase tracking-wider">E-mail do Profissional</label>
-                    <div className="relative">
-                      <Mail size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-title" />
-                      <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="Ex: profissional@email.com"
-                        className="w-full bg-black/20 text-white rounded-xl py-3 pl-11 pr-4 border border-white/10 focus:border-primary focus:outline-none text-sm transition-colors"
-                      />
+                <div className="pt-3 mt-3 border-t border-white/5 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Shield size={15} className="text-primary shrink-0" />
+                    <div>
+                      <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                        Acesso ao Sistema (Login Obrigatório)
+                      </h4>
+                      <p className="text-[11px] text-title/70">
+                        Defina o e-mail e a senha que o profissional usará para acessar a agenda no aplicativo.
+                      </p>
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-title uppercase tracking-wider">Senha Provisória</label>
+                  <div className="space-y-1.5 pt-1" ref={emailContainerRef}>
+                    <label className="text-xs font-bold text-title uppercase tracking-wider flex items-center justify-between">
+                      <span>E-mail do Profissional</span>
+                      <span className="text-[10px] font-bold text-amber-400">obrigatório</span>
+                    </label>
+                    <div className="relative">
+                      <Mail size={16} className={`absolute left-4 top-1/2 -translate-y-1/2 transition-colors ${
+                        formError ? 'text-red-400' : 'text-title'
+                      }`} />
+                      <input
+                        id="staff-email-input"
+                        ref={emailInputRef}
+                        type="email"
+                        required
+                        value={email}
+                        onChange={(e) => {
+                          setEmail(e.target.value);
+                          if (formError) setFormError(null);
+                        }}
+                        placeholder="profissional@email.com"
+                        className={`w-full bg-black/20 text-white rounded-xl py-3 pl-11 pr-4 border text-sm transition-all focus:outline-none ${
+                          formError
+                            ? 'border-red-500 ring-2 ring-red-500/20 focus:border-red-400'
+                            : 'border-white/10 focus:border-primary'
+                        }`}
+                      />
+                    </div>
+                    {formError && (
+                      <p 
+                        id="staff-email-error-message"
+                        role="alert"
+                        className="text-xs font-medium text-red-400 flex items-center gap-1.5 pt-1 animate-in fade-in"
+                      >
+                        <AlertCircle size={13} className="shrink-0 text-red-400" />
+                        <span>{formError}</span>
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-title uppercase tracking-wider flex items-center justify-between">
+                      <span>Senha Provisória</span>
+                      <span className="text-[10px] font-bold text-amber-400">mín. 6 dígitos</span>
+                    </label>
                     <div className="relative">
                       <Lock size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-title" />
                       <input
+                        id="staff-password-input"
                         type="password"
+                        required
                         value={password}
-                        onChange={(e) => setPassword(e.target.value)}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          if (formError) setFormError(null);
+                        }}
                         placeholder="Min. 6 caracteres (Ex: Mudar@123)"
                         className="w-full bg-black/20 text-white rounded-xl py-3 pl-11 pr-4 border border-white/10 focus:border-primary focus:outline-none text-sm transition-colors"
                       />
@@ -464,8 +581,8 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                 </div>
               )}
 
-              {/* Cargo / Nível de Acesso (Disponível tanto na criação quanto na edição) */}
-              <div className="pt-2 mt-2 border-t border-white/5 space-y-3">
+              {/* Cargo / Nível de Acesso (Sempre visível para definir o papel no sistema) */}
+              <div className="pt-3 mt-3 border-t border-white/5 space-y-3">
                 <label className="text-xs font-bold text-title uppercase tracking-wider flex items-center gap-1.5">
                   <Shield size={14} className="text-[#F99417]" />
                   <span>Nível de Acesso (Cargo)</span>
@@ -560,7 +677,7 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                 )}
               </div>
 
-              {selectedStaffMember && (
+            {selectedStaffMember && (
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-title uppercase tracking-wider">Status do Profissional</label>
                   <div className="grid grid-cols-2 gap-3">
@@ -593,7 +710,10 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
               <div className="pt-4 flex gap-3">
                 <button
                   type="button"
-                  onClick={() => setView('list')}
+                  onClick={() => {
+                    setFormError(null);
+                    setView('list');
+                  }}
                   className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-white/5 hover:bg-white/10 active:scale-95 transition-all border border-white/5"
                 >
                   Cancelar
@@ -612,6 +732,95 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
 
         </div>
       </motion.div>
+
+      {/* MODAL DE CONFIRMAÇÃO DE REMOÇÃO DE PROFISSIONAL */}
+      <AnimatePresence>
+        {staffToRemove && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/70 backdrop-blur-md p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#1E1B4B] w-full max-w-md rounded-[2rem] p-6 shadow-2xl border border-white/15 text-left space-y-4"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-red-500/20 text-red-400 flex items-center justify-center shrink-0 border border-red-500/30">
+                  <AlertTriangle size={24} />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white uppercase tracking-tight">Remover Profissional</h3>
+                  <p className="text-xs text-white/60 font-medium">Revogar acesso à barbearia</p>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-white/5 border border-white/10 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-secondary/20 flex items-center justify-center font-bold text-secondary text-sm overflow-hidden shrink-0">
+                  {staffToRemove.photo ? (
+                    <img src={staffToRemove.photo} alt={staffToRemove.name} className="w-full h-full object-cover" />
+                  ) : (
+                    staffToRemove.name.substring(0, 2).toUpperCase()
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-white truncate">{staffToRemove.name}</p>
+                  <p className="text-xs text-title/70">{staffToRemove.phone || 'Sem telefone'}</p>
+                </div>
+              </div>
+
+              <p className="text-sm text-gray-300 leading-relaxed">
+                Este profissional perderá o acesso a esta barbearia. O histórico, atendimentos e comissões serão mantidos. Agendamentos futuros precisarão ser tratados separadamente.
+              </p>
+
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs space-y-1">
+                <p className="font-bold flex items-center gap-1.5 text-amber-300">
+                  <AlertTriangle size={14} />
+                  O que acontece com os dados:
+                </p>
+                <ul className="list-disc list-inside text-[11px] text-white/80 space-y-0.5">
+                  <li>O profissional não aparecerá mais para novos agendamentos</li>
+                  <li>Atendimentos anteriores continuam no histórico e no caixa</li>
+                  <li>A conta de usuário do profissional permanece preservada</li>
+                </ul>
+              </div>
+
+              {removeError && (
+                <div className="p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-200 text-xs font-medium">
+                  {removeError}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isRemoving}
+                  onClick={() => {
+                    setStaffToRemove(null);
+                    setRemoveError(null);
+                  }}
+                  className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-white/5 hover:bg-white/10 active:scale-95 transition-all border border-white/10 disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={isRemoving}
+                  onClick={handleConfirmRemoveStaff}
+                  className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-red-500 hover:bg-red-600 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-500/20 disabled:opacity-50"
+                >
+                  {isRemoving ? (
+                    <span>Removendo...</span>
+                  ) : (
+                    <>
+                      <Trash2 size={16} />
+                      <span>Confirmar Remoção</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* UNIFIED WORK SCHEDULE MODAL */}
       {scheduleModalStaff && (

@@ -1,5 +1,5 @@
 import { supabase } from '../lib/supabase';
-import { Appointment, BarberProfile, Customer, DayConfig, ServiceItem, Staff, Tenant, StaffAvailability, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState } from '../types';
+import { Appointment, BarberProfile, Customer, DayConfig, ServiceItem, Staff, Tenant, StaffAvailability, Barbershop, BarbershopMember, BarbershopInvite, OnboardingState, AccessKind, UserBarbershopContext, AuthContextResult, ActiveContext, MembershipRole, TenantContext, AuthContext, SetupMode } from '../types';
 import { normalizePhone, normalizeTime, validateBrazilianPhone, normalizeBrazilianPhoneForComparison } from '../utils/helpers';
 
 export function normalizeRequestedSlug(rawSlug: string): string {
@@ -244,27 +244,27 @@ export const supabaseService = {
   },
 
   // Services
-  async getServices(targetUserIdOrBarbershopId?: string) {
+  async getServices(targetBarbershopId?: string) {
     try {
-      const idToUse = targetUserIdOrBarbershopId || await this.getUserId();
+      let barbershopId = targetBarbershopId;
+      if (!barbershopId) {
+        const userId = await this.getUserId();
+        if (!userId) return [];
+        const activeCtx = await this.resolveSingleActiveContext(userId);
+        if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+          barbershopId = activeCtx.barbershopId;
+        }
+      }
 
-      if (!idToUse) {
+      if (!barbershopId) {
         return [];
       }
 
-      const ctx = await this.resolveTenantContext(idToUse);
-      const barbershopId = ctx.barbershopId;
-      const ownerId = ctx.tenantOwnerId || idToUse;
-      const memberIds = ctx.memberUserIds && ctx.memberUserIds.length > 0 ? ctx.memberUserIds : [ownerId, idToUse];
-
-      let query = supabase.from('services').select('*');
-      if (barbershopId) {
-        query = query.or(`barbershop_id.eq.${barbershopId},user_id.in.(${memberIds.join(',')}),user_id.eq.${ownerId}`);
-      } else {
-        query = query.or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
-      }
-
-      const { data, error } = await query.order('order_index', { ascending: true });
+      const { data, error } = await supabase
+        .from('services')
+        .select('*')
+        .eq('barbershop_id', barbershopId)
+        .order('order_index', { ascending: true });
       
       if (error) {
         throw error;
@@ -285,14 +285,21 @@ export const supabaseService = {
       return handleNetworkError('getServices', err, []);
     }
   },
-  async saveServices(services: ServiceItem[]) {
-    const { role, userId } = await this.getUserRoleAndTenant();
-    if (role !== 'admin_owner' || !userId) {
-      throw new Error('Apenas o proprietário do salão (admin_owner) pode salvar ou gerenciar serviços.');
+  async saveServices(services: ServiceItem[], explicitBarbershopId?: string) {
+    const userId = await this.getUserId();
+    if (!userId) throw new Error('Usuário não autenticado');
+
+    let barbershopId = explicitBarbershopId;
+    if (!barbershopId) {
+      const activeCtx = await this.resolveSingleActiveContext(userId);
+      if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+        barbershopId = activeCtx.barbershopId;
+      }
     }
 
-    const ctx = await this.resolveTenantContext(userId);
-    const barbershopId = ctx.barbershopId;
+    if (!barbershopId) {
+      throw new Error('Contexto de barbearia não encontrado para salvar serviços.');
+    }
 
     const existingIds = services.map(s => s.id);
 
@@ -300,30 +307,25 @@ export const supabaseService = {
       await supabase
         .from('services')
         .delete()
-        .eq('user_id', userId)
+        .eq('barbershop_id', barbershopId)
         .not('id', 'in', `(${existingIds.join(',')})`);
     } else {
       await supabase
         .from('services')
         .delete()
-        .eq('user_id', userId);
+        .eq('barbershop_id', barbershopId);
     }
 
     const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-    const payload = services.map((s, index) => {
-      const item: any = {
-        id: isUUID(s.id) ? s.id : crypto.randomUUID(),
-        user_id: userId,
-        name: s.name,
-        price: s.price,
-        duration: s.duration,
-        order_index: index
-      };
-      if (barbershopId) {
-        item.barbershop_id = barbershopId;
-      }
-      return item;
-    });
+    const payload = services.map((s, index) => ({
+      id: isUUID(s.id) ? s.id : crypto.randomUUID(),
+      barbershop_id: barbershopId,
+      user_id: userId,
+      name: s.name,
+      price: s.price,
+      duration: s.duration,
+      order_index: index
+    }));
 
     const { data, error } = await supabase.from('services')
       .upsert(payload as any)
@@ -341,13 +343,24 @@ export const supabaseService = {
       duration: s.duration
     })) as ServiceItem[];
   },
-  async deleteService(id: string) {
-    const { role, userId } = await this.getUserRoleAndTenant();
-    if (role !== 'admin_owner' || !userId) {
-      throw new Error('Apenas o proprietário do salão (admin_owner) pode excluir serviços.');
+  async deleteService(id: string, explicitBarbershopId?: string) {
+    const userId = await this.getUserId();
+    if (!userId) throw new Error('Usuário não autenticado');
+
+    let barbershopId = explicitBarbershopId;
+    if (!barbershopId) {
+      const activeCtx = await this.resolveSingleActiveContext(userId);
+      if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+        barbershopId = activeCtx.barbershopId;
+      }
     }
 
-    const { error } = await supabase.from('services').delete().eq('id', id).eq('user_id', userId);
+    let query = supabase.from('services').delete().eq('id', id);
+    if (barbershopId) {
+      query = query.eq('barbershop_id', barbershopId);
+    }
+
+    const { error } = await query;
     if (error) throw error;
   },
 
@@ -642,14 +655,18 @@ export const supabaseService = {
         .eq('phone', customer.phone);
     }
   },
-  async checkDuplicateCustomer(phone: string) {
-    const sessionRes = await supabase.auth.getSession();
-    const currentAuthId = sessionRes?.data?.session?.user?.id;
-    const userId = currentAuthId || await this.getUserId();
-    if (!userId) return null;
+  async checkDuplicateCustomer(phone: string, targetBarbershopId?: string) {
+    let barbershopId = targetBarbershopId;
+    if (!barbershopId) {
+      const sessionRes = await supabase.auth.getSession();
+      const currentAuthId = sessionRes?.data?.session?.user?.id;
+      const userId = currentAuthId || await this.getUserId();
+      if (!userId) return null;
 
-    const ctx = await this.resolveTenantContext(userId);
-    const barbershopId = ctx.barbershopId;
+      const ctx = await this.resolveTenantContext(userId);
+      barbershopId = ctx.barbershopId;
+    }
+
     if (!barbershopId) {
       throw new Error('Contexto da barbearia não encontrado ao verificar duplicidade.');
     }
@@ -1036,30 +1053,28 @@ export const supabaseService = {
   },
 
   // Weekly Schedule
-  async getWeeklySchedule(targetUserId?: string) {
+  async getWeeklySchedule(targetBarbershopId?: string) {
     try {
-      const idToUse = targetUserId || await this.getUserId();
-      if (!idToUse) return {};
-
-      let ownerId = idToUse;
-      const { data: shop } = await supabase
-        .from('barbershops')
-        .select('owner_id')
-        .eq('id', idToUse)
-        .maybeSingle();
-
-      if (shop?.owner_id) {
-        ownerId = shop.owner_id;
+      let barbershopId = targetBarbershopId;
+      if (!barbershopId) {
+        const userId = await this.getUserId();
+        if (!userId) return {};
+        const activeCtx = await this.resolveSingleActiveContext(userId);
+        if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+          barbershopId = activeCtx.barbershopId;
+        }
       }
+
+      if (!barbershopId) return {};
 
       const { data: schedule, error: sError } = await supabase
         .from('weekly_schedule')
         .select('*')
-        .or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
+        .eq('barbershop_id', barbershopId);
       const { data: breaks, error: bError } = await supabase
         .from('weekly_breaks')
         .select('*')
-        .or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
+        .eq('barbershop_id', barbershopId);
       if (sError || bError) throw sError || bError;
 
       const result: Record<number, DayConfig> = {};
@@ -1082,22 +1097,30 @@ export const supabaseService = {
       return {};
     }
   },
-  async saveWeeklySchedule(day: number, config: DayConfig) {
-    const { role, userId, barbershopId } = await this.getUserRoleAndTenant();
-    if (role !== 'admin_owner' || !userId) {
-      throw new Error('Apenas o proprietário do salão (admin_owner) pode alterar a agenda de padrão semanal.');
+  async saveWeeklySchedule(day: number, config: DayConfig, explicitBarbershopId?: string) {
+    const userId = await this.getUserId();
+    if (!userId) throw new Error('Usuário não autenticado');
+
+    let barbershopId = explicitBarbershopId;
+    if (!barbershopId) {
+      const activeCtx = await this.resolveSingleActiveContext(userId);
+      if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+        barbershopId = activeCtx.barbershopId;
+      }
+    }
+
+    if (!barbershopId) {
+      throw new Error('Barbershop ID obrigatório para salvar agenda semanal.');
     }
 
     const payload: any = {
       user_id: userId,
+      barbershop_id: barbershopId,
       day_of_week: day,
       start_time: normalizeTime(config.start),
       end_time: normalizeTime(config.end),
       is_open: config.isOpen
     };
-    if (barbershopId) {
-      payload.barbershop_id = barbershopId;
-    }
 
     const { error } = await supabase.from('weekly_schedule').upsert(payload as any).select();
     
@@ -1109,36 +1132,29 @@ export const supabaseService = {
       new Set(rawBreaks.map(time => normalizeTime(time)).filter(Boolean))
     );
 
-    // Delete existing breaks for this day and user
+    // Delete existing breaks for this day and barbershop
     const { error: delError } = await supabase
       .from('weekly_breaks')
       .delete()
       .eq('day_of_week', day)
-      .eq('user_id', userId);
+      .eq('barbershop_id', barbershopId);
     if (delError) {
       console.warn('[saveWeeklySchedule] Aviso ao limpar breaks anteriores:', delError);
     }
 
     if (uniqueBreaks.length > 0) {
-      const breakPayloads = uniqueBreaks.map(time => {
-        const row: any = {
-          user_id: userId,
-          day_of_week: day,
-          time: normalizeTime(time)
-        };
-        if (barbershopId) {
-          row.barbershop_id = barbershopId;
-        }
-        return row;
-      });
+      const breakPayloads = uniqueBreaks.map(time => ({
+        user_id: userId,
+        barbershop_id: barbershopId,
+        day_of_week: day,
+        time: normalizeTime(time)
+      }));
 
-      // Upsert with onConflict to avoid 23505 race conditions
       const { error: bError } = await supabase
         .from('weekly_breaks')
-        .upsert(breakPayloads as any, { onConflict: 'day_of_week,time,user_id', ignoreDuplicates: true });
+        .upsert(breakPayloads as any, { onConflict: 'day_of_week,time,barbershop_id', ignoreDuplicates: true });
       
       if (bError && (bError as any).code !== '23505') {
-        // Fallback standard insert, ignoring duplicate key code 23505 if another concurrent call inserted it
         const { error: insertErr } = await supabase.from('weekly_breaks').insert(breakPayloads as any);
         if (insertErr && (insertErr as any).code !== '23505') {
           console.error('[saveWeeklySchedule] Erro ao inserir breaks semanais:', insertErr);
@@ -1149,26 +1165,23 @@ export const supabaseService = {
   },
 
   // Blocked/Unblocked Slots
-  async getBlockedSlots(targetUserId?: string) {
+  async getBlockedSlots(targetBarbershopId?: string) {
     try {
-      const idToUse = targetUserId || await this.getUserId();
-      if (!idToUse) return {};
-
-      let ownerId = idToUse;
-      const { data: shop } = await supabase
-        .from('barbershops')
-        .select('owner_id')
-        .eq('id', idToUse)
-        .maybeSingle();
-
-      if (shop?.owner_id) {
-        ownerId = shop.owner_id;
+      let barbershopId = targetBarbershopId;
+      if (!barbershopId) {
+        const userId = await this.getUserId();
+        if (!userId) return {};
+        const activeCtx = await this.resolveSingleActiveContext(userId);
+        if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+          barbershopId = activeCtx.barbershopId;
+        }
       }
+      if (!barbershopId) return {};
 
       const { data, error } = await supabase
         .from('blocked_slots')
         .select('*')
-        .or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
+        .eq('barbershop_id', barbershopId);
       if (error) throw error;
       if (!data) return {};
       const result: Record<string, string[]> = {};
@@ -1182,36 +1195,43 @@ export const supabaseService = {
       return {};
     }
   },
-  async saveBlockedSlot(date: string, time: string, isBlocked: boolean) {
+  async saveBlockedSlot(date: string, time: string, isBlocked: boolean, explicitBarbershopId?: string) {
     const userId = await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
+    
+    let barbershopId = explicitBarbershopId;
+    if (!barbershopId) {
+      const activeCtx = await this.resolveSingleActiveContext(userId);
+      if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+        barbershopId = activeCtx.barbershopId;
+      }
+    }
+    if (!barbershopId) throw new Error('Contexto de barbearia não encontrado para horário bloqueado.');
 
     if (isBlocked) {
-      await supabase.from('blocked_slots').upsert({ user_id: userId, date, time: normalizeTime(time) } as any);
+      const payload: any = { user_id: userId, barbershop_id: barbershopId, date, time: normalizeTime(time) };
+      await supabase.from('blocked_slots').upsert(payload);
     } else {
-      await supabase.from('blocked_slots').delete().match({ user_id: userId, date, time: normalizeTime(time) });
+      await supabase.from('blocked_slots').delete().match({ barbershop_id: barbershopId, date, time: normalizeTime(time) });
     }
   },
-  async getUnblockedSlots(targetUserId?: string) {
+  async getUnblockedSlots(targetBarbershopId?: string) {
     try {
-      const idToUse = targetUserId || await this.getUserId();
-      if (!idToUse) return {};
-
-      let ownerId = idToUse;
-      const { data: shop } = await supabase
-        .from('barbershops')
-        .select('owner_id')
-        .eq('id', idToUse)
-        .maybeSingle();
-
-      if (shop?.owner_id) {
-        ownerId = shop.owner_id;
+      let barbershopId = targetBarbershopId;
+      if (!barbershopId) {
+        const userId = await this.getUserId();
+        if (!userId) return {};
+        const activeCtx = await this.resolveSingleActiveContext(userId);
+        if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+          barbershopId = activeCtx.barbershopId;
+        }
       }
+      if (!barbershopId) return {};
 
       const { data, error } = await supabase
         .from('unblocked_slots')
         .select('*')
-        .or(`user_id.eq.${idToUse},user_id.eq.${ownerId}`);
+        .eq('barbershop_id', barbershopId);
       if (error) throw error;
       if (!data) return {};
       const result: Record<string, string[]> = {};
@@ -1225,14 +1245,24 @@ export const supabaseService = {
       return {};
     }
   },
-  async saveUnblockedSlot(date: string, time: string, isUnblocked: boolean) {
+  async saveUnblockedSlot(date: string, time: string, isUnblocked: boolean, explicitBarbershopId?: string) {
     const userId = await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
+    
+    let barbershopId = explicitBarbershopId;
+    if (!barbershopId) {
+      const activeCtx = await this.resolveSingleActiveContext(userId);
+      if ('barbershopId' in activeCtx && activeCtx.barbershopId) {
+        barbershopId = activeCtx.barbershopId;
+      }
+    }
+    if (!barbershopId) throw new Error('Contexto de barbearia não encontrado para horário desbloqueado.');
 
     if (isUnblocked) {
-      await supabase.from('unblocked_slots').upsert({ user_id: userId, date, time: normalizeTime(time) } as any);
+      const payload: any = { user_id: userId, barbershop_id: barbershopId, date, time: normalizeTime(time) };
+      await supabase.from('unblocked_slots').upsert(payload);
     } else {
-      await supabase.from('unblocked_slots').delete().match({ user_id: userId, date, time: normalizeTime(time) });
+      await supabase.from('unblocked_slots').delete().match({ barbershop_id: barbershopId, date, time: normalizeTime(time) });
     }
   },
 
@@ -1328,20 +1358,53 @@ export const supabaseService = {
         .select('user_id, role')
         .eq('barbershop_id', barbershopId);
 
-      const memberRoleMap = new Map<string, 'admin' | 'staff'>();
+      const memberRoleMap = new Map<string, MembershipRole>();
       if (shop?.owner_id) {
-        memberRoleMap.set(shop.owner_id, 'admin');
+        memberRoleMap.set(shop.owner_id, 'owner');
       }
       if (memberRows) {
         for (const m of memberRows) {
           if (m.user_id) {
-            const resolvedRole = (m.role === 'owner' || m.role === 'admin') ? 'admin' : 'staff';
+            const resolvedRole: MembershipRole = m.role === 'owner' ? 'owner' : (m.role === 'admin' ? 'admin' : 'staff');
             memberRoleMap.set(m.user_id, resolvedRole);
           }
         }
       }
 
-      const rawMembers: any[] = data || [];
+      let rawMembers: any[] = data || [];
+
+      // Se o owner tem barbershop_member mas não tem staff_profiles, criar um registro real no banco
+      const ownerUserId = shop?.owner_id;
+      if (ownerUserId && !rawMembers.some(s => s.user_id === ownerUserId)) {
+        try {
+          const { data: ownerProf } = await supabase
+            .from('profiles')
+            .select('name, personal_phone, photo')
+            .eq('id', ownerUserId)
+            .maybeSingle();
+
+          const { data: newOwnerStaff } = await supabase
+            .from('staff_profiles')
+            .insert({
+              barbershop_id: barbershopId,
+              user_id: ownerUserId,
+              name: ownerProf?.name || 'Proprietário',
+              phone: ownerProf?.personal_phone || '',
+              photo: ownerProf?.photo || null,
+              status: 'active',
+              commission_rate: 0
+            })
+            .select()
+            .single();
+
+          if (newOwnerStaff) {
+            rawMembers = [newOwnerStaff, ...rawMembers];
+          }
+        } catch (ownerStaffErr) {
+          console.warn('[getStaff] Aviso ao garantir staff_profiles para o proprietário:', ownerStaffErr);
+        }
+      }
+
       const seenUserIds = new Set<string>();
       const seenIds = new Set<string>();
       const deduplicatedStaff: Staff[] = [];
@@ -1360,22 +1423,34 @@ export const supabaseService = {
         }
         seenIds.add(s.id);
 
-        const resolvedRole = (s.user_id && memberRoleMap.get(s.user_id)) || (s.user_id === shop?.owner_id ? 'admin' : 'staff');
+        const memRole: MembershipRole = (s.user_id && memberRoleMap.get(s.user_id)) || (s.user_id === ownerUserId ? 'owner' : 'staff');
+        const systemRole = memRole === 'owner' ? 'admin_owner' : (memRole === 'admin' ? 'admin' : 'staff');
 
         deduplicatedStaff.push({
           id: s.id,
           tenantId: s.barbershop_id || barbershopId,
           barbershopId: s.barbershop_id || barbershopId,
           userId: s.user_id || undefined,
+          staffProfileId: s.id,
+          membershipRole: memRole,
           name: s.name || 'Profissional',
           phone: s.phone ?? '',
           photo: s.photo ?? undefined,
           status: s.status ?? 'active',
           commissionRate: Number(s.commission_rate ?? 0),
-          role: resolvedRole,
+          role: memRole,
           createdAt: s.created_at
         });
       }
+
+      // Ordenação rigorosa: Owner no topo, depois Admins, depois Staff em ordem alfabética
+      deduplicatedStaff.sort((a, b) => {
+        if (a.membershipRole === 'owner') return -1;
+        if (b.membershipRole === 'owner') return 1;
+        if (a.membershipRole === 'admin' && b.membershipRole !== 'admin') return -1;
+        if (b.membershipRole === 'admin' && a.membershipRole !== 'admin') return 1;
+        return (a.name || '').localeCompare(b.name || '');
+      });
 
       isNetworkOffline = false;
       return deduplicatedStaff;
@@ -1388,7 +1463,7 @@ export const supabaseService = {
     }
   },
 
-  async saveStaff(staff: Omit<Staff, 'id' | 'tenantId'> & { id?: string; tenantId?: string; role?: 'admin' | 'staff' | 'admin_owner'; barbershopId?: string }) {
+  async saveStaff(staff: Omit<Staff, 'id' | 'tenantId' | 'role'> & { id?: string; tenantId?: string; role?: MembershipRole | 'admin_owner'; barbershopId?: string }) {
     const { role } = await this.getUserRoleAndTenant();
     const currentUserId = await this.getUserId();
     const isSelf = !!(currentUserId && (staff.userId === currentUserId || staff.id === currentUserId));
@@ -1424,7 +1499,7 @@ export const supabaseService = {
       .eq('id', barbershopId)
       .maybeSingle();
 
-    const staffRole = staff.role === 'admin' || staff.role === 'admin_owner' ? 'admin' : 'staff';
+    const staffRole = staff.role === 'admin' || staff.role === 'owner' || (staff.role as any) === 'admin_owner' ? 'admin' : 'staff';
     let resultData: any = null;
 
     if (role === 'admin_owner' && !isSelf) {
@@ -1547,26 +1622,148 @@ export const supabaseService = {
     };
   },
 
-  async deleteStaff(id: string) {
-    const { role } = await this.getUserRoleAndTenant();
-    if (role !== 'admin_owner') {
-      throw new Error('Apenas o proprietário do salão (admin_owner) pode excluir membros da equipe.');
+  async removeStaffFromBarbershop({
+    staffProfileId,
+    staffUserId,
+    barbershopId
+  }: {
+    staffProfileId: string;
+    staffUserId?: string | null;
+    barbershopId: string;
+  }): Promise<void> {
+    const currentUserId = await this.getUserId();
+    if (!currentUserId) {
+      throw new Error('Usuário não autenticado.');
     }
 
-    try {
-      const { error } = await supabase.from('staff_profiles').delete().eq('id', id);
-      if (error) throw error;
-    } catch (error: any) {
-      if (
-        error.code === '42P01' || 
-        error.message?.includes('does not exist') || 
-        error.message?.includes('não existe')
-      ) {
-        return;
-      }
-      console.error('[deleteStaff] Erro ao excluir membro da equipe:', error);
-      throw error;
+    if (!barbershopId) {
+      throw new Error('Identificador da barbearia (barbershopId) é obrigatório.');
     }
+
+    // 1. Validar se o solicitante é owner ou admin autorizado desta barbearia
+    const { data: bs, error: bsErr } = await supabase
+      .from('barbershops')
+      .select('id, owner_id')
+      .eq('id', barbershopId)
+      .maybeSingle();
+
+    if (bsErr) {
+      throw new Error(`Erro ao verificar barbearia: ${bsErr.message}`);
+    }
+
+    let isAuthorized = bs?.owner_id === currentUserId;
+    if (!isAuthorized) {
+      const { data: memberRow, error: memberErr } = await supabase
+        .from('barbershop_members')
+        .select('role')
+        .eq('barbershop_id', barbershopId)
+        .eq('user_id', currentUserId)
+        .maybeSingle();
+
+      if (!memberErr && memberRow && (memberRow.role === 'owner' || memberRow.role === 'admin')) {
+        isAuthorized = true;
+      }
+    }
+
+    if (!isAuthorized) {
+      throw new Error('Apenas o proprietário ou administradores podem desvincular profissionais desta barbearia.');
+    }
+
+    // 2. Definir staff_profiles.status = 'inactive'
+    // Preserva o histórico operacional, atendimentos passados e comissões
+    const { error: updateErr } = await supabase
+      .from('staff_profiles')
+      .update({ status: 'inactive' })
+      .eq('id', staffProfileId);
+
+    if (updateErr) {
+      console.error('[removeStaffFromBarbershop] Erro ao desativar registro de staff:', updateErr);
+      throw new Error(`Falha ao desativar o profissional: ${updateErr.message}`);
+    }
+
+    // 3. Remover ou revogar SOMENTE o membership desta barbearia específica
+    if (staffUserId) {
+      const { error: memberDelErr } = await supabase
+        .from('barbershop_members')
+        .delete()
+        .eq('barbershop_id', barbershopId)
+        .eq('user_id', staffUserId);
+
+      if (memberDelErr) {
+        console.error('[removeStaffFromBarbershop] Erro ao revogar membership da barbearia:', memberDelErr);
+        throw new Error(`Falha ao revogar vínculo de acesso do membro: ${memberDelErr.message}`);
+      }
+    }
+
+    // Preservar: auth.users, profiles, staff_profiles, appointments, transactions.
+    console.info(`[removeStaffFromBarbershop] Profissional ${staffProfileId} desvinculado com sucesso da barbearia ${barbershopId}.`);
+  },
+
+  async deleteStaff(id: string, barbershopId?: string) {
+    // Buscar registro do staff para obter barbershopId e userId
+    const { data: staffData } = await supabase
+      .from('staff_profiles')
+      .select('id, user_id, barbershop_id, tenant_id')
+      .eq('id', id)
+      .maybeSingle();
+
+    const targetShopId = barbershopId || staffData?.barbershop_id || staffData?.tenant_id;
+    if (!targetShopId) {
+      throw new Error('Não foi possível identificar a barbearia deste profissional para desvinculá-lo.');
+    }
+
+    await this.removeStaffFromBarbershop({
+      staffProfileId: id,
+      staffUserId: staffData?.user_id,
+      barbershopId: targetShopId
+    });
+  },
+
+  async createStaffMemberWithoutLogin(params: {
+    barbershopId: string;
+    ownerId: string;
+    name: string;
+    phone?: string;
+    photo?: string;
+    commissionRate?: number;
+  }): Promise<Staff> {
+    const currentUserId = await this.getUserId();
+    if (!currentUserId) throw new Error('Usuário não autenticado.');
+
+    const newId = crypto.randomUUID();
+    const { data, error } = await supabase
+      .from('staff_profiles')
+      .insert({
+        id: newId,
+        barbershop_id: params.barbershopId,
+        tenant_id: params.ownerId,
+        user_id: null,
+        name: params.name.trim(),
+        phone: params.phone || '',
+        photo: params.photo || null,
+        status: 'active',
+        commission_rate: params.commissionRate !== undefined ? Number(params.commissionRate) : 30
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[createStaffMemberWithoutLogin] Erro ao cadastrar profissional:', error);
+      throw new Error(`Erro ao salvar profissional no banco de dados: ${error.message}`);
+    }
+
+    return {
+      id: data.id,
+      tenantId: data.tenant_id,
+      barbershopId: data.barbershop_id,
+      userId: null,
+      name: data.name,
+      phone: data.phone || '',
+      photo: data.photo || null,
+      status: data.status || 'active',
+      commissionRate: Number(data.commission_rate || 0),
+      role: 'staff'
+    };
   },
 
   async getTenantIdForUser(userId: string): Promise<string> {
@@ -2435,6 +2632,495 @@ export const supabaseService = {
     };
   },
 
+  async resolveAuthContexts(targetUserId?: string): Promise<AuthContext> {
+    const userId = targetUserId || await this.getUserId();
+
+    if (!userId) {
+      return {
+        authenticatedUserId: '',
+        contexts: [],
+        activeContext: null,
+        status: 'unauthenticated'
+      };
+    }
+
+    try {
+      // 1. Consultas simultâneas de banco real
+      const [memberRes, ownedRes, staffRes] = await Promise.all([
+        supabase.from('barbershop_members').select('barbershop_id, role, joined_at').eq('user_id', userId),
+        supabase.from('barbershops').select('id, owner_id, name, slug, created_at').eq('owner_id', userId),
+        supabase.from('staff_profiles').select('id, barbershop_id, user_id, status, name, phone, photo').eq('user_id', userId)
+      ]);
+
+      const memberRows: any[] = memberRes.data || [];
+      const ownedRows: any[] = ownedRes.data || [];
+      const staffRows: any[] = staffRes.data || [];
+
+      // 2. Reparar e garantir idempotentemente membership role='owner' e staff_profiles para cada barbearia própria
+      for (const ownedShop of ownedRows) {
+        const hasOwnerMem = memberRows.some(m => m.barbershop_id === ownedShop.id && m.role === 'owner');
+        if (!hasOwnerMem) {
+          try {
+            await supabase.from('barbershop_members').upsert({
+              barbershop_id: ownedShop.id,
+              user_id: userId,
+              role: 'owner'
+            }, { onConflict: 'barbershop_id,user_id' });
+
+            memberRows.push({
+              barbershop_id: ownedShop.id,
+              user_id: userId,
+              role: 'owner',
+              joined_at: new Date().toISOString()
+            });
+          } catch (repairErr) {
+            console.warn('[resolveAuthContexts] Aviso ao reparar owner membership:', repairErr);
+          }
+        }
+
+        const hasOwnerStaff = staffRows.some(s => s.barbershop_id === ownedShop.id);
+        if (!hasOwnerStaff) {
+          try {
+            const { data: userProf } = await supabase
+              .from('profiles')
+              .select('name, personal_phone, photo')
+              .eq('id', userId)
+              .maybeSingle();
+
+            const { data: newOwnerStaff } = await supabase
+              .from('staff_profiles')
+              .insert({
+                barbershop_id: ownedShop.id,
+                tenant_id: ownedShop.owner_id,
+                user_id: userId,
+                name: userProf?.name || ownedShop.name || 'Proprietário',
+                phone: userProf?.personal_phone || '',
+                photo: userProf?.photo || null,
+                status: 'active',
+                commission_rate: 0
+              })
+              .select()
+              .single();
+
+            if (newOwnerStaff) {
+              staffRows.push(newOwnerStaff);
+            }
+          } catch (staffRepairErr) {
+            console.warn('[resolveAuthContexts] Aviso ao reparar staff_profile do owner:', staffRepairErr);
+          }
+        }
+      }
+
+      // 3. Coletar metadados de todas as barbearias envolvidas
+      const allBarbershopIds = Array.from(new Set([
+        ...ownedRows.map(b => b.id),
+        ...memberRows.map(m => m.barbershop_id)
+      ].filter(Boolean)));
+
+      const barbershopsMap = new Map<string, any>();
+      ownedRows.forEach(b => barbershopsMap.set(b.id, b));
+
+      const missingShopIds = allBarbershopIds.filter(id => !barbershopsMap.has(id));
+      if (missingShopIds.length > 0) {
+        const { data: extShops } = await supabase
+          .from('barbershops')
+          .select('id, owner_id, name, slug, created_at')
+          .in('id', missingShopIds);
+
+        (extShops || []).forEach(b => barbershopsMap.set(b.id, b));
+      }
+
+      // 4. Construir contexts do usuário
+      const contexts: TenantContext[] = [];
+      let hasInconsistentStaff = false;
+
+      for (const m of memberRows) {
+        const shop = barbershopsMap.get(m.barbershop_id);
+        if (!shop) continue;
+
+        const role: MembershipRole = m.role === 'owner' ? 'owner' : (m.role === 'admin' ? 'admin' : 'staff');
+        const isOwner = shop.owner_id === userId || role === 'owner';
+
+        const staff = staffRows.find((s: any) => s.barbershop_id === m.barbershop_id);
+
+        if (!isOwner && staff && staff.status === 'inactive') {
+          continue;
+        }
+
+        if (!isOwner && !staff) {
+          hasInconsistentStaff = true;
+        }
+
+        if (!contexts.some(c => c.barbershopId === shop.id)) {
+          contexts.push({
+            barbershopId: shop.id,
+            barbershopName: shop.name || 'Barbearia',
+            barbershopSlug: shop.slug || '',
+            role,
+            staffProfileId: staff?.id || null,
+            isOwner,
+            logoUrl: null
+          });
+        }
+      }
+
+      // 5. Ordenação: Owner primeiro, depois Admin, depois Staff; alfabética dentro do mesmo papel
+      const rolePriority: Record<MembershipRole, number> = { owner: 1, admin: 2, staff: 3 };
+      contexts.sort((a, b) => {
+        const pA = rolePriority[a.role] || 99;
+        const pB = rolePriority[b.role] || 99;
+        if (pA !== pB) return pA - pB;
+        return a.barbershopName.localeCompare(b.barbershopName);
+      });
+
+      // 6. Avaliar status
+      if (contexts.length === 0) {
+        return {
+          authenticatedUserId: userId,
+          contexts: [],
+          activeContext: null,
+          status: 'needs_onboarding'
+        };
+      }
+
+      if (hasInconsistentStaff && contexts.every(c => !c.isOwner && !c.staffProfileId)) {
+        return {
+          authenticatedUserId: userId,
+          contexts,
+          activeContext: null,
+          status: 'inconsistent'
+        };
+      }
+
+      if (contexts.length === 1) {
+        return {
+          authenticatedUserId: userId,
+          contexts,
+          activeContext: contexts[0],
+          status: 'ready'
+        };
+      }
+
+      return {
+        authenticatedUserId: userId,
+        contexts,
+        activeContext: null,
+        status: 'needs_context_selection'
+      };
+
+    } catch (err: any) {
+      console.error('[resolveAuthContexts] Erro ao resolver contextos:', err);
+      return {
+        authenticatedUserId: userId,
+        contexts: [],
+        activeContext: null,
+        status: 'access_revoked'
+      };
+    }
+  },
+
+  async resolveSingleActiveContext(targetUserId?: string): Promise<ActiveContext> {
+    const userId = targetUserId || await this.getUserId();
+    if (!userId) {
+      return {
+        kind: 'access_revoked',
+        userId: '',
+        reason: 'Sessão inválida ou expirada.'
+      };
+    }
+
+    const authCtx = await this.resolveAuthContexts(userId);
+
+    if (authCtx.status === 'needs_onboarding') {
+      return {
+        kind: 'needs_onboarding',
+        userId
+      };
+    }
+
+    if (authCtx.status === 'needs_context_selection') {
+      return {
+        kind: 'multiple_contexts_not_supported',
+        userId,
+        contexts: authCtx.contexts.map(c => ({
+          barbershopId: c.barbershopId,
+          barbershopName: c.barbershopName,
+          role: c.role,
+          staffProfileId: c.staffProfileId
+        }))
+      };
+    }
+
+    if (authCtx.status === 'ready' && authCtx.activeContext) {
+      const single = authCtx.activeContext;
+      return {
+        kind: single.role,
+        userId,
+        barbershopId: single.barbershopId,
+        barbershopName: single.barbershopName,
+        membershipRole: single.role,
+        staffProfileId: single.staffProfileId
+      };
+    }
+
+    return {
+      kind: 'access_revoked',
+      userId,
+      reason: authCtx.status === 'inconsistent' 
+        ? 'Conta vinculada como colaborador sem perfil operacional correspondente.'
+        : 'Acesso revogado ou indisponível nesta barbearia.'
+    };
+  },
+
+  async resolveAuthContext(targetUserId?: string, selectedBarbershopId?: string): Promise<AuthContextResult> {
+    const userId = targetUserId || await this.getUserId();
+
+    if (!userId) {
+      return {
+        userId: null,
+        profile: null,
+        memberships: [],
+        ownedBarbershops: [],
+        userContexts: [],
+        activeMembership: null,
+        activeBarbershopId: null,
+        activeBarbershop: null,
+        staffProfile: null,
+        accessKind: 'no_membership'
+      };
+    }
+
+    try {
+      // 1. Consultas simultâneas de alta performance
+      const [profileRes, memberRes, ownedRes, staffRes] = await Promise.all([
+        supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+        supabase.from('barbershop_members').select('*').eq('user_id', userId),
+        supabase.from('barbershops').select('*').eq('owner_id', userId),
+        supabase.from('staff_profiles').select('*').eq('user_id', userId)
+      ]);
+
+      const profileRow = profileRes.data;
+      const memberRows = memberRes.data || [];
+      const ownedRows = ownedRes.data || [];
+      const staffRows = staffRes.data || [];
+
+      const profileObj: BarberProfile | null = profileRow ? {
+        name: profileRow.name || '',
+        personalPhone: profileRow.personal_phone || '',
+        photo: profileRow.photo || '',
+        shopName: profileRow.shop_name || '',
+        businessPhone: profileRow.business_phone || '',
+        address: profileRow.address || '',
+        logo: profileRow.logo || '',
+        description: profileRow.description || '',
+        instagram: profileRow.instagram || '',
+        website: profileRow.website || '',
+        onboarding_seen: !!profileRow.onboarding_seen,
+        slug: profileRow.slug || ''
+      } : null;
+
+      const ownedBarbershops: Barbershop[] = ownedRows.map((b: any) => ({
+        id: b.id,
+        ownerId: b.owner_id,
+        name: b.name,
+        slug: b.slug,
+        createdAt: b.created_at
+      }));
+
+      const memberships: BarbershopMember[] = memberRows.map((m: any) => ({
+        barbershopId: m.barbershop_id,
+        userId: m.user_id,
+        role: m.role,
+        joinedAt: m.joined_at
+      }));
+
+      // 2. Coletar IDs de barbearias de membership que ainda não foram carregadas
+      const ownedIds = new Set(ownedBarbershops.map(b => b.id));
+      const externalShopIds = memberRows
+        .map((m: any) => m.barbershop_id)
+        .filter((id: string) => id && !ownedIds.has(id));
+
+      let memberBarbershops: Barbershop[] = [];
+      if (externalShopIds.length > 0) {
+        const { data: memberShopsData } = await supabase
+          .from('barbershops')
+          .select('*')
+          .in('id', externalShopIds);
+
+        if (memberShopsData) {
+          memberBarbershops = memberShopsData.map((b: any) => ({
+            id: b.id,
+            ownerId: b.owner_id,
+            name: b.name,
+            slug: b.slug,
+            createdAt: b.created_at
+          }));
+        }
+      }
+
+      // Mapa de barbearias por ID
+      const allShopsMap = new Map<string, Barbershop>();
+      ownedBarbershops.forEach(b => allShopsMap.set(b.id, b));
+      memberBarbershops.forEach(b => allShopsMap.set(b.id, b));
+
+      // 3. Construir lista de contextos do usuário (UserBarbershopContext[])
+      const userContexts: UserBarbershopContext[] = [];
+
+      // A) Para barbearias próprias:
+      for (const bs of ownedBarbershops) {
+        const staffRow = staffRows.find((s: any) => s.barbershop_id === bs.id || s.tenant_id === bs.ownerId);
+        const mappedStaff: Staff | null = staffRow ? {
+          id: staffRow.id,
+          tenantId: staffRow.tenant_id || bs.ownerId,
+          barbershopId: staffRow.barbershop_id || bs.id,
+          userId: staffRow.user_id || userId,
+          name: staffRow.name || profileObj?.name || 'Proprietário',
+          phone: staffRow.phone || profileObj?.personalPhone || '',
+          photo: staffRow.photo || profileObj?.photo || null,
+          status: staffRow.status || 'active',
+          commissionRate: Number(staffRow.commission_rate || 0),
+          role: 'owner'
+        } : null;
+
+        userContexts.push({
+          barbershop: bs,
+          role: 'owner',
+          staffProfile: mappedStaff
+        });
+      }
+
+      // B) Para memberships externas:
+      for (const m of memberRows) {
+        if (ownedIds.has(m.barbershop_id)) continue; // Já adicionado como owner
+        const bs = allShopsMap.get(m.barbershop_id);
+        if (!bs) continue; // Barbearia pode ter sido deletada
+
+        const staffRow = staffRows.find((s: any) => s.barbershop_id === bs.id || s.tenant_id === bs.id);
+        const mappedStaff: Staff | null = staffRow ? {
+          id: staffRow.id,
+          tenantId: staffRow.tenant_id || bs.id,
+          barbershopId: staffRow.barbershop_id || bs.id,
+          userId: staffRow.user_id || userId,
+          name: staffRow.name || profileObj?.name || 'Profissional',
+          phone: staffRow.phone || profileObj?.personalPhone || '',
+          photo: staffRow.photo || profileObj?.photo || null,
+          status: staffRow.status || 'active',
+          commissionRate: Number(staffRow.commission_rate || 0),
+          role: m.role === 'admin' ? 'admin' : 'staff'
+        } : null;
+
+        userContexts.push({
+          barbershop: bs,
+          role: m.role as 'owner' | 'admin' | 'staff',
+          staffProfile: mappedStaff
+        });
+      }
+
+      // 4. Avaliar accessKind
+      if (userContexts.length === 0) {
+        // Usuário com conta, mas sem barbearia própria e sem membership
+        return {
+          userId,
+          profile: profileObj,
+          memberships,
+          ownedBarbershops,
+          userContexts: [],
+          activeMembership: null,
+          activeBarbershopId: null,
+          activeBarbershop: null,
+          staffProfile: null,
+          accessKind: 'owner_needs_barbershop'
+        };
+      }
+
+      if (userContexts.length > 1) {
+        // Múltiplos contextos: verificar se há uma seleção explícita
+        if (selectedBarbershopId) {
+          const selectedCtx = userContexts.find(c => c.barbershop.id === selectedBarbershopId);
+          if (selectedCtx) {
+            const roleKind: AccessKind = selectedCtx.role === 'owner' 
+              ? 'owner_ready' 
+              : (selectedCtx.role === 'admin' ? 'admin_ready' : 'staff_ready');
+
+            const activeMember = memberships.find(m => m.barbershopId === selectedCtx.barbershop.id) || {
+              barbershopId: selectedCtx.barbershop.id,
+              userId,
+              role: selectedCtx.role,
+              joinedAt: new Date().toISOString()
+            };
+
+            return {
+              userId,
+              profile: profileObj,
+              memberships,
+              ownedBarbershops,
+              userContexts,
+              activeMembership: activeMember,
+              activeBarbershopId: selectedCtx.barbershop.id,
+              activeBarbershop: selectedCtx.barbershop,
+              staffProfile: selectedCtx.staffProfile || null,
+              accessKind: roleKind
+            };
+          }
+        }
+
+        // Sem seleção explícita: exibir seletor de barbearia
+        return {
+          userId,
+          profile: profileObj,
+          memberships,
+          ownedBarbershops,
+          userContexts,
+          activeMembership: null,
+          activeBarbershopId: null,
+          activeBarbershop: null,
+          staffProfile: null,
+          accessKind: 'multi_tenant_selection'
+        };
+      }
+
+      // Contexto único: resolução direta
+      const singleCtx = userContexts[0];
+      const singleKind: AccessKind = singleCtx.role === 'owner'
+        ? 'owner_ready'
+        : (singleCtx.role === 'admin' ? 'admin_ready' : 'staff_ready');
+
+      const activeMember = memberships.find(m => m.barbershopId === singleCtx.barbershop.id) || {
+        barbershopId: singleCtx.barbershop.id,
+        userId,
+        role: singleCtx.role,
+        joinedAt: new Date().toISOString()
+      };
+
+      return {
+        userId,
+        profile: profileObj,
+        memberships,
+        ownedBarbershops,
+        userContexts,
+        activeMembership: activeMember,
+        activeBarbershopId: singleCtx.barbershop.id,
+        activeBarbershop: singleCtx.barbershop,
+        staffProfile: singleCtx.staffProfile || null,
+        accessKind: singleKind
+      };
+    } catch (err: any) {
+      console.error('[resolveAuthContext] Erro ao resolver contexto de autorização:', err);
+      return {
+        userId,
+        profile: null,
+        memberships: [],
+        ownedBarbershops: [],
+        userContexts: [],
+        activeMembership: null,
+        activeBarbershopId: null,
+        activeBarbershop: null,
+        staffProfile: null,
+        accessKind: 'owner_needs_barbershop'
+      };
+    }
+  },
+
   async resolveOnboardingState(targetUserId?: string): Promise<OnboardingState> {
     const userId = targetUserId || await this.getUserId();
 
@@ -2647,9 +3333,10 @@ export const supabaseService = {
         return state;
       }
 
-      // 6. Verificar se tem staff_profiles mesmo sem barbershop_members (compatibilidade)
-      if (staffRows && staffRows.length > 0) {
-        const rawStaff = staffRows[0];
+      // 6. Verificar se tem staff_profiles ativo mesmo sem barbershop_members (compatibilidade)
+      const activeStaffRows = staffRows?.filter((s: any) => s.status !== 'inactive');
+      if (activeStaffRows && activeStaffRows.length > 0) {
+        const rawStaff = activeStaffRows[0];
         const targetShopId = rawStaff.barbershop_id || rawStaff.tenant_id;
         const { data: shopData } = await supabase
           .from('barbershops')
@@ -2701,14 +3388,16 @@ export const supabaseService = {
         return state;
       }
 
-      // 7. Usuário genuinamente novo (sem perfil nem barbearia cadastrada)
-      const hasValidProfile = !!(profileRow && profileRow.name && profileRow.name.trim() !== '');
+      // 7. Usuário sem barbearia cadastrada (precisa criar sua própria barbearia pelo SetupWizard)
+      // O campo "Nome da conta" (slug) fica na etapa 1 e é estritamente obrigatório.
+      // Usuários que vêm de contas de colaboradores desvinculados ou novos donos devem começar SEMPRE na etapa 1.
+      const hasValidProfile = !!(profileRow && profileRow.name && profileRow.name.trim() !== '' && profileRow.slug && profileRow.slug.trim() !== '');
       if (!hasValidProfile) {
         const state: OnboardingState = {
           userId,
           isAuthenticated: true,
-          hasProfile: false,
-          profile: null,
+          hasProfile: !!profileRow,
+          profile: profileRow ? profileObj : null,
           hasBarbershop: false,
           barbershop: null,
           hasOwnerMembership: false,
@@ -2731,7 +3420,7 @@ export const supabaseService = {
         isStaffMember: false,
         status: 'needs_barbershop',
         isComplete: false,
-        step: 2
+        step: 1 // Sempre iniciar na etapa 1 para confirmar o Nome da conta
       };
       return state;
     } catch (err: any) {
@@ -2761,15 +3450,17 @@ export const supabaseService = {
     return await this.resolveOnboardingState(targetUserId);
   },
 
-  async createBarbershop(name: string, requestedSlug?: string): Promise<Barbershop> {
+  async createBarbershop(name: string, requestedSlug?: string, mode?: SetupMode): Promise<Barbershop> {
     const userId = await this.getUserId();
     if (!userId) throw new Error('User not authenticated');
 
-    // Idempotency: Se a barbearia já existe para o usuário, retorna a existente
-    const existing = await this.getOwnedBarbershop(userId);
-    if (existing) {
-      await this.ensureOwnerMembership(existing.id, userId);
-      return existing;
+    // Se mode não for explicitamente 'additional_barbershop', verificar se já possui barbearia própria existente
+    if (mode !== 'additional_barbershop') {
+      const existing = await this.getOwnedBarbershop(userId);
+      if (existing) {
+        await this.ensureOwnerMembership(existing.id, userId);
+        return existing;
+      }
     }
 
     const normalizedSlug = requestedSlug ? normalizeRequestedSlug(requestedSlug) : '';
@@ -2794,6 +3485,29 @@ export const supabaseService = {
 
     await this.ensureOwnerMembership(data.id, userId);
 
+    // Garantir registro real em staff_profiles para o proprietário na nova barbearia
+    try {
+      const { data: ownerProf } = await supabase
+        .from('profiles')
+        .select('name, personal_phone, photo')
+        .eq('id', userId)
+        .maybeSingle();
+
+      await supabase
+        .from('staff_profiles')
+        .insert({
+          barbershop_id: data.id,
+          user_id: userId,
+          name: ownerProf?.name || name,
+          phone: ownerProf?.personal_phone || '',
+          photo: ownerProf?.photo || null,
+          status: 'active',
+          commission_rate: 0
+        });
+    } catch (ownerStaffErr) {
+      console.warn('[createBarbershop] Aviso ao criar staff_profiles inicial para owner:', ownerStaffErr);
+    }
+
     return {
       id: data.id,
       ownerId: data.owner_id,
@@ -2803,28 +3517,30 @@ export const supabaseService = {
     };
   },
 
-  async getBarbershopMembers(): Promise<BarbershopMember[]> {
+  async getBarbershopMembers(targetBarbershopId?: string): Promise<BarbershopMember[]> {
     try {
-      const userId = await this.getUserId();
-      if (!userId) return [];
+      let resolvedShopId = targetBarbershopId;
+      if (!resolvedShopId) {
+        const userId = await this.getUserId();
+        if (!userId) return [];
 
-      const { data: memberships, error: mInfoErr } = await supabase
-        .from('barbershop_members')
-        .select('barbershop_id')
-        .eq('user_id', userId);
+        const { data: memberships, error: mInfoErr } = await supabase
+          .from('barbershop_members')
+          .select('barbershop_id')
+          .eq('user_id', userId);
 
-      if (mInfoErr || !memberships || memberships.length === 0) return [];
-
-      const targetBarbershopId = memberships[0].barbershop_id;
+        if (mInfoErr || !memberships || memberships.length === 0) return [];
+        resolvedShopId = memberships[0].barbershop_id;
+      }
 
       const { data, error } = await supabase
         .from('barbershop_members')
         .select('role, joined_at, user_id, profiles(name, personal_phone, photo)')
-        .eq('barbershop_id', targetBarbershopId);
+        .eq('barbershop_id', resolvedShopId);
 
       if (error) throw error;
       return (data || []).map((m: any) => ({
-        barbershopId: targetBarbershopId,
+        barbershopId: resolvedShopId,
         userId: m.user_id,
         role: m.role,
         joinedAt: m.joined_at,
@@ -2882,24 +3598,26 @@ export const supabaseService = {
     };
   },
 
-  async getInvites(): Promise<BarbershopInvite[]> {
+  async getInvites(targetBarbershopId?: string): Promise<BarbershopInvite[]> {
     try {
       const userId = await this.getUserId();
       if (!userId) return [];
 
-      const { data: barbershops, error: bsErr } = await supabase
-        .from('barbershops')
-        .select('id')
-        .eq('owner_id', userId);
+      let shopId = targetBarbershopId;
+      if (!shopId) {
+        const { data: barbershops, error: bsErr } = await supabase
+          .from('barbershops')
+          .select('id')
+          .eq('owner_id', userId);
 
-      if (bsErr || !barbershops || barbershops.length === 0) return [];
-
-      const targetBarbershopId = barbershops[0].id;
+        if (bsErr || !barbershops || barbershops.length === 0) return [];
+        shopId = barbershops[0].id;
+      }
 
       const { data, error } = await supabase
         .from('barbershop_invites')
         .select('*')
-        .eq('barbershop_id', targetBarbershopId)
+        .eq('barbershop_id', shopId)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -3024,28 +3742,52 @@ export const supabaseService = {
       if (error) {
         let errorMessage = error.message;
         let isValidationError = false;
-        const status = (error as any).status;
+        const status = (error as any).status || (error as any).context?.status;
 
         try {
-          if (error.context && typeof error.context.json === 'function') {
-            const body = await error.context.json();
+          if (error.context) {
+            let body: any = null;
+            if (typeof error.context.json === 'function') {
+              try {
+                body = await (error.context as any).clone().json();
+              } catch {
+                body = await (error.context as any).json();
+              }
+            } else if (typeof error.context.text === 'function') {
+              const txt = await (error.context as any).text();
+              try { body = JSON.parse(txt); } catch { body = { error: txt }; }
+            }
             if (body && body.error) {
               errorMessage = body.error;
             }
           }
         } catch (jsonErr: any) {
-          // ignore
+          console.warn('[createStaffDirectly] Aviso ao extrair JSON de erro:', jsonErr);
+        }
+
+        // Formatação amigável de mensagens conhecidas para o usuário
+        if (
+          errorMessage.includes('already been registered') || 
+          errorMessage.includes('already registered') || 
+          errorMessage.includes('já possui uma conta')
+        ) {
+          errorMessage = 'Este e-mail já está sendo utilizado por outro profissional no sistema.';
+          isValidationError = true;
+        } else if (
+          errorMessage.includes('já está cadastrado e ativo') || 
+          errorMessage.includes('já está cadastrado')
+        ) {
+          errorMessage = 'Este e-mail já está sendo utilizado por outro profissional nesta barbearia.';
+          isValidationError = true;
+        } else if (errorMessage.includes('pertence ao proprietário')) {
+          errorMessage = 'Este e-mail pertence ao proprietário deste estabelecimento e não pode ser utilizado para outro profissional.';
+          isValidationError = true;
+        } else if (errorMessage.includes('Edge Function returned a non-2xx status code')) {
+          errorMessage = 'Não foi possível cadastrar o profissional. Verifique se o e-mail já está em uso por outro profissional.';
+          isValidationError = true;
         }
 
         if (status && status !== 404) {
-          isValidationError = true;
-        } else if (errorMessage && (
-          errorMessage.includes('já possui uma conta') || 
-          errorMessage.includes('already registered') || 
-          errorMessage.includes('Password should be') || 
-          errorMessage.includes('Apenas proprietários') ||
-          errorMessage.includes('Não autorizado')
-        )) {
           isValidationError = true;
         }
 
@@ -3054,6 +3796,18 @@ export const supabaseService = {
           (customErr as any).isValidationError = true;
         }
         throw customErr;
+      }
+
+      if (data && (!data.success || data.error)) {
+        let msg = data.error || 'Erro ao criar profissional';
+        if (msg.includes('already been registered') || msg.includes('already registered') || msg.includes('já possui uma conta')) {
+          msg = 'Este e-mail já está sendo utilizado por outro profissional no sistema.';
+        } else if (msg.includes('já está cadastrado e ativo') || msg.includes('já está cadastrado')) {
+          msg = 'Este e-mail já está sendo utilizado por outro profissional nesta barbearia.';
+        }
+        const err = new Error(msg);
+        (err as any).isValidationError = true;
+        throw err;
       }
 
       if (data && data.success) {
@@ -3099,7 +3853,11 @@ export const supabaseService = {
 
       return data;
     } catch (err: any) {
-      console.error('Erro fatal na criação direta de funcionário:', err);
+      if (err?.isValidationError) {
+        console.warn('[createStaffDirectly] Validação ao criar profissional:', err.message);
+      } else {
+        console.error('Erro na criação direta de funcionário:', err);
+      }
       throw err;
     }
   }

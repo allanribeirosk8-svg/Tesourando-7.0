@@ -77,7 +77,8 @@ import {
   Link2,
   Copy,
   Share2,
-  ExternalLink
+  ExternalLink,
+  Building2
 } from 'lucide-react';
 import { FaWhatsapp } from 'react-icons/fa';
 import { CaixaView } from './CaixaView';
@@ -251,8 +252,10 @@ const ConfiguracoesScreen: React.FC<{
   onOpenStaff: () => void;
   onLogout: () => void;
 }> = ({ onOpenProfile, onOpenWeekly, onOpenStaff, onLogout }) => {
-  const { barberProfile, permissions, userRole, currentStaff, session } = useStore();
+  const { barberProfile, permissions, userRole, currentStaff, session, userContexts, switchBarbershopContext, activeTenant } = useStore();
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showSwitchModal, setShowSwitchModal] = useState(false);
+  const [isSwitching, setIsSwitching] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
 
   const isStaff = userRole === 'staff';
@@ -265,6 +268,8 @@ const ConfiguracoesScreen: React.FC<{
   const displaySubtitle = isStaff
     ? (currentStaff?.phone ? formatPhone(currentStaff.phone) : 'Barbeiro')
     : (barberProfile?.phone ? formatPhone(barberProfile.phone) : (barberProfile?.shopName || 'Barbeiro'));
+
+  const userEmail = session?.user?.email || (session?.user?.user_metadata?.email as string) || '';
 
   const shareUrl = barberProfile?.slug ? `${window.location.origin}/#/agendar/${barberProfile.slug}` : '';
 
@@ -298,7 +303,7 @@ const ConfiguracoesScreen: React.FC<{
         {/* Bloco de Perfil */}
         <button 
           onClick={onOpenProfile}
-          className="w-full bg-white/5 rounded-2xl p-4 flex items-center gap-4 text-left"
+          className="w-full bg-white/5 hover:bg-white/[0.07] rounded-2xl p-4 flex items-center gap-4 text-left transition-colors"
         >
           <div className="w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-xl shrink-0 overflow-hidden shadow-sm bg-primary">
             {displayPhoto ? (
@@ -310,6 +315,12 @@ const ConfiguracoesScreen: React.FC<{
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-bold text-white truncate">{displayName}</h2>
             <p className="text-sm text-title truncate">{displaySubtitle}</p>
+            {userEmail && (
+              <p className="text-xs text-white/60 truncate flex items-center gap-1.5 mt-1">
+                <Mail size={13} className="text-secondary shrink-0" />
+                <span className="truncate">{userEmail}</span>
+              </p>
+            )}
           </div>
           <ChevronRight size={20} className="text-title shrink-0" />
         </button>
@@ -431,6 +442,32 @@ const ConfiguracoesScreen: React.FC<{
           </div>
         </div>
 
+        {/* Seção ESTABELECIMENTO / MULTI-TENANT */}
+        {userContexts && userContexts.length > 1 && (
+          <div className="space-y-4 mt-6">
+            <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">ESTABELECIMENTO</h3>
+            <div className="bg-surface rounded-2xl overflow-hidden">
+              <button 
+                onClick={() => setShowSwitchModal(true)}
+                className="w-full flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors text-left"
+              >
+                <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center shrink-0 text-primary">
+                  <Building2 size={18} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-base font-medium text-white truncate">
+                    {barberProfile?.shopName || barberProfile?.shop_name || 'Trocar Barbearia'}
+                  </p>
+                  <p className="text-xs text-title mt-0.5">
+                    Você tem acesso a {userContexts.length} estabelecimentos
+                  </p>
+                </div>
+                <ChevronRight size={18} className="text-title shrink-0" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Seção SESSÃO */}
         <div className="space-y-4 mt-8">
           <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">SESSÃO</h3>
@@ -450,6 +487,87 @@ const ConfiguracoesScreen: React.FC<{
           <p className="text-xs text-title/50 text-center">Meu Corte v1.0.0</p>
         </div>
       </div>
+
+      {/* Modal para Troca de Barbearia */}
+      <AnimatePresence>
+        {showSwitchModal && userContexts && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#1E1B4B] w-full max-w-md rounded-[2rem] p-6 shadow-2xl border border-white/10 space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-primary/20 flex items-center justify-center text-primary">
+                    <Building2 size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black text-white uppercase tracking-tight">Trocar Estabelecimento</h3>
+                    <p className="text-xs text-title/70">Selecione a barbearia desejada</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowSwitchModal(false)}
+                  className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-title/70 hover:text-white transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                {userContexts.map((ctx) => {
+                  const isCurrent = activeTenant?.id === ctx.barbershopId;
+                  return (
+                    <button
+                      key={ctx.barbershopId}
+                      disabled={isSwitching}
+                      onClick={async () => {
+                        if (isCurrent) {
+                          setShowSwitchModal(false);
+                          return;
+                        }
+                        setIsSwitching(true);
+                        try {
+                          await switchBarbershopContext(ctx.barbershopId);
+                          setShowSwitchModal(false);
+                        } finally {
+                          setIsSwitching(false);
+                        }
+                      }}
+                      className={`w-full p-4 rounded-2xl border text-left transition-all flex items-center justify-between ${
+                        isCurrent
+                          ? 'bg-primary/20 border-primary shadow-lg shadow-primary/10'
+                          : 'bg-white/5 border-white/10 hover:bg-white/10'
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-bold text-white truncate">{ctx.name}</p>
+                          {isCurrent && (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-primary text-white shrink-0">
+                              Atual
+                            </span>
+                          )}
+                        </div>
+                        <span className={`inline-block mt-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                          ctx.role === 'owner' ? 'bg-amber-500/20 text-amber-300' :
+                          ctx.role === 'admin' ? 'bg-purple-500/20 text-purple-300' :
+                          'bg-blue-500/20 text-blue-300'
+                        }`}>
+                          {ctx.role === 'owner' ? 'Proprietário' : ctx.role === 'admin' ? 'Administrador' : 'Profissional'}
+                        </span>
+                      </div>
+                      <ChevronRight size={18} className="text-title/50 ml-2 shrink-0" />
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {showLogoutConfirm && (
@@ -786,6 +904,7 @@ export const AdminApp: React.FC = () => {
     session, 
     isLoading, 
     activeTenant,
+    barbershop,
     updateBarberProfile, 
     reloadData, 
     resetStore, 
@@ -796,10 +915,16 @@ export const AdminApp: React.FC = () => {
     markNotificationAsRead,
     markAllNotificationsAsRead,
     deleteNotification,
-    onboardingState
+    onboardingState,
+    authContext,
+    activeContext,
+    userContexts,
+    switchBarbershopContext
   } = useStore();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isSetupCompleting, setIsSetupCompleting] = useState(false);
+  const [showMissingTenantNotice, setShowMissingTenantNotice] = useState(false);
   const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'servicos' | 'caixa' | 'configuracoes'>('agenda');
   const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [showAddModal, setShowAddModal] = useState(false);
@@ -836,10 +961,25 @@ export const AdminApp: React.FC = () => {
     }
   }, [isAuthenticated, isLoading, onboardingState, userRole]);
 
+  useEffect(() => {
+    let timer: any;
+    if (!activeTenant?.id && isAuthenticated && session && !isLoggingOut && !isLoading && !isSetupCompleting) {
+      timer = setTimeout(() => {
+        setShowMissingTenantNotice(true);
+      }, 700);
+    } else {
+      setShowMissingTenantNotice(false);
+    }
+    return () => clearTimeout(timer);
+  }, [activeTenant?.id, isAuthenticated, session, isLoggingOut, isLoading, isSetupCompleting]);
+
   const handleCompleteSetup = async () => {
+    setIsSetupCompleting(true);
+    await reloadData(); // força rebusca e hidratação imediata da barbearia
     setShowSetup(false);
-    await new Promise(r => setTimeout(r, 1000)); // aguarda banco processar
-    await reloadData(); // força rebusca dos serviços recém-salvos
+    setTimeout(() => {
+      setIsSetupCompleting(false);
+    }, 800);
   };
 
   useEffect(() => {
@@ -997,21 +1137,71 @@ export const AdminApp: React.FC = () => {
     return `Boa noite, ${name}! 🌙`;
   };
 
-  // 1. Loading ou efetuando logout
-  if (isLoading || isLoggingOut) {
-    return <div className="fixed inset-0 bg-[#363062]" />;
-  }
-
-  // 2. Sem sessão / Login
-  if (showOnboarding) {
-    return <Onboarding onComplete={handleOnboardingComplete} />;
-  }
-
-  if (!isAuthenticated || !session) {
+  // 1. Sem sessão / Efetuando logout / Tela de Login
+  if (isLoggingOut || !isAuthenticated || !session) {
+    if (showOnboarding) {
+      return <Onboarding onComplete={handleOnboardingComplete} />;
+    }
     return <AuthScreen onAuthenticated={() => setIsAuthenticated(true)} initialView={authInitialView} />;
   }
 
-  // 3. Onboarding incompleto / SetupWizard
+  // 2. Loading autenticado
+  if (isLoading) {
+    return <div className="fixed inset-0 bg-[#363062]" />;
+  }
+
+  // 3. Seleção entre múltiplas barbearias caso usuário pertença a várias
+  if (authContext?.accessKind === 'multi_tenant_selection') {
+    return (
+      <div className="min-h-screen bg-[#1E1B4B] flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-[#2A2760] border border-white/10 rounded-3xl p-6 shadow-2xl space-y-6">
+          <div className="text-center space-y-2">
+            <div className="w-14 h-14 rounded-2xl bg-secondary/20 flex items-center justify-center mx-auto text-secondary">
+              <Building2 size={28} />
+            </div>
+            <h2 className="text-xl font-black text-white uppercase tracking-tight">Selecione o Estabelecimento</h2>
+            <p className="text-xs text-white/60">Você faz parte de mais de uma barbearia. Escolha qual deseja acessar:</p>
+          </div>
+
+          <div className="space-y-3">
+            {userContexts?.map((ctx) => (
+              <button
+                key={ctx.barbershopId}
+                onClick={() => switchBarbershopContext(ctx.barbershopId)}
+                className="w-full p-4 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-between text-left transition-all active:scale-95 group"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-white group-hover:text-secondary transition-colors truncate">
+                    {ctx.name}
+                  </p>
+                  <span className={`inline-block mt-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                    ctx.role === 'owner' ? 'bg-amber-500/20 text-amber-300' :
+                    ctx.role === 'admin' ? 'bg-purple-500/20 text-purple-300' :
+                    'bg-blue-500/20 text-blue-300'
+                  }`}>
+                    {ctx.role === 'owner' ? 'Proprietário' : ctx.role === 'admin' ? 'Administrador' : 'Profissional'}
+                  </span>
+                </div>
+                <ChevronRight size={18} className="text-white/40 group-hover:text-white transition-colors ml-2 shrink-0" />
+              </button>
+            ))}
+          </div>
+
+          <div className="pt-2">
+            <button
+              onClick={handleLogout}
+              className="w-full py-3 rounded-xl text-xs font-bold text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-all flex items-center justify-center gap-2"
+            >
+              <LogOut size={14} />
+              <span>Sair da conta</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 4. Onboarding incompleto / SetupWizard
   // REGRA OBRIGATÓRIA: Erro de rede (network_error) NUNCA deve abrir SetupWizard.
   // Usuário com membership staff/admin e staff_profile válido NUNCA deve abrir SetupWizard.
   const shouldOpenSetup = showSetup || (onboardingState && 
@@ -1024,18 +1214,68 @@ export const AdminApp: React.FC = () => {
     return (
       <SetupWizard 
         initialStep={onboardingState?.step || 1} 
-        onComplete={async () => {
-          setShowSetup(false);
-          await reloadData();
-        }} 
+        onComplete={handleCompleteSetup} 
       />
     );
   }
 
-  // 4/5. Tenant válido / AdminApp (ou erro recuperável se tenant nulo)
+  // 5. Tenant válido / AdminApp (ou erro recuperável se tenant nulo)
   if (!activeTenant?.id) {
     if (!isAuthenticated || !session || isLoggingOut) {
       return <AuthScreen onAuthenticated={() => setIsAuthenticated(true)} initialView={authInitialView} />;
+    }
+
+    if (activeContext?.kind === 'multiple_contexts_not_supported') {
+      return (
+        <div className="h-[100dvh] flex flex-col items-center justify-center bg-[#1E1B4B] p-6 text-center text-white">
+          <div className="max-w-md w-full bg-[#2A2456] rounded-2xl p-6 border border-white/10 shadow-xl space-y-4">
+            <div className="w-12 h-12 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+              <AlertTriangle size={24} />
+            </div>
+            <h2 className="text-lg font-bold text-white">Múltiplas Barbearias Detectadas</h2>
+            <p className="text-sm text-gray-300">
+              Esta conta já está vinculada a outra barbearia. O suporte a múltiplas barbearias por usuário ainda está em implantação.
+            </p>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={handleLogout}
+                className="w-full py-3 bg-white/10 text-white font-medium rounded-xl hover:bg-white/15 transition-colors"
+              >
+                Sair da conta
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (activeContext?.kind === 'access_revoked') {
+      return (
+        <div className="h-[100dvh] flex flex-col items-center justify-center bg-[#1E1B4B] p-6 text-center text-white">
+          <div className="max-w-md w-full bg-[#2A2456] rounded-2xl p-6 border border-white/10 shadow-xl space-y-4">
+            <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
+              <AlertTriangle size={24} />
+            </div>
+            <h2 className="text-lg font-bold text-white">Acesso Revogado</h2>
+            <p className="text-sm text-gray-300">
+              {activeContext.reason || 'Seu acesso a esta barbearia foi revogado.'}
+            </p>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={handleLogout}
+                className="w-full py-3 bg-white/10 text-white font-medium rounded-xl hover:bg-white/15 transition-colors"
+              >
+                Sair da conta
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Prevenção contra flash/piscada quando o tenant estiver sendo carregado, hidratado ou recém-finalizado
+    if (isLoading || isSetupCompleting || !showMissingTenantNotice || authContext?.activeBarbershopId || barbershop?.id) {
+      return <div className="fixed inset-0 bg-[#1E1B4B]" />;
     }
     return (
       <div className="h-[100dvh] flex flex-col items-center justify-center bg-[#1E1B4B] p-6 text-center text-white">
@@ -2054,14 +2294,14 @@ const AgendaView: React.FC<{
               onClick={() => {
                 setAgendaContext('mine');
               }}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+              className={`w-[153px] h-[31px] px-3 rounded-xl uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 ${
                 agendaContext === 'mine'
                   ? 'bg-[#F99417] text-white shadow-md shadow-[#F99417]/20 scale-[1.02]'
                   : 'text-white/60 hover:text-white hover:bg-white/5'
               }`}
             >
-              <User size={15} />
-              <span>Minha agenda</span>
+              <User size={13} />
+              <span className="text-[8px] font-black tracking-wider leading-none">Minha agenda</span>
             </button>
             {(() => {
               const totalTeamPendingCount = appointments.filter(a => a.date === selectedDate && a.status === 'pending').length;
@@ -2071,16 +2311,16 @@ const AgendaView: React.FC<{
                     setAgendaContext('team');
                     setTeamFilter('all');
                   }}
-                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                  className={`w-[153px] h-[31px] px-3 rounded-xl uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 ${
                     agendaContext === 'team'
                       ? 'bg-[#8B7CFF] text-white shadow-md shadow-[#8B7CFF]/25 scale-[1.02]'
                       : 'text-white/60 hover:text-white hover:bg-white/5'
                   }`}
                 >
-                  <Users size={15} />
-                  <span>Equipe</span>
+                  <Users size={13} />
+                  <span className="text-[8px] font-black tracking-wider leading-none">Equipe</span>
                   {totalTeamPendingCount > 0 && (
-                    <span className={`min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center text-[10px] font-black shadow-sm ${
+                    <span className={`min-w-[15px] h-[15px] px-1 rounded-full flex items-center justify-center text-[7.5px] font-black shadow-sm ${
                       agendaContext === 'team'
                         ? 'bg-white text-[#8B7CFF]'
                         : 'bg-white text-[#8B7CFF]'
@@ -4528,6 +4768,20 @@ const ProfileModal: React.FC<{
                           </div>
                           <Input label="Seu Nome" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
                           <Input label="Telefone Pessoal" value={formData.personalPhone} onChange={e => setFormData({...formData, personalPhone: formatPhone(e.target.value)})} maxLength={15} />
+                          {session?.user?.email && (
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-title uppercase tracking-wider flex items-center justify-between">
+                                <span className="flex items-center gap-1.5">
+                                  <Mail size={13} className="text-secondary" />
+                                  E-mail de Login da Conta
+                                </span>
+                                <span className="text-[10px] text-green-400 font-bold">Ativo</span>
+                              </label>
+                              <div className="w-full bg-black/20 text-white/80 rounded-xl py-3 px-4 border border-white/10 text-sm font-mono truncate select-all">
+                                {session.user.email}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-4">
