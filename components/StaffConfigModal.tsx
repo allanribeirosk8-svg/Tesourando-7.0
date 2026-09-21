@@ -174,8 +174,9 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
         return;
       }
 
-      if (!trimmedPass || trimmedPass.length < 6) {
-        setFormError('A senha provisória do profissional deve ter no mínimo 6 caracteres.');
+      // Senha é obrigatória apenas para novos usuários (se fornecida, deve ter no mínimo 6 caracteres)
+      if (trimmedPass && trimmedPass.length < 6) {
+        setFormError('A senha provisória do novo profissional deve ter no mínimo 6 caracteres.');
         return;
       }
     }
@@ -559,24 +560,26 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-title uppercase tracking-wider flex items-center justify-between">
-                      <span>Senha Provisória</span>
-                      <span className="text-[10px] font-bold text-amber-400">mín. 6 dígitos</span>
+                      <span>Senha Provisória (Novo Usuário)</span>
+                      <span className="text-[10px] font-bold text-amber-400">mín. 6 dígitos para novas contas</span>
                     </label>
                     <div className="relative">
                       <Lock size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-title" />
                       <input
                         id="staff-password-input"
                         type="password"
-                        required
                         value={password}
                         onChange={(e) => {
                           setPassword(e.target.value);
                           if (formError) setFormError(null);
                         }}
-                        placeholder="Min. 6 caracteres (Ex: Mudar@123)"
+                        placeholder="Obrigatória apenas para novas contas (Ex: Mudar@123)"
                         className="w-full bg-black/20 text-white rounded-xl py-3 pl-11 pr-4 border border-white/10 focus:border-primary focus:outline-none text-sm transition-colors"
                       />
                     </div>
+                    <p className="text-[11px] text-title/60 pt-0.5">
+                      Se o e-mail já pertencer a um usuário no sistema, a senha existente será preservada e ele será apenas vinculado a esta barbearia.
+                    </p>
                   </div>
                 </div>
               )}

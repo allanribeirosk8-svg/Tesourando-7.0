@@ -2279,13 +2279,13 @@ export const AppProvider: React.FC<{
       const trimmedEmail = params.email?.trim().toLowerCase();
       const trimmedPassword = params.password?.trim();
 
-      if (!trimmedEmail || !trimmedEmail.includes('@') || !trimmedPassword) {
-        throw new Error('E-mail e senha são obrigatórios. Todo profissional deve possuir credenciais de login para acessar o sistema.');
+      if (!trimmedEmail || !trimmedEmail.includes('@')) {
+        throw new Error('E-mail válido é obrigatório para cadastrar ou vincular o profissional.');
       }
 
       const res = await supabaseService.createStaffDirectly({
         email: trimmedEmail,
-        password: trimmedPassword,
+        password: trimmedPassword || undefined,
         role: params.role || 'staff',
         name: params.name.trim(),
         phone: params.phone?.trim(),

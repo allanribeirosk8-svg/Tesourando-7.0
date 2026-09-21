@@ -3725,15 +3725,18 @@ export const supabaseService = {
         throw new Error('Sem conexão com o servidor');
       }
 
-      const functionPayload = {
+      const functionPayload: any = {
         email: params.email,
-        password: params.password || 'Mudar@123',
         barbershop_id: barbershopId,
         role: params.role,
         name: params.name,
         phone: params.phone || '',
         commissionRate: params.commissionRate ?? 30
       };
+
+      if (params.password) {
+        functionPayload.password = params.password;
+      }
 
       const { data, error } = await supabase.functions.invoke('create-staff', {
         body: functionPayload
