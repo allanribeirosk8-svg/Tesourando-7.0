@@ -3,5 +3,8 @@
   "description": "App de agendamento de barbearia com interface amigável e gestão interna.",
   "requestFramePermissions": [
     "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

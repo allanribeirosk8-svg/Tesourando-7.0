@@ -244,14 +244,30 @@ export const AppProvider: React.FC<{
       const currentSession = sessionRef.current;
       const barbershopId = activeBarbershopId || activeTenant?.id;
       if (!isSupabaseConfigured() || !currentSession?.user?.id || !barbershopId) return;
-      const [bs, members, invites] = await Promise.all([
-        supabaseService.getBarbershop(),
+
+      const [bsResult, membersResult, invitesResult] = await Promise.allSettled([
+        supabaseService.getBarbershop(barbershopId),
         supabaseService.getBarbershopMembers(barbershopId),
         supabaseService.getInvites(barbershopId)
       ]);
-      setBarbershop(bs);
-      setBarbershopMembers(members);
-      setBarbershopInvites(invites);
+
+      if (bsResult.status === 'fulfilled') {
+        setBarbershop(bsResult.value);
+      } else {
+        console.warn('[loadBarbershopData] Aviso ao buscar barbearia:', bsResult.reason);
+      }
+
+      if (membersResult.status === 'fulfilled') {
+        setBarbershopMembers(membersResult.value);
+      } else {
+        console.warn('[loadBarbershopData] Aviso ao buscar membros:', membersResult.reason);
+      }
+
+      if (invitesResult.status === 'fulfilled') {
+        setBarbershopInvites(invitesResult.value);
+      } else {
+        console.warn('[loadBarbershopData] Aviso ao buscar convites:', invitesResult.reason);
+      }
     } catch (err) {
       console.error('[loadBarbershopData] Error loading barbershop data:', err);
     }
@@ -587,15 +603,20 @@ export const AppProvider: React.FC<{
       }
 
       try {
-        const [bs, members, invites] = await Promise.all([
-          supabaseService.getBarbershop(),
-          supabaseService.getBarbershopMembers(),
-          supabaseService.getInvites()
+        const [bsResult, membersResult, invitesResult] = await Promise.allSettled([
+          supabaseService.getBarbershop(barbershopId),
+          supabaseService.getBarbershopMembers(barbershopId),
+          supabaseService.getInvites(barbershopId)
         ]);
         if (requestId === bootRequestIdRef.current) {
-          setBarbershop(bs);
-          setBarbershopMembers(members);
-          setBarbershopInvites(invites);
+          if (bsResult.status === 'fulfilled') setBarbershop(bsResult.value);
+          else console.warn('[STORE] Aviso ao buscar barbearia secundária:', bsResult.reason);
+
+          if (membersResult.status === 'fulfilled') setBarbershopMembers(membersResult.value);
+          else console.warn('[STORE] Aviso ao buscar membros secundários:', membersResult.reason);
+
+          if (invitesResult.status === 'fulfilled') setBarbershopInvites(invitesResult.value);
+          else console.warn('[STORE] Aviso ao buscar convites secundários:', invitesResult.reason);
         }
       } catch (bsErr) {
         console.warn('[STORE] Aviso ao buscar dados secundários da barbearia:', bsErr);
@@ -1328,12 +1349,14 @@ export const AppProvider: React.FC<{
     }
   }, [activeTenant, activeBarbershopId]);
 
-  const addAppointment = useCallback(async (apt: Appointment, isExceptional?: boolean) => {
+  const addAppointment = useCallback(async (apt: Appointment, isExceptional?: boolean, serviceIds?: string[]): Promise<Appointment> => {
+    const isUuid = (value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
     // 1. Time normalization
     const normalizedTimeValue = normalizeTime(apt.time);
     if (!normalizedTimeValue) {
-      console.error("Horário inválido");
-      return;
+      throw new Error("Horário inválido");
     }
 
     // 2. Exceptional handling
@@ -1346,20 +1369,19 @@ export const AppProvider: React.FC<{
     const currentUserId = sessionRef.current?.user?.id;
     
     const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
+    const isStaff = userRole === 'staff';
     const effectiveStaffId = isAdmin 
       ? (apt.staffId || currentStaff?.id || staff[0]?.id || '') 
       : (currentStaff?.id || staff.find(s => s.userId === currentUserId || s.id === currentUserId)?.id || '');
 
-    if (!resolvedTenantId) {
-      console.error("[addAppointment] barbershop_id não encontrado.");
-      alert("Erro: Barbearia não identificada.");
-      return;
+    if (!resolvedTenantId || !isUuid(resolvedTenantId)) {
+      console.error("[addAppointment] barbershop_id não encontrado ou inválido:", resolvedTenantId);
+      throw new Error("Identificador da barbearia inválido ou não encontrado.");
     }
 
     if (!effectiveStaffId) {
       console.error("[addAppointment] staff_id não encontrado.");
-      alert("Erro: Profissional não identificado.");
-      return;
+      throw new Error("Profissional não identificado.");
     }
 
     const finalApt: Appointment = {
@@ -1376,39 +1398,86 @@ export const AppProvider: React.FC<{
       a.date === finalApt.date && 
       a.time === finalApt.time && 
       a.staffId === finalApt.staffId &&
+      a.status !== 'cancelled' &&
+      a.status !== 'no-show' &&
       a.id !== finalApt.id
     );
 
     if (isConflict) {
-      console.error("Este horário já está ocupado por outro agendamento.");
-      alert("Este horário já está ocupado por outro agendamento.");
-      return;
+      throw new Error("Este horário já está ocupado por outro agendamento.");
     }
 
+    let savedApt: Appointment;
+
+    if (isStaff) {
+      // Para staff: criação EXCLUSIVA via RPC create_my_appointment no backend
+      let targetServiceIds: string[] = serviceIds || [];
+      if (!targetServiceIds || targetServiceIds.length === 0) {
+        const aptServiceNames = (apt.service || '').split('+').map(s => s.trim().toLowerCase());
+        targetServiceIds = services
+          .filter(s => aptServiceNames.some(name => s.name.toLowerCase().includes(name) || name.includes(s.name.toLowerCase())))
+          .map(s => s.id)
+          .filter(isUuid);
+      }
+
+      if (targetServiceIds.length === 0 && services.length > 0) {
+        targetServiceIds = [services[0].id];
+      }
+
+      if (targetServiceIds.length === 0) {
+        throw new Error("Nenhum serviço válido identificado para este agendamento.");
+      }
+
+      savedApt = await supabaseService.createMyAppointment({
+        barbershopId: resolvedTenantId,
+        clientName: finalApt.clientName,
+        clientPhone: finalApt.phone,
+        serviceIds: targetServiceIds,
+        date: finalApt.date,
+        time: finalApt.time,
+        observation: finalObservation
+      });
+    } else {
+      // Para admin / owner
+      savedApt = await supabaseService.saveAppointment(finalApt, resolvedTenantId);
+    }
+
+    if (!savedApt?.id || !isUuid(savedApt.id)) {
+      throw new Error("O servidor retornou um agendamento com identificador inválido.");
+    }
+
+    const normalizedSavedApt = normalizeAppointment(savedApt);
+
+    // 4. Atualizar agenda e clientes SOMENTE APÓS persistência confirmada pelo Supabase
     setAppointments(prev => {
-      const next = [...prev, finalApt];
-      return next;
+      const exists = prev.some(a => a.id === normalizedSavedApt.id);
+      if (exists) {
+        return prev.map(a => a.id === normalizedSavedApt.id ? normalizedSavedApt : a);
+      }
+      return [...prev, normalizedSavedApt];
     });
-    
-    const normalizedPhone = normalizePhone(finalApt.phone);
-    
+
+    const normalizedPhone = normalizePhone(normalizedSavedApt.phone);
     setCustomers(prev => {
       const existing = prev[normalizedPhone];
-      if (existing) return { ...prev, [normalizedPhone]: { ...existing, name: finalApt.clientName, phone: finalApt.phone } };
+      if (existing) return { ...prev, [normalizedPhone]: { ...existing, name: normalizedSavedApt.clientName, phone: normalizedSavedApt.phone } };
       return {
         ...prev,
-        [normalizedPhone]: { phone: finalApt.phone, name: finalApt.clientName, cutCount: 0, history: [], photos: [] }
+        [normalizedPhone]: { phone: normalizedSavedApt.phone, name: normalizedSavedApt.clientName, cutCount: 0, history: [], photos: [] }
       };
     });
+
+    // Mark this date to skip the next fetch to avoid race conditions
+    skipNextFetchRef.current[normalizedSavedApt.date] = true;
 
     // Optional: Add to unblocked_slots for consistency if exceptional
     if (isExceptional) {
       setUnblockedSlots(prev => {
-        const dateSlots = prev[finalApt.date] || [];
-        if (!dateSlots.includes(finalApt.time)) {
-          const next = { ...prev, [finalApt.date]: [...dateSlots, finalApt.time] };
+        const dateSlots = prev[normalizedSavedApt.date] || [];
+        if (!dateSlots.includes(normalizedSavedApt.time)) {
+          const next = { ...prev, [normalizedSavedApt.date]: [...dateSlots, normalizedSavedApt.time] };
           if (isSupabaseConfigured()) {
-            supabaseService.saveUnblockedSlot(finalApt.date, finalApt.time, true).catch(console.error);
+            supabaseService.saveUnblockedSlot(normalizedSavedApt.date, normalizedSavedApt.time, true).catch(console.error);
           }
           return next;
         }
@@ -1416,79 +1485,46 @@ export const AppProvider: React.FC<{
       });
     }
 
-    try {
-      const targetBarbershopId = resolvedTenantId || activeBarbershopId || activeTenant?.id;
-
-      if (targetBarbershopId) {
-        try {
-          const savedApt = await supabaseService.saveAppointment(finalApt, targetBarbershopId);
-          const normalizedSavedApt = normalizeAppointment(savedApt);
-
-          // Update state with the real ID from Supabase
-          setAppointments(prev => {
-            const next = prev.map(a => a.id === finalApt.id ? normalizedSavedApt : a);
-            return next;
-          });
-          
-          // Mark this date to skip the next fetch to avoid race conditions
-          skipNextFetchRef.current[finalApt.date] = true;
-          
-          // Also save/update customer
-          await supabaseService.saveCustomer({ 
-            phone: finalApt.phone, 
-            name: finalApt.clientName, 
-            cutCount: 0, 
-            history: [], 
-            photos: [] 
-          }, targetBarbershopId);
-        } catch (err) {
-          throw err;
-        }
-      }
-    } catch (e) {
-      console.error("Supabase sync error", e);
-    }
-
-    // Criar notificações operacionais automáticas
+    // Criar notificações operacionais automáticas com o UUID persistido
     const createAptNotifications = async () => {
       try {
-        const staffName = staff.find(s => s.id === finalApt.staffId)?.name || 'Profissional';
-        const formattedDate = finalApt.date.split('-').reverse().join('/');
+        const staffName = staff.find(s => s.id === normalizedSavedApt.staffId)?.name || 'Profissional';
+        const formattedDate = normalizedSavedApt.date.split('-').reverse().join('/');
         
         await addNotification({
           tenantId: resolvedTenantId,
-          staffId: finalApt.staffId !== resolvedTenantId ? finalApt.staffId : null,
+          staffId: normalizedSavedApt.staffId !== resolvedTenantId ? normalizedSavedApt.staffId : null,
           title: 'Agendamento Confirmado',
-          message: `O agendamento de ${finalApt.clientName} para o serviço de ${finalApt.service} no dia ${formattedDate} às ${finalApt.time} com ${staffName} foi confirmado.`,
+          message: `O agendamento de ${normalizedSavedApt.clientName} para o serviço de ${normalizedSavedApt.service} no dia ${formattedDate} às ${normalizedSavedApt.time} com ${staffName} foi confirmado.`,
           type: 'appointment_confirmed',
           priority: 'medium',
           groupKey: 'appointment_confirmed',
           expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).getTime(),
           meta: {
-            appointmentId: finalApt.id,
-            clientPhone: finalApt.phone,
-            price: finalApt.price,
-            date: finalApt.date,
-            time: finalApt.time
+            appointmentId: normalizedSavedApt.id,
+            clientPhone: normalizedSavedApt.phone,
+            price: normalizedSavedApt.price,
+            date: normalizedSavedApt.date,
+            time: normalizedSavedApt.time
           }
         });
 
-        if (finalApt.staffId && finalApt.staffId !== resolvedTenantId) {
+        if (normalizedSavedApt.staffId && normalizedSavedApt.staffId !== resolvedTenantId) {
           await addNotification({
             tenantId: resolvedTenantId,
             staffId: null, // direcional ao admin
             title: 'Novo Agendamento Criado',
-            message: `Novo agendamento de ${finalApt.clientName} com o profissional ${staffName} para ${finalApt.service} no dia ${formattedDate} às ${finalApt.time}.`,
+            message: `Novo agendamento de ${normalizedSavedApt.clientName} com o profissional ${staffName} para ${normalizedSavedApt.service} no dia ${formattedDate} às ${normalizedSavedApt.time}.`,
             type: 'appointment_created',
             priority: 'medium',
             groupKey: 'appointment_created',
             expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).getTime(),
             meta: {
-              appointmentId: finalApt.id,
-              clientPhone: finalApt.phone,
-              price: finalApt.price,
-              date: finalApt.date,
-              time: finalApt.time
+              appointmentId: normalizedSavedApt.id,
+              clientPhone: normalizedSavedApt.phone,
+              price: normalizedSavedApt.price,
+              date: normalizedSavedApt.date,
+              time: normalizedSavedApt.time
             }
           });
         }
@@ -1498,7 +1534,8 @@ export const AppProvider: React.FC<{
     };
     createAptNotifications();
 
-  }, [activeBarbershopId, staff, addNotification, activeTenant]);
+    return normalizedSavedApt;
+  }, [activeBarbershopId, staff, services, userRole, addNotification, activeTenant]);
 
   const updateAppointment = useCallback(async (id: string, updates: Partial<Appointment>) => {
     let updatedApt: Appointment | undefined;
@@ -1532,154 +1569,171 @@ export const AppProvider: React.FC<{
   }, []);
 
   const finishAppointment = useCallback(async (id: string) => {
+    const isUuid = (value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+    if (!id || !isUuid(id)) {
+      throw new Error(
+        'Este agendamento ainda não foi sincronizado com o servidor. Atualize a agenda e tente novamente.'
+      );
+    }
+
     if (finishingRef.current.has(id)) return;
     finishingRef.current.add(id);
 
-    const apt = appointmentsRef.current.find(a => a.id === id);
-    if (!apt) {
-      finishingRef.current.delete(id);
-      return;
-    }
+    try {
+      const apt = appointmentsRef.current.find(a => a.id === id);
+      if (!apt) {
+        throw new Error('Agendamento não encontrado na agenda.');
+      }
 
-    // Se o appointment já estiver completed ao iniciar:
-    // - não tentar inserir nova receita;
-    // - consultar/sincronizar a receita existente, se necessário;
-    // - não bloquear visualmente o usuário com erro.
-    if (apt.status === 'completed') {
-      try {
-        const currentSession = sessionRef.current;
-        const barbershopId = activeTenant?.id;
-        if (currentSession?.user?.id && barbershopId) {
-          const { data: existingTx, error: txFetchErr } = await supabase
+      // Se o agendamento já estiver completed no banco/estado, sincronizar transação e retornar
+      if (apt.status === 'completed') {
+        const barbershopId = activeTenant?.id || activeBarbershopId;
+        if (barbershopId) {
+          const { data: existingTx } = await supabase
             .from('transactions')
             .select('*')
             .eq('barbershop_id', barbershopId)
             .eq('linked_appointment_id', id)
             .maybeSingle();
 
-            if (txFetchErr) {
-              console.warn('[finishAppointment] Erro ao consultar transação de agendamento já concluído:', txFetchErr);
-            } else if (existingTx) {
-              const formattedTx: Transaction = {
-                id: existingTx.id,
-                tenantId: existingTx.barbershop_id,
-                staffId: existingTx.staff_id || undefined,
-                type: existingTx.type,
-                amount: Number(existingTx.amount),
-                description: existingTx.description,
-                category: existingTx.category,
-                date: existingTx.date,
-                linkedAppointmentId: existingTx.linked_appointment_id,
-                paymentMethod: existingTx.payment_method,
-                createdAt: new Date(existingTx.created_at).getTime()
-              };
+          if (existingTx) {
+            const formattedTx: Transaction = {
+              id: existingTx.id,
+              tenantId: existingTx.barbershop_id,
+              staffId: existingTx.staff_id || undefined,
+              type: existingTx.type,
+              amount: Number(existingTx.amount),
+              description: existingTx.description,
+              category: existingTx.category,
+              date: existingTx.date,
+              linkedAppointmentId: existingTx.linked_appointment_id,
+              paymentMethod: existingTx.payment_method,
+              createdAt: new Date(existingTx.created_at).getTime()
+            };
 
-              setTransactions(prev => {
-                const exists = prev.some(item => item.id === formattedTx.id);
-                if (exists) {
-                  return prev.map(item => item.id === formattedTx.id ? formattedTx : item);
-                }
-                return [formattedTx, ...prev];
-              });
-              console.info('[finishAppointment] Receita já existia; estado sincronizado.');
-            }
-          }
-      } catch (err) {
-        console.warn('[finishAppointment] Aviso ao sincronizar transação de agendamento já concluído:', err);
-      } finally {
-        finishingRef.current.delete(id);
-      }
-      return;
-    }
-
-    const updatedApt = { ...apt, status: 'completed' as const };
-    setAppointments(prevApts => 
-      prevApts.map(a => a.id === id ? updatedApt : a)
-    );
-
-    setCustomers(prevCusts => {
-      const normalizedPhone = normalizePhone(apt.phone);
-      const customer = prevCusts[normalizedPhone] || { phone: apt.phone, name: apt.clientName, cutCount: 0, history: [], photos: [] };
-      const updatedCust = {
-        ...customer,
-        cutCount: (customer.cutCount || 0) + 1,
-        history: [{ date: apt.date, time: apt.time, service: apt.service, price: apt.price }, ...(customer.history || [])]
-      };
-      
-      const sync = async () => {
-        try {
-          const currentSession = sessionRef.current;
-          if (currentSession) {
-            const savedApt = await supabaseService.completeAppointment(id);
-            setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
-            supabaseService.saveCustomer(updatedCust).catch(console.error);
-
-            try {
-              const res = await addTransaction({
-                type: 'income',
-                category: 'walk_in',
-                amount: apt.price,
-                description: `${apt.service} — ${apt.clientName}`,
-                date: `${apt.date}T12:00:00`,
-                linkedAppointmentId: apt.id,
-                staffId: apt.staffId,
-              });
-
-              if (res && res.alreadyExisted) {
-                console.info('[finishAppointment] Receita já existia; estado sincronizado.');
+            setTransactions(prev => {
+              const exists = prev.some(item => item.id === formattedTx.id || item.linkedAppointmentId === id);
+              if (exists) {
+                return prev.map(item => (item.id === formattedTx.id || item.linkedAppointmentId === id) ? formattedTx : item);
               }
-            } catch (txErr) {
-              if (isDuplicateLinkedAppointmentTransactionError(txErr)) {
-                console.info('[finishAppointment] Receita já existia; estado sincronizado.');
-              } else {
-                console.error('[finishAppointment] Erro ao registrar receita de agendamento:', txErr);
-                throw txErr;
-              }
-            }
+              return [formattedTx, ...prev];
+            });
           }
-        } catch (err) {
-          console.error('[finishAppointment] Erro ao finalizar agendamento:', err);
-          throw err;
-        } finally {
-          finishingRef.current.delete(id);
         }
-      };
-      sync();
-      
-      return {
-        ...prevCusts,
-        [normalizedPhone]: updatedCust
-      };
-    });
-  }, [addTransaction, activeBarbershopId]);
+        return;
+      }
+
+      // Chamada à RPC segura e idempotente no Supabase
+      const res = await supabaseService.completeMyAppointment(id);
+      const completedApt = res.appointment;
+
+      // 1. Atualizar agendamento local SOMENTE APÓS persistência confirmada pelo banco
+      setAppointments(prevApts => 
+        prevApts.map(a => a.id === id ? { ...a, ...completedApt, status: 'completed' } : a)
+      );
+
+      // 2. Atualizar contadores do cliente localmente
+      const normalizedPhone = normalizePhone(apt.phone);
+      setCustomers(prevCusts => {
+        const customer = prevCusts[normalizedPhone] || { phone: apt.phone, name: apt.clientName, cutCount: 0, history: [], photos: [] };
+        return {
+          ...prevCusts,
+          [normalizedPhone]: {
+            ...customer,
+            cutCount: (customer.cutCount || 0) + 1,
+            history: [{ date: apt.date, time: apt.time, service: apt.service, price: apt.price }, ...(customer.history || [])]
+          }
+        };
+      });
+
+      // 3. Atualizar transação financeira retornada pela RPC (ou consultar no banco)
+      if (res.transaction) {
+        const formattedTx: Transaction = res.transaction;
+        setTransactions(prev => {
+          const exists = prev.some(item => item.id === formattedTx.id || item.linkedAppointmentId === id);
+          if (exists) {
+            return prev.map(item => (item.id === formattedTx.id || item.linkedAppointmentId === id) ? formattedTx : item);
+          }
+          return [formattedTx, ...prev];
+        });
+      } else {
+        const barbershopId = activeTenant?.id || activeBarbershopId;
+        if (barbershopId) {
+          const { data: existingTx } = await supabase
+            .from('transactions')
+            .select('*')
+            .eq('barbershop_id', barbershopId)
+            .eq('linked_appointment_id', id)
+            .maybeSingle();
+
+          if (existingTx) {
+            const formattedTx: Transaction = {
+              id: existingTx.id,
+              tenantId: existingTx.barbershop_id,
+              staffId: existingTx.staff_id || undefined,
+              type: existingTx.type,
+              amount: Number(existingTx.amount),
+              description: existingTx.description,
+              category: existingTx.category,
+              date: existingTx.date,
+              linkedAppointmentId: existingTx.linked_appointment_id,
+              paymentMethod: existingTx.payment_method,
+              createdAt: new Date(existingTx.created_at).getTime()
+            };
+
+            setTransactions(prev => {
+              const exists = prev.some(item => item.id === formattedTx.id || item.linkedAppointmentId === id);
+              if (exists) {
+                return prev.map(item => (item.id === formattedTx.id || item.linkedAppointmentId === id) ? formattedTx : item);
+              }
+              return [formattedTx, ...prev];
+            });
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error('[finishAppointment] Erro ao finalizar agendamento:', err);
+      // Não muda status local para completed
+      // Não cria transaction local
+      // Não atualiza financeiro
+      throw err;
+    } finally {
+      finishingRef.current.delete(id);
+    }
+  }, [activeTenant?.id, activeBarbershopId]);
 
   const markNoShow = useCallback(async (id: string) => {
+    const isUuid = (value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+    if (!id || !isUuid(id)) {
+      throw new Error('Este agendamento ainda não foi sincronizado com o servidor. Atualize a agenda e tente novamente.');
+    }
+
     const apt = appointmentsRef.current.find(a => a.id === id);
     if (!apt || apt.status !== 'pending') return;
 
-    const updatedApt = { ...apt, status: 'no-show' as const };
-    setAppointments(prevApts => 
-      prevApts.map(a => a.id === id ? updatedApt : a)
-    );
+    try {
+      await supabaseService.markAppointmentNoShow(id);
 
-    setCustomers(prevCusts => {
+      setAppointments(prevApts => 
+        prevApts.map(a => a.id === id ? { ...a, status: 'no-show' } : a)
+      );
+
       const normalizedPhone = normalizePhone(apt.phone);
-      const customer = prevCusts[normalizedPhone] || { phone: apt.phone, name: apt.clientName, cutCount: 0, noShowCount: 0, history: [], photos: [] };
-      const updatedCust = {
-        ...customer,
-        noShowCount: (customer.noShowCount || 0) + 1,
-        history: [{ date: apt.date, time: apt.time, service: 'Falta registrada', price: 0 }, ...(customer.history || [])]
-      };
-
-      const sync = async () => {
-        const currentSession = sessionRef.current;
-        if (currentSession) {
-          const savedApt = await supabaseService.markAppointmentNoShow(id);
-          setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
-          supabaseService.saveCustomer(updatedCust).catch(console.error);
-        }
-      };
-      sync();
+      setCustomers(prevCusts => {
+        const customer = prevCusts[normalizedPhone] || { phone: apt.phone, name: apt.clientName, cutCount: 0, noShowCount: 0, history: [], photos: [] };
+        return {
+          ...prevCusts,
+          [normalizedPhone]: {
+            ...customer,
+            noShowCount: (customer.noShowCount || 0) + 1,
+            history: [{ date: apt.date, time: apt.time, service: 'Falta registrada', price: 0 }, ...(customer.history || [])]
+          }
+        };
+      });
 
       // Disparar notificações automáticas
       const resolvedTenantId = apt.tenantId || activeBarbershopId || activeTenant?.id || '';
@@ -1721,72 +1775,70 @@ export const AppProvider: React.FC<{
           }).catch(console.error);
         }
       }
-
-      return {
-        ...prevCusts,
-        [normalizedPhone]: updatedCust
-      };
-    });
+    } catch (err) {
+      console.error('[markNoShow] Erro ao registrar no-show:', err);
+      throw err;
+    }
   }, [activeBarbershopId, activeTenant, addNotification]);
 
   const revertAppointment = useCallback(async (id: string) => {
+    const isUuid = (value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+    if (!id || !isUuid(id)) {
+      throw new Error('Este agendamento ainda não foi sincronizado com o servidor. Atualize a agenda e tente novamente.');
+    }
+
     const apt = appointmentsRef.current.find(a => a.id === id);
     if (!apt || apt.status === 'pending') return;
     const currentStatus = apt.status;
 
-    const updatedApt = { ...apt, status: 'pending' as const };
-    setAppointments(prevApts => 
-      prevApts.map(a => a.id === id ? updatedApt : a)
-    );
+    try {
+      await supabaseService.revertAppointment(id);
 
-    setCustomers(prevCusts => {
+      setAppointments(prevApts => 
+        prevApts.map(a => a.id === id ? { ...a, status: 'pending' } : a)
+      );
+
       const normalizedPhone = normalizePhone(apt.phone);
-      const customer = prevCusts[normalizedPhone];
-      if (!customer) return prevCusts;
-      
-      const historySearchService = currentStatus === 'no-show' 
-        ? 'Falta registrada' 
-        : apt.service;
+      setCustomers(prevCusts => {
+        const customer = prevCusts[normalizedPhone];
+        if (!customer) return prevCusts;
         
-      const historyIndex = customer.history.findIndex(h => h.date === apt.date && h.service === historySearchService);
-      let newHistory = [...customer.history];
-      if (historyIndex !== -1) newHistory.splice(historyIndex, 1);
-      
-      const updatedCust = { 
-        ...customer, 
-        cutCount: currentStatus === 'completed' ? Math.max(0, (customer.cutCount || 0) - 1) : customer.cutCount,
-        noShowCount: currentStatus === 'no-show' ? Math.max(0, (customer.noShowCount || 0) - 1) : customer.noShowCount,
-        history: newHistory 
-      };
-
-      const sync = async () => {
-        const currentSession = sessionRef.current;
-        if (currentSession) {
-          const savedApt = await supabaseService.revertAppointment(id);
-          setAppointments(prev => prev.map(a => a.id === id ? normalizeAppointment(savedApt) : a));
-          supabaseService.saveCustomer(updatedCust).catch(console.error);
-
-          // Se o agendamento estava concluído, remover transação de receita vinculada
-          if (currentStatus === 'completed') {
-            const { error: delTxErr } = await supabase
-              .from('transactions')
-              .delete()
-              .eq('linked_appointment_id', id);
-            
-            if (delTxErr) {
-              console.warn('[revertAppointment] Erro ao remover transação vinculada:', delTxErr);
-            }
-            setTransactions(prev => prev.filter(t => t.linkedAppointmentId !== id));
+        const historySearchService = currentStatus === 'no-show' 
+          ? 'Falta registrada' 
+          : apt.service;
+          
+        const historyIndex = customer.history.findIndex(h => h.date === apt.date && h.service === historySearchService);
+        let newHistory = [...customer.history];
+        if (historyIndex !== -1) newHistory.splice(historyIndex, 1);
+        
+        return { 
+          ...prevCusts, 
+          [normalizedPhone]: {
+            ...customer, 
+            cutCount: currentStatus === 'completed' ? Math.max(0, (customer.cutCount || 0) - 1) : customer.cutCount,
+            noShowCount: currentStatus === 'no-show' ? Math.max(0, (customer.noShowCount || 0) - 1) : customer.noShowCount,
+            history: newHistory 
           }
-        }
-      };
-      sync();
+        };
+      });
 
-      return {
-        ...prevCusts,
-        [normalizedPhone]: updatedCust
-      };
-    });
+      if (currentStatus === 'completed') {
+        const { error: delTxErr } = await supabase
+          .from('transactions')
+          .delete()
+          .eq('linked_appointment_id', id);
+        
+        if (delTxErr) {
+          console.warn('[revertAppointment] Erro ao remover transação vinculada:', delTxErr);
+        }
+        setTransactions(prev => prev.filter(t => t.linkedAppointmentId !== id));
+      }
+    } catch (err) {
+      console.error('[revertAppointment] Erro ao reverter agendamento:', err);
+      throw err;
+    }
   }, []);
 
   const deleteAppointment = useCallback(async (id: string) => {

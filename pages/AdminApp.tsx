@@ -1398,7 +1398,7 @@ export const AdminApp: React.FC = () => {
         
       </motion.header>
 
-      <main className={`relative flex-1 flex flex-col min-h-0 bg-[#1E1B4B] ${activeTab === 'agenda' ? 'overflow-hidden z-0' : 'overflow-y-auto pb-[92px]'}`}>
+      <main className={`relative flex-1 flex flex-col min-h-0 bg-[#1E1B4B] ${activeTab === 'agenda' ? 'overflow-hidden z-0' : activeTab === 'caixa' ? 'overflow-y-auto' : 'overflow-y-auto pb-[92px]'}`}>
         {activeTab === 'agenda' && (
             <AgendaView 
                 selectedDate={selectedDate}
@@ -1924,23 +1924,25 @@ const AgendaView: React.FC<{
     };
   }, [activeSlotMenu, activeCancelMenu, activeNoShowMenu, activeFinishMenu, activeRevertMenu, activeUnlockMenu]);
 
-  const handleFinish = (id: string) => {
+  const handleFinish = async (id: string) => {
     setFinishingId(id);
-    
-    // Trigger confetti
-    confetti({
-      particleCount: 100,
-      spread: 70,
-      origin: { y: 0.7 },
-      colors: ['#F99417', '#3CB878', '#ffffff'],
-      zIndex: 100
-    });
+    try {
+      await finishAppointment(id);
 
-    // Delay the actual state update to allow animation to play in place
-    setTimeout(() => {
-      finishAppointment(id);
+      // Trigger confetti somente após confirmação do backend
+      confetti({
+        particleCount: 100,
+        spread: 70,
+        origin: { y: 0.7 },
+        colors: ['#F99417', '#3CB878', '#ffffff'],
+        zIndex: 100
+      });
+    } catch (err: any) {
+      console.error("[handleFinish] Erro ao finalizar atendimento no servidor:", err);
+      alert(err?.message || "Erro ao finalizar atendimento no servidor.");
+    } finally {
       setFinishingId(null);
-    }, 1000);
+    }
   };
 
   useLockBodyScroll(!!weeklyUnlockSlot);
@@ -2586,7 +2588,7 @@ const AgendaView: React.FC<{
           marginBottom: `-${parallaxOffset}px`,
           transition: 'transform 0.15s ease-out, margin-bottom 0.15s ease-out'
         }}
-        className="flex-1 bg-[#F5F5F8] rounded-t-[28px] -mt-[10px] pt-0 px-4 shadow-[0_-4px_16px_rgba(0,0,0,0.1)] pb-28 relative z-10 min-h-0 overflow-y-auto"
+        className="flex-1 bg-[#F5F5F8] rounded-t-[28px] mt-0 pt-0 px-4 shadow-[0_-4px_16px_rgba(0,0,0,0.1)] pb-28 relative z-10 min-h-0 overflow-y-auto"
       >
         <div className="space-y-4 animate-in fade-in slide-in-from-top-4 duration-500">
         <div className={`sticky top-0 z-20 bg-[#F5F5F8] pt-5 pb-2 -mx-4 px-4 flex items-center relative justify-between gap-2`}>
@@ -3914,17 +3916,6 @@ const AddAppointmentModal: React.FC<{
         throw new Error(val.message);
       }
 
-      // If new customer and "save to contacts" is checked
-      if (isNew && save) {
-        await addCustomer({
-          phone: data.phone,
-          name: capitalizeName(data.name),
-          cutCount: 0,
-          history: [],
-          photos: []
-        });
-      }
-
       const effectiveStaffId = isAdmin 
         ? (data.staffId || currentStaff?.id || myStaff?.id || staff[0]?.id) 
         : (currentStaff?.id || myStaff?.id);
@@ -3933,8 +3924,9 @@ const AddAppointmentModal: React.FC<{
         throw new Error("Profissional não identificado.");
       }
 
+      // Salvar agendamento com confirmação do backend e UUID real
       await addAppointment({
-        id: Date.now().toString(),
+        id: '',
         tenantId: activeTenant?.id || undefined,
         staffId: effectiveStaffId,
         clientName: capitalizeName(data.name),
@@ -3947,12 +3939,27 @@ const AddAppointmentModal: React.FC<{
         observation: data.observation,
         status: 'pending',
         createdAt: Date.now()
-      }, isExceptional);
+      }, isExceptional, data.serviceIds);
+
+      // Salvar contato apenas se o agendamento foi salvo com sucesso
+      if (isNew && save) {
+        try {
+          await addCustomer({
+            phone: data.phone,
+            name: capitalizeName(data.name),
+            cutCount: 0,
+            history: [],
+            photos: []
+          });
+        } catch (custErr) {
+          console.warn("[NewAppointment] Aviso ao salvar contato:", custErr);
+        }
+      }
 
       onClose();
       onSuccess?.();
     } catch (err: any) {
-      console.error("[NewAppointment] Erro ao salvar agendamento ou cliente:", err);
+      console.error("[NewAppointment] Erro ao salvar agendamento:", err);
       alert(err?.message || "Erro ao processar agendamento.");
     } finally {
       setIsSubmitting(false);

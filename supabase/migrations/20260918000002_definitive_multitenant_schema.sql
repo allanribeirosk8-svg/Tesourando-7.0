@@ -71,11 +71,62 @@ GRANT EXECUTE ON FUNCTION public.get_owned_barbershop_ids() TO authenticated;
 REVOKE ALL ON FUNCTION public.get_admin_barbershop_ids() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.get_admin_barbershop_ids() TO authenticated;
 
+
 -- ==============================================================================
--- 4. RECONCILIAÇÃO E CRIAÇÃO IDEMPOTENTE DE TABELAS E ESTRUTURAS
+-- 4. PURGA TOTAL DE TODAS AS POLICIES EXISTENTES (EXECUÇÃO PRÉVIA OBRIGATÓRIA)
+-- Garante que nenhuma policy legada (ex: manage_staff_profiles) permaneça e bloqueie
+-- a alteração ou remoção de colunas legadas como tenant_id (evita erro 2BP01).
+-- ==============================================================================
+DO $$
+DECLARE
+  pol record;
+  target_tables text[] := ARRAY[
+    'barbershops',
+    'barbershop_members',
+    'staff_profiles',
+    'member_permissions',
+    'customers',
+    'customer_photos',
+    'services',
+    'weekly_schedule',
+    'weekly_breaks',
+    'blocked_slots',
+    'unblocked_slots',
+    'appointments',
+    'transactions',
+    'notifications',
+    'barbershop_invites'
+  ];
+  tbl text;
+BEGIN
+  -- 1. Purga policies de tabelas-alvo conhecidas
+  FOREACH tbl IN ARRAY target_tables LOOP
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = tbl) THEN
+      FOR pol IN
+        SELECT policyname
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = tbl
+      LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, tbl);
+      END LOOP;
+    END IF;
+  END LOOP;
+
+  -- 2. Varredura completa: purga qualquer policy legada restante no schema public
+  FOR pol IN
+    SELECT tablename, policyname
+    FROM pg_policies
+    WHERE schemaname = 'public'
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, pol.tablename);
+  END LOOP;
+END $$;
+
+-- ==============================================================================
+-- 5. RECONCILIAÇÃO E CRIAÇÃO IDEMPOTENTE DE TABELAS E ESTRUTURAS
 -- ==============================================================================
 
--- 4.1 Barbearias (barbershops)
+-- 5.1 Barbearias (barbershops)
 CREATE TABLE IF NOT EXISTS public.barbershops (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id uuid NOT NULL,
@@ -106,7 +157,7 @@ CREATE TRIGGER trg_barbershops_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.set_updated_at();
 
--- 4.2 Membros da Barbearia (barbershop_members)
+-- 5.2 Membros da Barbearia (barbershop_members)
 CREATE TABLE IF NOT EXISTS public.barbershop_members (
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
   user_id uuid NOT NULL,
@@ -125,7 +176,7 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
 
--- 4.3 Perfis de Profissionais (staff_profiles)
+-- 5.3 Perfis de Profissionais (staff_profiles)
 CREATE TABLE IF NOT EXISTS public.staff_profiles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -148,7 +199,8 @@ BEGIN
     WHERE table_schema = 'public' AND table_name = 'staff_profiles' AND column_name = 'tenant_id'
   ) THEN
     UPDATE public.staff_profiles SET barbershop_id = tenant_id WHERE barbershop_id IS NULL;
-    ALTER TABLE public.staff_profiles DROP COLUMN tenant_id;
+    DROP POLICY IF EXISTS "manage_staff_profiles" ON public.staff_profiles;
+    ALTER TABLE public.staff_profiles DROP COLUMN IF EXISTS tenant_id CASCADE;
   END IF;
 END $$;
 
@@ -186,7 +238,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_staff_profiles_barbershop_user
 ON public.staff_profiles (barbershop_id, user_id)
 WHERE user_id IS NOT NULL;
 
--- 4.4 Permissões Granulares de Membros (member_permissions)
+-- 5.4 Permissões Granulares de Membros (member_permissions)
 CREATE TABLE IF NOT EXISTS public.member_permissions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL,
@@ -228,7 +280,7 @@ EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'Ajuste de constraints em member_permissions concluído ou já existente: %', SQLERRM;
 END $$;
 
--- 4.5 Serviços (services)
+-- 5.5 Serviços (services)
 CREATE TABLE IF NOT EXISTS public.services (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -239,7 +291,7 @@ CREATE TABLE IF NOT EXISTS public.services (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 4.6 Grade Semanal (weekly_schedule)
+-- 5.6 Grade Semanal (weekly_schedule)
 CREATE TABLE IF NOT EXISTS public.weekly_schedule (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -251,7 +303,7 @@ CREATE TABLE IF NOT EXISTS public.weekly_schedule (
   CONSTRAINT uq_weekly_schedule_tenant_day UNIQUE (barbershop_id, day_of_week)
 );
 
--- 4.7 Pausas Semanais (weekly_breaks)
+-- 5.7 Pausas Semanais (weekly_breaks)
 CREATE TABLE IF NOT EXISTS public.weekly_breaks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -262,7 +314,10 @@ CREATE TABLE IF NOT EXISTS public.weekly_breaks (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 4.8 Bloqueios e Desbloqueios de Horários
+ALTER TABLE public.weekly_breaks 
+  ADD COLUMN IF NOT EXISTS staff_id uuid REFERENCES public.staff_profiles(id) ON DELETE CASCADE;
+
+-- 5.8 Bloqueios e Desbloqueios de Horários
 CREATE TABLE IF NOT EXISTS public.blocked_slots (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -283,7 +338,7 @@ CREATE TABLE IF NOT EXISTS public.unblocked_slots (
 );
 ALTER TABLE public.unblocked_slots ADD COLUMN IF NOT EXISTS staff_id uuid REFERENCES public.staff_profiles(id) ON DELETE CASCADE;
 
--- 4.9 Clientes (customers)
+-- 5.9 Clientes (customers)
 CREATE TABLE IF NOT EXISTS public.customers (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -314,7 +369,7 @@ CREATE TRIGGER trg_customers_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.set_updated_at();
 
--- 4.10 Agendamentos (appointments)
+-- 5.10 Agendamentos (appointments)
 CREATE TABLE IF NOT EXISTS public.appointments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -351,7 +406,7 @@ CREATE TRIGGER trg_appointments_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.set_updated_at();
 
--- 4.11 Transações Financeiras (transactions)
+-- 5.11 Transações Financeiras (transactions)
 CREATE TABLE IF NOT EXISTS public.transactions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -364,7 +419,7 @@ CREATE TABLE IF NOT EXISTS public.transactions (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 4.12 Notificações (notifications)
+-- 5.12 Notificações (notifications)
 CREATE TABLE IF NOT EXISTS public.notifications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -377,7 +432,7 @@ CREATE TABLE IF NOT EXISTS public.notifications (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 4.13 Fotos de Clientes (customer_photos)
+-- 5.13 Fotos de Clientes (customer_photos)
 CREATE TABLE IF NOT EXISTS public.customer_photos (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -386,7 +441,7 @@ CREATE TABLE IF NOT EXISTS public.customer_photos (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 4.14 Convites (barbershop_invites)
+-- 5.14 Convites (barbershop_invites)
 CREATE TABLE IF NOT EXISTS public.barbershop_invites (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   barbershop_id uuid NOT NULL REFERENCES public.barbershops(id) ON DELETE CASCADE,
@@ -398,7 +453,7 @@ CREATE TABLE IF NOT EXISTS public.barbershop_invites (
 );
 
 -- ==============================================================================
--- 5. ÍNDICES DE PERFORMANCE E CONTROLE DE CONCORRÊNCIA
+-- 6. ÍNDICES DE PERFORMANCE E CONTROLE DE CONCORRÊNCIA
 -- ==============================================================================
 CREATE INDEX IF NOT EXISTS idx_barbershops_owner_id ON public.barbershops(owner_id);
 CREATE INDEX IF NOT EXISTS idx_barbershops_slug ON public.barbershops(slug);
@@ -422,47 +477,36 @@ ON public.appointments (barbershop_id, date, staff_id, time)
 WHERE status NOT IN ('cancelled', 'no-show');
 
 -- ==============================================================================
--- 6. PURGA TOTAL DE TODAS AS POLICIES EXISTENTES EM TODAS AS TABELAS-ALVO
--- Garante que nenhuma policy legada permaneça por nome desconhecido
--- ==============================================================================
-DO $$
-DECLARE
-  pol record;
-  target_tables text[] := ARRAY[
-    'barbershops',
-    'barbershop_members',
-    'staff_profiles',
-    'member_permissions',
-    'customers',
-    'customer_photos',
-    'services',
-    'weekly_schedule',
-    'weekly_breaks',
-    'blocked_slots',
-    'unblocked_slots',
-    'appointments',
-    'transactions',
-    'notifications',
-    'barbershop_invites'
-  ];
-  tbl text;
-BEGIN
-  FOREACH tbl IN ARRAY target_tables LOOP
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = tbl) THEN
-      FOR pol IN
-        SELECT policyname
-        FROM pg_policies
-        WHERE schemaname = 'public' AND tablename = tbl
-      LOOP
-        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, tbl);
-      END LOOP;
-    END IF;
-  END LOOP;
-END $$;
-
--- ==============================================================================
 -- 7. RLS POLICIES FINAIS E BLINDADAS POR TABELA
 -- ==============================================================================
+
+-- 7.0 Perfis Globais de Usuários (profiles)
+-- Entidade global de identidade (auth.uid). Acesso estritamente restrito ao próprio usuário autenticado.
+-- Nenhuma policy global ou pública é criada para proteger dados privados de contato e identidade.
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "profiles_select_own" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_insert_own" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
+
+CREATE POLICY "profiles_select_own"
+ON public.profiles
+FOR SELECT
+TO authenticated
+USING (id = auth.uid());
+
+CREATE POLICY "profiles_insert_own"
+ON public.profiles
+FOR INSERT
+TO authenticated
+WITH CHECK (id = auth.uid());
+
+CREATE POLICY "profiles_update_own"
+ON public.profiles
+FOR UPDATE
+TO authenticated
+USING (id = auth.uid())
+WITH CHECK (id = auth.uid());
 
 -- 7.1 Barbearias (barbershops)
 -- UPDATE DIRETO BLOQUEADO: atualizações ocorrem exclusivamente via RPC update_barbershop_profile
@@ -509,6 +553,7 @@ CREATE POLICY "staff_profiles_select" ON public.staff_profiles
     user_id = auth.uid()
     OR barbershop_id IN (SELECT public.get_user_barbershop_ids())
   );
+
 
 -- 7.4 Permissões Granulares de Membros (member_permissions)
 ALTER TABLE public.member_permissions ENABLE ROW LEVEL SECURITY;
@@ -933,7 +978,7 @@ CREATE POLICY "barbershop_invites_select" ON public.barbershop_invites
   FOR SELECT TO authenticated
   USING (
     barbershop_id IN (SELECT public.get_admin_barbershop_ids())
-    OR email = (SELECT email FROM auth.users WHERE id = auth.uid())
+    OR lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''))
   );
 
 CREATE POLICY "barbershop_invites_insert" ON public.barbershop_invites
@@ -959,6 +1004,126 @@ CREATE POLICY "barbershop_invites_delete" ON public.barbershop_invites
 -- ==============================================================================
 -- 8. RPCs DE AUTORIZAÇÃO, WHITELISTS E SEGURANÇA OPERACIONAL (SECURITY DEFINER)
 -- ==============================================================================
+
+-- 8.0 Garantir Staff Profile do Proprietário (comissão 100%, sem duplicidade)
+CREATE OR REPLACE FUNCTION public.ensure_owner_staff_profile(p_barbershop_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_user_id uuid;
+  v_owner_id uuid;
+  v_membership_role text;
+  v_profile RECORD;
+  v_staff RECORD;
+  v_result jsonb;
+BEGIN
+  -- 1. Verificar auth.uid()
+  v_user_id := auth.uid();
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Não autenticado.' USING ERRCODE = '42501';
+  END IF;
+
+  IF p_barbershop_id IS NULL THEN
+    RAISE EXCEPTION 'barbershop_id é obrigatório.' USING ERRCODE = '22023';
+  END IF;
+
+  -- 2. e 3. Buscar barbershops e verificar se barbershops.owner_id = auth.uid()
+  SELECT owner_id INTO v_owner_id
+  FROM public.barbershops
+  WHERE id = p_barbershop_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Barbearia não encontrada.' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF v_owner_id IS DISTINCT FROM v_user_id THEN
+    RAISE EXCEPTION 'Apenas o proprietário da barbearia pode executar esta operação.' USING ERRCODE = '42501';
+  END IF;
+
+  -- 4. Verificar membership: barbershop_members.barbershop_id = p_barbershop_id AND user_id = auth.uid() AND role = 'owner'
+  SELECT role INTO v_membership_role
+  FROM public.barbershop_members
+  WHERE barbershop_id = p_barbershop_id AND user_id = v_user_id;
+
+  IF NOT FOUND OR v_membership_role <> 'owner' THEN
+    INSERT INTO public.barbershop_members (barbershop_id, user_id, role)
+    VALUES (p_barbershop_id, v_user_id, 'owner')
+    ON CONFLICT (barbershop_id, user_id)
+    DO UPDATE SET role = 'owner';
+  END IF;
+
+  -- 6. Buscar staff_profiles: barbershop_id = p_barbershop_id AND user_id = auth.uid()
+  SELECT id, barbershop_id, user_id, name, phone, photo, commission_rate, status
+  INTO v_staff
+  FROM public.staff_profiles
+  WHERE barbershop_id = p_barbershop_id AND user_id = v_user_id
+  LIMIT 1;
+
+  -- 7. Se existir: retornar o registro; não duplicar
+  IF FOUND THEN
+    SELECT jsonb_build_object(
+      'id', v_staff.id,
+      'barbershop_id', v_staff.barbershop_id,
+      'user_id', v_staff.user_id,
+      'name', v_staff.name,
+      'phone', v_staff.phone,
+      'photo', v_staff.photo,
+      'commission_rate', v_staff.commission_rate,
+      'status', v_staff.status,
+      'role', 'owner'
+    ) INTO v_result;
+    RETURN v_result;
+  END IF;
+
+  -- 5. Buscar profile global próprio
+  SELECT name, personal_phone, photo
+  INTO v_profile
+  FROM public.profiles
+  WHERE id = v_user_id;
+
+  -- 8. Se não existir: inserir com comissão 100%
+  INSERT INTO public.staff_profiles (
+    barbershop_id,
+    user_id,
+    name,
+    phone,
+    photo,
+    status,
+    commission_rate
+  ) VALUES (
+    p_barbershop_id,
+    v_user_id,
+    COALESCE(NULLIF(trim(v_profile.name), ''), 'Proprietário'),
+    v_profile.personal_phone,
+    v_profile.photo,
+    'active',
+    100
+  )
+  RETURNING id, barbershop_id, user_id, name, phone, photo, commission_rate, status
+  INTO v_staff;
+
+  -- 9. Retornar dados mínimos do staff_profile
+  SELECT jsonb_build_object(
+    'id', v_staff.id,
+    'barbershop_id', v_staff.barbershop_id,
+    'user_id', v_staff.user_id,
+    'name', v_staff.name,
+    'phone', v_staff.phone,
+    'photo', v_staff.photo,
+    'commission_rate', v_staff.commission_rate,
+    'status', v_staff.status,
+    'role', 'owner'
+  ) INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.ensure_owner_staff_profile(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.ensure_owner_staff_profile(uuid) TO authenticated;
 
 -- 8.1 Atualizar Barbearia via RPC (Whitelist segura: name, phone, address, logo, description, instagram, website)
 CREATE OR REPLACE FUNCTION public.update_barbershop_profile(
@@ -1077,6 +1242,7 @@ DECLARE
   v_is_owner boolean;
   v_is_admin boolean;
   v_target_user_id uuid;
+  v_target_role text;
   v_barbershop_owner_id uuid;
   v_updated record;
 BEGIN
@@ -1100,6 +1266,30 @@ BEGIN
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Profissional não encontrado nesta barbearia.' USING ERRCODE = 'P0002';
+  END IF;
+
+  -- Regra estrita: Admin não altera owner, outro admin ou a si mesmo
+  IF coalesce(v_is_owner, false) = false THEN
+    -- Admin não altera a si mesmo (deve usar update_my_staff_profile para nome/telefone/foto)
+    IF v_target_user_id = auth.uid() THEN
+      RAISE EXCEPTION 'Acesso negado: administradores não podem alterar seu próprio perfil por esta função. Use update_my_staff_profile para atualizar seus dados pessoais.' USING ERRCODE = '42501';
+    END IF;
+
+    -- Admin não altera o proprietário
+    IF v_target_user_id = v_barbershop_owner_id THEN
+      RAISE EXCEPTION 'Acesso negado: administradores não podem alterar o perfil do proprietário.' USING ERRCODE = '42501';
+    END IF;
+
+    -- Admin não altera outro admin
+    IF v_target_user_id IS NOT NULL THEN
+      SELECT role INTO v_target_role
+      FROM public.barbershop_members
+      WHERE barbershop_id = p_barbershop_id AND user_id = v_target_user_id;
+
+      IF v_target_role = 'admin' THEN
+        RAISE EXCEPTION 'Acesso negado: administradores não podem alterar o perfil de outros administradores.' USING ERRCODE = '42501';
+      END IF;
+    END IF;
   END IF;
 
   IF v_target_user_id = v_barbershop_owner_id AND coalesce(v_is_owner, false) = false THEN
@@ -1126,7 +1316,7 @@ BEGIN
     commission_rate = p_commission_rate,
     status = p_status,
     updated_at = now()
-  WHERE id = p_staff_profile_id
+  WHERE id = p_staff_profile_id AND barbershop_id = p_barbershop_id
   RETURNING id, barbershop_id, user_id, name, phone, photo, status, commission_rate INTO v_updated;
 
   RETURN to_jsonb(v_updated);
@@ -1147,32 +1337,63 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_is_authorized boolean := false;
+  v_is_owner boolean := false;
+  v_is_admin boolean := false;
   v_owner_id uuid;
-  v_resolved_user_id uuid := p_staff_user_id;
+  v_actual_user_id uuid;
+  v_resolved_user_id uuid;
+  v_target_role text;
 BEGIN
   IF auth.uid() IS NULL THEN
     RAISE EXCEPTION 'Não autenticado' USING ERRCODE = '42501';
   END IF;
 
-  SELECT (b.owner_id = auth.uid() OR m.role IN ('owner', 'admin')), b.owner_id
-  INTO v_is_authorized, v_owner_id
+  SELECT (b.owner_id = auth.uid()), (m.role = 'admin'), b.owner_id
+  INTO v_is_owner, v_is_admin, v_owner_id
   FROM public.barbershops b
   LEFT JOIN public.barbershop_members m ON m.barbershop_id = b.id AND m.user_id = auth.uid()
   WHERE b.id = p_barbershop_id;
 
-  IF NOT coalesce(v_is_authorized, false) THEN
+  IF coalesce(v_is_owner, false) = false AND coalesce(v_is_admin, false) = false THEN
     RAISE EXCEPTION 'Acesso negado: apenas proprietários ou administradores podem remover membros.' USING ERRCODE = '42501';
   END IF;
 
-  IF v_resolved_user_id IS NULL THEN
-    SELECT user_id INTO v_resolved_user_id
-    FROM public.staff_profiles
-    WHERE id = p_staff_profile_id AND barbershop_id = p_barbershop_id;
+  -- 1. Obter perfil de profissional e seu user_id real
+  SELECT user_id INTO v_actual_user_id
+  FROM public.staff_profiles
+  WHERE id = p_staff_profile_id AND barbershop_id = p_barbershop_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Profissional não encontrado nesta barbearia.' USING ERRCODE = 'P0002';
   END IF;
 
+  -- 2. Validação estrita: se p_staff_user_id foi informado, DEVE corresponder ao user_id real do perfil
+  IF p_staff_user_id IS NOT NULL AND v_actual_user_id IS NOT NULL AND p_staff_user_id <> v_actual_user_id THEN
+    RAISE EXCEPTION 'Validação de integridade: Profile ID e User ID informados não pertencem à mesma pessoa.' USING ERRCODE = '22023';
+  END IF;
+
+  v_resolved_user_id := coalesce(v_actual_user_id, p_staff_user_id);
+
+  -- 3. Não permitir remover o proprietário da barbearia
   IF v_resolved_user_id = v_owner_id THEN
     RAISE EXCEPTION 'Não é permitido remover o proprietário da barbearia.' USING ERRCODE = '42501';
+  END IF;
+
+  -- 4. Regra estrita: Admin não remove owner, outro admin ou a si mesmo
+  IF coalesce(v_is_owner, false) = false THEN
+    IF v_resolved_user_id = auth.uid() THEN
+      RAISE EXCEPTION 'Acesso negado: administradores não podem remover a si mesmos da barbearia.' USING ERRCODE = '42501';
+    END IF;
+
+    IF v_resolved_user_id IS NOT NULL THEN
+      SELECT role INTO v_target_role
+      FROM public.barbershop_members
+      WHERE barbershop_id = p_barbershop_id AND user_id = v_resolved_user_id;
+
+      IF v_target_role IN ('owner', 'admin') THEN
+        RAISE EXCEPTION 'Acesso negado: administradores não podem remover outros administradores ou o proprietário.' USING ERRCODE = '42501';
+      END IF;
+    END IF;
   END IF;
 
   UPDATE public.staff_profiles
@@ -1201,21 +1422,22 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_is_authorized boolean := false;
+  v_is_owner boolean := false;
+  v_is_admin boolean := false;
   v_target_user_id uuid;
 BEGIN
   IF auth.uid() IS NULL THEN
     RAISE EXCEPTION 'Não autenticado' USING ERRCODE = '42501';
   END IF;
 
-  SELECT (b.owner_id = auth.uid() OR m.role IN ('owner', 'admin'))
-  INTO v_is_authorized
+  SELECT (b.owner_id = auth.uid()), (m.role = 'admin')
+  INTO v_is_owner, v_is_admin
   FROM public.barbershops b
   LEFT JOIN public.barbershop_members m ON m.barbershop_id = b.id AND m.user_id = auth.uid()
   WHERE b.id = p_barbershop_id;
 
-  IF NOT coalesce(v_is_authorized, false) THEN
-    RAISE EXCEPTION 'Acesso negado' USING ERRCODE = '42501';
+  IF coalesce(v_is_owner, false) = false AND coalesce(v_is_admin, false) = false THEN
+    RAISE EXCEPTION 'Acesso negado: apenas proprietários ou administradores podem reativar profissionais.' USING ERRCODE = '42501';
   END IF;
 
   SELECT user_id INTO v_target_user_id
@@ -1223,17 +1445,17 @@ BEGIN
   WHERE id = p_staff_profile_id AND barbershop_id = p_barbershop_id;
 
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'Perfil não encontrado' USING ERRCODE = 'P0002';
+    RAISE EXCEPTION 'Perfil não encontrado nesta barbearia.' USING ERRCODE = 'P0002';
   END IF;
 
   UPDATE public.staff_profiles
   SET status = 'active', updated_at = now()
-  WHERE id = p_staff_profile_id;
+  WHERE id = p_staff_profile_id AND barbershop_id = p_barbershop_id;
 
   IF v_target_user_id IS NOT NULL THEN
     INSERT INTO public.barbershop_members (barbershop_id, user_id, role)
     VALUES (p_barbershop_id, v_target_user_id, 'staff')
-    ON CONFLICT (barbershop_id, user_id) DO NOTHING;
+    ON CONFLICT (barbershop_id, user_id) DO UPDATE SET role = 'staff';
   END IF;
 
   RETURN jsonb_build_object('success', true);

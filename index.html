@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Meu Corte</title>
-  <meta name="description" content="Agende seu corte de cabelo de forma simples e rápida.">
+  <title>Meu corte - 7.0 - Multi-staff</title>
+  <meta name="description" content="App de agendamento de barbearia com interface amigável e gestão interna.">
+  <meta property="og:title" content="Meu corte - 7.0 - Multi-staff">
+  <meta property="og:description" content="App de agendamento de barbearia com interface amigável e gestão interna.">
   <link rel="manifest" href="manifest.json">
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -55,6 +57,23 @@
   <style>
     /* Smooth scrolling */
     html { scroll-behavior: smooth; }
+
+    /* Remove seta/dropdown interna de input type="time" no Chrome/Android/iOS */
+    input[type="time"]::-webkit-calendar-picker-indicator,
+    input[type="time"]::-webkit-inner-spin-button,
+    input[type="time"]::-webkit-clear-button {
+      display: none !important;
+      -webkit-appearance: none !important;
+      opacity: 0 !important;
+      width: 0 !important;
+      height: 0 !important;
+      pointer-events: none !important;
+    }
+    input[type="time"] {
+      -webkit-appearance: none !important;
+      -moz-appearance: textfield !important;
+      appearance: none !important;
+    }
   </style>
 <script type="importmap">
 {

@@ -71,6 +71,7 @@ GRANT EXECUTE ON FUNCTION public.get_owned_barbershop_ids() TO authenticated;
 REVOKE ALL ON FUNCTION public.get_admin_barbershop_ids() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.get_admin_barbershop_ids() TO authenticated;
 
+
 -- ==============================================================================
 -- 4. TABELAS E ESTRUTURA IDEMPOTENTE
 -- ==============================================================================
@@ -218,6 +219,7 @@ CREATE TABLE IF NOT EXISTS public.weekly_breaks (
   end_time time,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE public.weekly_breaks ADD COLUMN IF NOT EXISTS staff_id uuid REFERENCES public.staff_profiles(id) ON DELETE CASCADE;
 
 -- 4.8 Bloqueios e Desbloqueios de Horários
 CREATE TABLE IF NOT EXISTS public.blocked_slots (
@@ -411,6 +413,34 @@ END $$;
 -- 7. RLS POLICIES FINAIS E BLINDADAS (ZERO ESCALABILIDADE DE PRIVILÉGIOS)
 -- ==============================================================================
 
+-- 7.0 Perfis Globais de Usuários (profiles)
+-- Entidade global de identidade (auth.uid). Acesso estritamente restrito ao próprio usuário autenticado.
+-- Nenhuma policy global ou pública é criada para proteger dados privados de contato e identidade.
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "profiles_select_own" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_insert_own" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
+
+CREATE POLICY "profiles_select_own"
+ON public.profiles
+FOR SELECT
+TO authenticated
+USING (id = auth.uid());
+
+CREATE POLICY "profiles_insert_own"
+ON public.profiles
+FOR INSERT
+TO authenticated
+WITH CHECK (id = auth.uid());
+
+CREATE POLICY "profiles_update_own"
+ON public.profiles
+FOR UPDATE
+TO authenticated
+USING (id = auth.uid())
+WITH CHECK (id = auth.uid());
+
 -- 7.1 Barbearias (barbershops)
 -- BLOQUEIO DE UPDATE DIRETO: nenhuma policy de UPDATE direto para authenticated!
 -- Atualizações ocorrem exclusivamente via RPC update_barbershop_profile.
@@ -457,6 +487,7 @@ CREATE POLICY "staff_profiles_select" ON public.staff_profiles
     user_id = auth.uid()
     OR barbershop_id IN (SELECT public.get_user_barbershop_ids())
   );
+
 
 -- 7.4 Clientes (customers)
 -- Staff comum possui apenas SELECT. Alterações de clientes ocorrem via RPCs controladas (sem acesso a métricas agregadas).
@@ -896,7 +927,7 @@ CREATE POLICY "barbershop_invites_select" ON public.barbershop_invites
   FOR SELECT TO authenticated
   USING (
     barbershop_id IN (SELECT public.get_admin_barbershop_ids())
-    OR email = (SELECT email FROM auth.users WHERE id = auth.uid())
+    OR lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''))
   );
 
 CREATE POLICY "barbershop_invites_insert" ON public.barbershop_invites
@@ -922,6 +953,126 @@ CREATE POLICY "barbershop_invites_delete" ON public.barbershop_invites
 -- ==============================================================================
 -- 8. RPCs DE AUTORIZAÇÃO, WHITELISTS E SEGURANÇA OPERACIONAL (SECURITY DEFINER)
 -- ==============================================================================
+
+-- 8.0 Garantir Staff Profile do Proprietário (comissão 100%, sem duplicidade)
+CREATE OR REPLACE FUNCTION public.ensure_owner_staff_profile(p_barbershop_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_user_id uuid;
+  v_owner_id uuid;
+  v_membership_role text;
+  v_profile RECORD;
+  v_staff RECORD;
+  v_result jsonb;
+BEGIN
+  -- 1. Verificar auth.uid()
+  v_user_id := auth.uid();
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Não autenticado.' USING ERRCODE = '42501';
+  END IF;
+
+  IF p_barbershop_id IS NULL THEN
+    RAISE EXCEPTION 'barbershop_id é obrigatório.' USING ERRCODE = '22023';
+  END IF;
+
+  -- 2. e 3. Buscar barbershops e verificar se barbershops.owner_id = auth.uid()
+  SELECT owner_id INTO v_owner_id
+  FROM public.barbershops
+  WHERE id = p_barbershop_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Barbearia não encontrada.' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF v_owner_id IS DISTINCT FROM v_user_id THEN
+    RAISE EXCEPTION 'Apenas o proprietário da barbearia pode executar esta operação.' USING ERRCODE = '42501';
+  END IF;
+
+  -- 4. Verificar membership: barbershop_members.barbershop_id = p_barbershop_id AND user_id = auth.uid() AND role = 'owner'
+  SELECT role INTO v_membership_role
+  FROM public.barbershop_members
+  WHERE barbershop_id = p_barbershop_id AND user_id = v_user_id;
+
+  IF NOT FOUND OR v_membership_role <> 'owner' THEN
+    INSERT INTO public.barbershop_members (barbershop_id, user_id, role)
+    VALUES (p_barbershop_id, v_user_id, 'owner')
+    ON CONFLICT (barbershop_id, user_id)
+    DO UPDATE SET role = 'owner';
+  END IF;
+
+  -- 6. Buscar staff_profiles: barbershop_id = p_barbershop_id AND user_id = auth.uid()
+  SELECT id, barbershop_id, user_id, name, phone, photo, commission_rate, status
+  INTO v_staff
+  FROM public.staff_profiles
+  WHERE barbershop_id = p_barbershop_id AND user_id = v_user_id
+  LIMIT 1;
+
+  -- 7. Se existir: retornar o registro; não duplicar
+  IF FOUND THEN
+    SELECT jsonb_build_object(
+      'id', v_staff.id,
+      'barbershop_id', v_staff.barbershop_id,
+      'user_id', v_staff.user_id,
+      'name', v_staff.name,
+      'phone', v_staff.phone,
+      'photo', v_staff.photo,
+      'commission_rate', v_staff.commission_rate,
+      'status', v_staff.status,
+      'role', 'owner'
+    ) INTO v_result;
+    RETURN v_result;
+  END IF;
+
+  -- 5. Buscar profile global próprio
+  SELECT name, personal_phone, photo
+  INTO v_profile
+  FROM public.profiles
+  WHERE id = v_user_id;
+
+  -- 8. Se não existir: inserir com comissão 100%
+  INSERT INTO public.staff_profiles (
+    barbershop_id,
+    user_id,
+    name,
+    phone,
+    photo,
+    status,
+    commission_rate
+  ) VALUES (
+    p_barbershop_id,
+    v_user_id,
+    COALESCE(NULLIF(trim(v_profile.name), ''), 'Proprietário'),
+    v_profile.personal_phone,
+    v_profile.photo,
+    'active',
+    100
+  )
+  RETURNING id, barbershop_id, user_id, name, phone, photo, commission_rate, status
+  INTO v_staff;
+
+  -- 9. Retornar dados mínimos do staff_profile
+  SELECT jsonb_build_object(
+    'id', v_staff.id,
+    'barbershop_id', v_staff.barbershop_id,
+    'user_id', v_staff.user_id,
+    'name', v_staff.name,
+    'phone', v_staff.phone,
+    'photo', v_staff.photo,
+    'commission_rate', v_staff.commission_rate,
+    'status', v_staff.status,
+    'role', 'owner'
+  ) INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.ensure_owner_staff_profile(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.ensure_owner_staff_profile(uuid) TO authenticated;
 
 -- 8.1 Atualizar Barbearia via RPC (Whitelist segura: name, phone, address, logo, description, instagram, website)
 -- Protege owner_id, slug, id e created_at
@@ -1344,9 +1495,15 @@ DECLARE
   v_new_apt record;
   v_owner_id uuid;
   v_clean_phone text := regexp_replace(p_client_phone, '\D', '', 'g');
+  v_clean_name text := trim(p_client_name);
+  v_clean_obs text := trim(p_observation);
 BEGIN
   IF auth.uid() IS NULL THEN
     RAISE EXCEPTION 'Não autenticado' USING ERRCODE = '42501';
+  END IF;
+
+  IF p_barbershop_id IS NULL THEN
+    RAISE EXCEPTION 'barbershop_id é obrigatório.' USING ERRCODE = '22023';
   END IF;
 
   -- 1. Resolver perfil de profissional ativo do chamador
@@ -1362,12 +1519,25 @@ BEGIN
     RAISE EXCEPTION 'Perfil de profissional ativo não encontrado para este usuário no estabelecimento.' USING ERRCODE = '42501';
   END IF;
 
-  -- 2. Validar data não no passado
-  IF p_date < current_date THEN
+  -- 2. Validações básicas de entrada
+  IF length(v_clean_name) < 2 OR length(v_clean_name) > 100 THEN
+    RAISE EXCEPTION 'Nome do cliente deve ter entre 2 e 100 caracteres.' USING ERRCODE = '22023';
+  END IF;
+
+  IF length(v_clean_phone) < 8 OR length(v_clean_phone) > 15 THEN
+    RAISE EXCEPTION 'Telefone do cliente inválido.' USING ERRCODE = '22023';
+  END IF;
+
+  -- 3. Validar data não no passado (fuso de Brasília)
+  IF p_date < (now() AT TIME ZONE 'America/Sao_Paulo')::date THEN
     RAISE EXCEPTION 'Data do agendamento não pode ser no passado.' USING ERRCODE = '22023';
   END IF;
 
-  -- 3. Validar serviços e calcular preço/duração no servidor
+  -- 4. Validar serviços e calcular preço/duração no servidor
+  IF p_service_ids IS NULL OR array_length(p_service_ids, 1) IS NULL OR array_length(p_service_ids, 1) < 1 THEN
+    RAISE EXCEPTION 'Selecione ao menos um serviço.' USING ERRCODE = '22023';
+  END IF;
+
   SELECT count(*), coalesce(sum(price), 0), coalesce(sum(duration), 0), string_agg(name, ' + ')
   INTO v_valid_services_count, v_total_price, v_total_duration, v_service_names
   FROM public.services
@@ -1384,7 +1554,7 @@ BEGIN
 
   v_slot_end_time := p_time + (v_total_duration || ' minutes')::interval;
 
-  -- 4. Advisory Lock no profissional e data
+  -- 5. Advisory Lock no profissional e data
   PERFORM pg_advisory_xact_lock(
     hashtextextended(
       p_barbershop_id::text
@@ -1394,7 +1564,7 @@ BEGIN
     )
   );
 
-  -- 5. Checar conflito com agendamentos existentes do profissional
+  -- 6. Checar conflito com agendamentos existentes do profissional
   SELECT count(*) INTO v_conflict_count
   FROM public.appointments
   WHERE barbershop_id = p_barbershop_id
@@ -1408,18 +1578,22 @@ BEGIN
     RAISE EXCEPTION 'SLOT_OCCUPIED: Você já possui outro atendimento neste horário.' USING ERRCODE = '23505';
   END IF;
 
-  -- 6. Upsert/Vinculação de cliente básico
+  -- 7. Upsert/Vinculação de cliente básico
   SELECT id INTO v_customer_id
   FROM public.customers
   WHERE barbershop_id = p_barbershop_id AND phone = v_clean_phone;
 
   IF v_customer_id IS NULL THEN
     INSERT INTO public.customers (barbershop_id, user_id, name, phone, cut_count)
-    VALUES (p_barbershop_id, v_owner_id, trim(p_client_name), v_clean_phone, 0)
+    VALUES (p_barbershop_id, v_owner_id, v_clean_name, v_clean_phone, 0)
     RETURNING id INTO v_customer_id;
+  ELSE
+    UPDATE public.customers
+    SET name = v_clean_name, updated_at = now()
+    WHERE id = v_customer_id;
   END IF;
 
-  -- 7. Inserir agendamento confirmado
+  -- 8. Inserir agendamento com status pending (compatível com UI e filtros)
   INSERT INTO public.appointments (
     barbershop_id,
     user_id,
@@ -1437,15 +1611,15 @@ BEGIN
     p_barbershop_id,
     v_owner_id,
     v_staff_id,
-    trim(p_client_name),
+    v_clean_name,
     v_clean_phone,
     v_service_names,
     v_total_price,
     v_total_duration,
     p_date,
     p_time,
-    'confirmed',
-    p_observation
+    'pending',
+    v_clean_obs
   ) RETURNING * INTO v_new_apt;
 
   RETURN to_jsonb(v_new_apt);
@@ -1463,12 +1637,19 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_apt record;
+  v_updated_apt record;
+  v_tx record;
   v_is_authorized boolean := false;
 BEGIN
   IF auth.uid() IS NULL THEN
     RAISE EXCEPTION 'Não autenticado' USING ERRCODE = '42501';
   END IF;
 
+  IF p_appointment_id IS NULL THEN
+    RAISE EXCEPTION 'ID do agendamento é obrigatório.' USING ERRCODE = '22023';
+  END IF;
+
+  -- 1. Buscar agendamento e verificar autorização
   SELECT a.*, (b.owner_id = auth.uid() OR m.role IN ('owner', 'admin') OR sp.user_id = auth.uid()) AS authorized
   INTO v_apt
   FROM public.appointments a
@@ -1485,21 +1666,79 @@ BEGIN
     RAISE EXCEPTION 'Acesso negado: você não tem permissão para concluir este agendamento.' USING ERRCODE = '42501';
   END IF;
 
+  -- 2. Idempotência: se já estiver concluído, buscar transação e retornar
+  IF v_apt.status = 'completed' THEN
+    SELECT * INTO v_tx
+    FROM public.transactions
+    WHERE barbershop_id = v_apt.barbershop_id
+      AND linked_appointment_id = p_appointment_id
+    LIMIT 1;
+
+    RETURN jsonb_build_object(
+      'success', true,
+      'status', 'completed',
+      'already_completed', true,
+      'appointment', to_jsonb(v_apt),
+      'transaction', to_jsonb(v_tx)
+    );
+  END IF;
+
+  -- 3. Atualizar status para completed
   UPDATE public.appointments
   SET status = 'completed', updated_at = now()
-  WHERE id = p_appointment_id;
+  WHERE id = p_appointment_id
+  RETURNING * INTO v_updated_apt;
 
-  -- Atualiza métricas do cliente com segurança
+  -- 4. Atualiza métricas do cliente com segurança
   UPDATE public.customers
   SET 
     cut_count = cut_count + 1,
     total_visits = total_visits + 1,
-    total_spent = total_spent + coalesce(v_apt.price, 0),
+    total_spent = total_spent + coalesce(v_updated_apt.price, 0),
     last_visit = now(),
     updated_at = now()
-  WHERE barbershop_id = v_apt.barbershop_id AND phone = v_apt.phone;
+  WHERE barbershop_id = v_updated_apt.barbershop_id AND phone = v_updated_apt.phone;
 
-  RETURN jsonb_build_object('success', true, 'status', 'completed');
+  -- 5. Criar transação financeira de receita no banco de forma atômica e idempotente
+  SELECT * INTO v_tx
+  FROM public.transactions
+  WHERE barbershop_id = v_updated_apt.barbershop_id
+    AND linked_appointment_id = p_appointment_id
+  LIMIT 1;
+
+  IF v_tx.id IS NULL THEN
+    INSERT INTO public.transactions (
+      barbershop_id,
+      staff_id,
+      user_id,
+      created_by,
+      type,
+      amount,
+      description,
+      category,
+      date,
+      linked_appointment_id
+    ) VALUES (
+      v_updated_apt.barbershop_id,
+      v_updated_apt.staff_id,
+      v_updated_apt.user_id,
+      auth.uid(),
+      'income',
+      v_updated_apt.price,
+      coalesce(v_updated_apt.service, 'Atendimento') || ' — ' || v_updated_apt.client_name,
+      'walk_in',
+      v_updated_apt.date,
+      p_appointment_id
+    ) RETURNING * INTO v_tx;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'status', 'completed',
+    'already_completed', false,
+    'appointment', to_jsonb(v_updated_apt),
+    'transaction', to_jsonb(v_tx)
+  );
 END;
 $$;
 REVOKE ALL ON FUNCTION public.complete_my_appointment(uuid) FROM PUBLIC, anon;

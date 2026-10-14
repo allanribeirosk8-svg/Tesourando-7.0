@@ -1,10 +1,20 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Store, User, Phone, PhoneCall, MapPin, Instagram, Scissors, List, Trash2, Clock, CheckCircle, CheckCircle2, XCircle, Loader2, ChevronLeft, AlertCircle } from 'lucide-react';
+import { Store, User, Phone, PhoneCall, MapPin, Instagram, Scissors, List, Trash2, Clock, Coffee, CheckCircle, CheckCircle2, XCircle, Loader2, ChevronLeft, ChevronDown, AlertCircle, Zap } from 'lucide-react';
 import { useStore } from '../context/Store';
 import { ServiceItem, DaySchedule } from '../types';
 import { supabaseService, normalizeRequestedSlug, generateSlug } from '../services/supabaseService';
 import { supabase } from '../lib/supabase';
+
+const DAY_LABELS: Record<string, string> = {
+  SEG: 'Segunda',
+  TER: 'Terça',
+  QUA: 'Quarta',
+  QUI: 'Quinta',
+  SEX: 'Sexta',
+  SAB: 'Sábado',
+  DOM: 'Domingo',
+};
 
 const generateBreakSlots = (breakStart: string, breakEnd: string): string[] => {
   const slots: string[] = [];
@@ -86,6 +96,7 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
   ]);
 
   const [schedule, setSchedule] = useState<Record<string, DaySchedule>>(DEFAULT_SCHEDULE);
+  const [scheduleTab, setScheduleTab] = useState<'hours' | 'breaks'>('hours');
 
   const [errors, setErrors] = useState<string[]>([]);
 
@@ -317,11 +328,19 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
       // 4. Garantir owner membership
       await supabaseService.ensureOwnerMembership(barbershopId, userId);
 
-      // 5. Salvar serviços do usuário
-      await supabase.from('services').delete().eq('user_id', userId);
+      // 5. Garantir staff_profile real do owner via RPC SECURITY DEFINER
+      await supabaseService.ensureOwnerStaffProfile(barbershopId);
+
+      // 6. Salvar serviços da barbearia (com barbershop_id real)
+      await supabase
+        .from('services')
+        .delete()
+        .eq('barbershop_id', barbershopId);
+
       const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
       const servicesPayload = localServices.map((s, index) => ({
         id: isUUID(s.id) ? s.id : crypto.randomUUID(),
+        barbershop_id: barbershopId,
         user_id: userId,
         name: s.name,
         price: s.price,
@@ -337,7 +356,7 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
         }
       }
 
-      // 6. Salvar horários do salão
+      // 7. Salvar horários do salão com barbershop_id explícito
       const dayMap: Record<number, string> = { 0: 'DOM', 1: 'SEG', 2: 'TER', 3: 'QUA', 4: 'QUI', 5: 'SEX', 6: 'SAB' };
       for (let day = 0; day <= 6; day++) {
         const dayKey = dayMap[day];
@@ -347,21 +366,26 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
           breaks.push(...generateBreakSlots(daySched.breakStart, daySched.breakEnd));
         }
 
-        await updateDayConfig(day, {
-          isOpen: daySched.enabled,
-          start: daySched.open,
-          end: daySched.close,
-          breaks: breaks,
-        });
+        await supabaseService.saveWeeklySchedule(
+          day,
+          {
+            isOpen: daySched.enabled,
+            start: daySched.open,
+            end: daySched.close,
+            breaks: breaks,
+          },
+          barbershopId
+        );
       }
 
-      // 7. Forçar onboarding_seen no banco se necessário
+      // 8. Forçar onboarding_seen no banco se necessário
       await supabaseService.completeOwnerSetupIfPossible(userId);
 
-      // 8. Reler o estado real do banco de dados
+      // 9. Reler o estado real do banco de dados e contextos
+      await supabaseService.resolveAuthContexts(userId);
       await supabaseService.resolveOnboardingState(userId);
 
-      // 9. Atualizar Store e sincronizar a nova barbearia ativa com activeTenant antes de finalizar
+      // 10. Atualizar Store e sincronizar a nova barbearia ativa com activeTenant antes de finalizar
       await checkOnboardingState();
       try {
         await reloadData();
@@ -386,7 +410,7 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
   const addLocalService = () => {
     setLocalServices([
       ...localServices,
-      { id: Date.now().toString(), name: 'Novo Serviço', price: 0, duration: 30 }
+      { id: Date.now().toString(), name: '', price: 0, duration: 30 }
     ]);
   };
 
@@ -408,10 +432,45 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
     }));
   };
 
+  const copyMondayToWeekdays = () => {
+    const monday = schedule['SEG'];
+    setSchedule(prev => ({
+      ...prev,
+      TER: { ...prev.TER, open: monday.open, close: monday.close, breakStart: monday.breakStart, breakEnd: monday.breakEnd, enabled: monday.enabled },
+      QUA: { ...prev.QUA, open: monday.open, close: monday.close, breakStart: monday.breakStart, breakEnd: monday.breakEnd, enabled: monday.enabled },
+      QUI: { ...prev.QUI, open: monday.open, close: monday.close, breakStart: monday.breakStart, breakEnd: monday.breakEnd, enabled: monday.enabled },
+      SEX: { ...prev.SEX, open: monday.open, close: monday.close, breakStart: monday.breakStart, breakEnd: monday.breakEnd, enabled: monday.enabled },
+    }));
+  };
+
+  const togglePauseDay = (dayKey: string) => {
+    const currentSched = schedule[dayKey];
+    const hasPause = Boolean(currentSched.breakStart && currentSched.breakEnd);
+    if (hasPause) {
+      updateScheduleDay(dayKey, 'breakStart', null);
+      updateScheduleDay(dayKey, 'breakEnd', null);
+    } else {
+      updateScheduleDay(dayKey, 'breakStart', '12:00');
+      updateScheduleDay(dayKey, 'breakEnd', '14:00');
+    }
+  };
+
+  const openTimePicker = (e: React.MouseEvent<HTMLInputElement>) => {
+    try {
+      if ('showPicker' in e.currentTarget) {
+        (e.currentTarget as any).showPicker();
+      }
+    } catch {
+      // Ignora e deixa o foco nativo do navegador agir
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-[9999] flex flex-col h-[100dvh] w-full bg-[#F5A623] pt-[env(safe-area-inset-top)]">
+    <div className="fixed inset-0 z-[9999] flex flex-col h-[100dvh] w-full bg-[#F5A623] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
       
-      <div className="flex-1 w-full bg-white flex flex-col mx-auto max-w-[480px] relative px-6 pt-4 pb-5 justify-between overflow-hidden">
+      <div className={`flex-1 w-full bg-white flex flex-col mx-auto max-w-[480px] relative justify-between overflow-y-auto ${
+        step === 4 ? 'px-3 sm:px-6 pt-2 pb-3' : 'px-4 sm:px-6 pt-4 pb-5'
+      }`}>
         
         <AnimatePresence mode="wait">
           {isFinished ? (
@@ -472,28 +531,34 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
                 </div>
 
                 {/* ── Meio: ícone + título + descrição + campos ── */}
-                <div className="flex-1 flex flex-col justify-center gap-3 py-4">
-                  <div className="w-[48px] h-[48px] rounded-full bg-[#FFF3E0] text-[#F5A623] flex items-center justify-center mx-auto mb-1 shrink-0">
+                <div className={`flex-1 flex flex-col min-h-0 ${step === 4 ? 'gap-1 py-1 justify-start' : 'justify-center gap-3 py-4'}`}>
+                  <div className={`rounded-full bg-[#FFF3E0] text-[#F5A623] flex items-center justify-center mx-auto shrink-0 w-[48px] h-[48px] ${
+                    step === 4 ? 'mt-[12px] mb-0' : 'mb-1'
+                  }`}>
                     {step === 1 && <User size={24} />}
                     {step === 2 && <Scissors size={24} />}
                     {step === 3 && <List size={24} />}
-                    {step === 4 && <Clock size={24} />}
+                    {step === 4 && <Clock size={24} className="w-[24px] h-[24px]" />}
                   </div>
 
-                  <h2 className="text-[22px] font-bold text-[#1E1B4B] text-center pt-0 -mt-[13px]">
+                  <h2 className={`font-bold text-[#1E1B4B] text-center ${
+                    step === 4 ? 'text-[21px] leading-[25.75px] mt-[3px]' : 'text-[22px] pt-0 -mt-[13px]'
+                  }`}>
                     {step === 1 && "Vamos começar! Como podemos te chamar?"}
                     {step === 2 && "Agora, sobre sua barbearia"}
                     {step === 3 && "Quais serviços você oferece?"}
                     {step === 4 && "Quando você atende?"}
                   </h2>
-                  <p className="text-[13px] text-[#6B7280] text-center mb-1">
+                  <p className={`text-[#6B7280] text-center text-[11px] ${
+                    step === 4 ? 'pt-0 mt-[-1px] max-w-[432px] mx-auto leading-tight' : 'mb-1'
+                  }`}>
                     {step === 1 && "Suas informações de contato para seus clientes."}
                     {step === 2 && "Essas informações aparecem para seus clientes na hora de agendar."}
                     {step === 3 && "Você pode editar isso depois. Já deixamos alguns prontos para você!"}
-                    {step === 4 && "Configure os dias e horários. Você pode ajustar isso nas Configurações a qualquer momento."}
+                    {step === 4 && "Configure seus dias e horários de atendimento."}
                   </p>
 
-                  <div className="flex flex-col flex-1 max-h-full -mt-[9px]">
+                  <div className={`flex flex-col flex-1 max-h-full ${step === 4 ? 'mt-0 min-h-0' : '-mt-[9px]'}`}>
                     {step === 1 && (
                       <div className="flex flex-col gap-2.5 mt-2">
                         {/* Name */}
@@ -669,51 +734,64 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
 
                     {step === 3 && (
                       <div className="flex flex-col flex-1 min-h-0 mt-2">
-                        <div className="flex flex-row items-center pl-2 pr-3 mb-1 gap-2 shrink-0">
-                          <div className="w-4 shrink-0"></div>
-                          <span className="flex-[3] text-[11px] font-medium text-[#888] text-center w-0">Serviço</span>
-                          <span className="flex-[1.5] text-[11px] font-medium text-[#888] text-center w-0">Preço</span>
-                          <span className="flex-[1.5] text-[11px] font-medium text-[#888] text-center w-0">Duração</span>
-                          <div className="w-8 shrink-0"></div>
+                        <div className="flex flex-row items-center px-1.5 sm:px-2 mb-1.5 gap-1.5 sm:gap-2 shrink-0">
+                          <div className="w-3.5 sm:w-4 shrink-0"></div>
+                          <span className="flex-1 min-w-0 text-[11px] font-semibold text-[#6B7280] text-left pl-2">Serviço</span>
+                          <span className="w-[56px] sm:w-[64px] shrink-0 text-[11px] font-semibold text-[#6B7280] text-center">Preço</span>
+                          <span className="w-[72px] sm:w-[82px] shrink-0 text-[11px] font-semibold text-[#6B7280] text-center">Duração</span>
+                          <div className="w-7 sm:w-8 shrink-0"></div>
                         </div>
 
                         <div className="flex-1 overflow-y-auto min-h-0 flex flex-col pr-1">
                           {localServices.map((service) => {
-                            const isPriceMissing = !service.price || isNaN(service.price) || service.price <= 0;
-                            const isNameMissing = !service.name || service.name.trim() === '';
+                            const hasError = errors.includes('services');
+                            const isPriceMissing = hasError && (!service.price || isNaN(service.price) || service.price <= 0);
+                            const isNameMissing = hasError && (!service.name || service.name.trim() === '');
                             return (
-                              <div key={service.id} className="bg-[#F5F5F8] rounded-[12px] p-2 flex flex-row items-center gap-2 mb-2 shrink-0">
-                                <span className="text-[#D1D5DB] cursor-grab shrink-0 w-4 text-center">⠿</span>
+                              <div key={service.id} className="bg-[#F5F5F8] rounded-[12px] p-1.5 sm:p-2 flex flex-row items-center gap-1.5 sm:gap-2 mb-2 shrink-0">
+                                <span className="text-[#D1D5DB] cursor-grab shrink-0 w-3.5 sm:w-4 text-center select-none text-[12px]">⠿</span>
                                 <input
                                   type="text"
                                   value={service.name}
-                                  onChange={(e) => updateLocalService(service.id, 'name', e.target.value)}
-                                  className={`flex-[3] w-0 bg-white border rounded-[8px] px-2 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD] ${
+                                  onChange={(e) => {
+                                    updateLocalService(service.id, 'name', e.target.value);
+                                    if (errors.includes('services')) setErrors([]);
+                                  }}
+                                  className={`flex-1 min-w-0 bg-white border rounded-[8px] px-2.5 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD] ${
                                     isNameMissing ? 'border-red-400 focus:border-red-500' : 'border-[#E0E0E0] focus:border-[#F5A623]'
                                   }`}
-                                  placeholder="Nome do serviço"
+                                  placeholder="Novo Serviço"
                                 />
-                                <input
-                                  type="text"
-                                  inputMode="numeric"
-                                  value={service.price || ''}
-                                  onChange={(e) => updateLocalService(service.id, 'price', Number(e.target.value))}
-                                  className={`flex-[1.5] w-0 bg-white border rounded-[8px] px-2 py-2 text-[14px] text-[#333] text-center focus:outline-none placeholder-[#BDBDBD] ${
-                                    isPriceMissing ? 'border-red-400 focus:border-red-500' : 'border-[#E0E0E0] focus:border-[#F5A623]'
-                                  }`}
-                                  placeholder="R$"
-                                />
-                                <select
-                                  value={service.duration || ''}
-                                  onChange={(e) => updateLocalService(service.id, 'duration', Number(e.target.value))}
-                                  className="flex-[1.5] w-0 bg-white border border-[#E0E0E0] rounded-[8px] pl-1 pr-0 py-2 text-[14px] text-[#333] focus:outline-none placeholder-[#BDBDBD] text-center appearance-none"
-                                >
-                                  {generateDurationOptions().map(opt => (
-                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                  ))}
-                                </select>
-                                <button onClick={() => removeLocalService(service.id)} className="w-8 flex items-center justify-center p-1 text-[#F44336] hover:bg-red-50 rounded shrink-0">
-                                  <Trash2 size={18} />
+                                <div className="relative w-[56px] sm:w-[64px] shrink-0">
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    value={service.price || ''}
+                                    onChange={(e) => {
+                                      updateLocalService(service.id, 'price', Number(e.target.value));
+                                      if (errors.includes('services')) setErrors([]);
+                                    }}
+                                    className={`w-full bg-white border rounded-[8px] px-1 py-2 text-[14px] text-[#333] text-center focus:outline-none placeholder-[#BDBDBD] ${
+                                      isPriceMissing ? 'border-red-400 focus:border-red-500' : 'border-[#E0E0E0] focus:border-[#F5A623]'
+                                    }`}
+                                    placeholder="R$"
+                                    title="Preço (R$)"
+                                  />
+                                </div>
+                                <div className="relative w-[72px] sm:w-[82px] shrink-0">
+                                  <select
+                                    value={service.duration || ''}
+                                    onChange={(e) => updateLocalService(service.id, 'duration', Number(e.target.value))}
+                                    className="w-full bg-white border border-[#E0E0E0] rounded-[8px] pl-1.5 pr-4 py-2 text-[12px] sm:text-[13px] text-[#333] font-medium focus:outline-none focus:border-[#F5A623] text-center appearance-none cursor-pointer"
+                                  >
+                                    {generateDurationOptions().map(opt => (
+                                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                    ))}
+                                  </select>
+                                  <ChevronDown size={11} className="absolute right-1 top-1/2 -translate-y-1/2 text-[#9CA3AF] pointer-events-none" />
+                                </div>
+                                <button onClick={() => removeLocalService(service.id)} className="w-7 sm:w-8 h-8 flex items-center justify-center p-1 text-[#F44336] hover:bg-red-50 rounded shrink-0 transition-colors" title="Remover serviço">
+                                  <Trash2 size={16} />
                                 </button>
                               </div>
                             );
@@ -726,22 +804,22 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
                             + Adicionar serviço
                           </button>
 
-                          {localServices.length === 0 && (
+                          {errors.includes('services') && localServices.length === 0 && (
                             <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
                               <AlertCircle size={16} className="text-red-500 shrink-0" />
                               <span>Adicione pelo menos um serviço para continuar.</span>
                             </div>
                           )}
-                          {localServices.length > 0 && localServices.some(s => !s.price || isNaN(s.price) || s.price <= 0) && (
-                            <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
-                              <AlertCircle size={16} className="text-red-500 shrink-0" />
-                              <span>Informe um preço válido (maior que R$ 0) para todos os serviços.</span>
-                            </div>
-                          )}
-                          {localServices.length > 0 && !localServices.some(s => !s.price || isNaN(s.price) || s.price <= 0) && localServices.some(s => !s.name.trim()) && (
+                          {errors.includes('services') && localServices.length > 0 && localServices.some(s => !s.name.trim()) && (
                             <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
                               <AlertCircle size={16} className="text-red-500 shrink-0" />
                               <span>Informe o nome de todos os serviços cadastrados.</span>
+                            </div>
+                          )}
+                          {errors.includes('services') && localServices.length > 0 && !localServices.some(s => !s.name.trim()) && localServices.some(s => !s.price || isNaN(s.price) || s.price <= 0) && (
+                            <div className="bg-red-50 border border-red-200 text-red-700 rounded-[10px] p-2.5 my-1 flex items-center gap-2 text-[12px] shrink-0">
+                              <AlertCircle size={16} className="text-red-500 shrink-0" />
+                              <span>Informe um preço válido (maior que R$ 0) para todos os serviços.</span>
                             </div>
                           )}
                         </div>
@@ -749,82 +827,264 @@ export function SetupWizard({ onComplete, initialStep }: SetupWizardProps) {
                     )}
 
                     {step === 4 && (
-                      <div className="flex flex-col gap-2 mt-2 w-full">
-                        <div className="flex flex-row px-1 mb-1">
-                          <span className="w-9"></span>
-                          <span className="flex-[2] text-[11px] font-medium text-[#9CA3AF] text-center">Horário</span>
-                          <span className="flex-[2] text-[11px] font-medium text-[#9CA3AF] text-center">Pausa</span>
-                          <span className="w-[34px]"></span>
+                      <div className="flex flex-col flex-1 min-h-0 w-full ml-0 -mt-[14px] pt-0">
+                        {/* ── Segmented Control Mobile (Abas compactas) ── */}
+                        <div className="bg-[#F3F4F6] p-0.5 rounded-[9px] flex items-center gap-1 shrink-0 mt-[18px] mb-1">
+                          <button
+                            type="button"
+                            onClick={() => setScheduleTab('hours')}
+                            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-[7px] text-[11px] sm:text-[12px] font-bold transition-all cursor-pointer ${
+                              scheduleTab === 'hours'
+                                ? 'bg-white text-[#1F2937] shadow-xs'
+                                : 'text-[#6B7280] hover:text-[#374151]'
+                            }`}
+                          >
+                            <Clock size={13} className={scheduleTab === 'hours' ? 'text-[#F5A623]' : 'text-[#9CA3AF]'} />
+                            <span>Horários de Atendimento</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setScheduleTab('breaks')}
+                            className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-[7px] text-[11px] sm:text-[12px] font-bold transition-all cursor-pointer ${
+                              scheduleTab === 'breaks'
+                                ? 'bg-white text-[#1F2937] shadow-xs'
+                                : 'text-[#6B7280] hover:text-[#374151]'
+                            }`}
+                          >
+                            <Coffee size={13} className={scheduleTab === 'breaks' ? 'text-[#F5A623]' : 'text-[#9CA3AF]'} />
+                            <span>Pausa / Almoço</span>
+                          </button>
                         </div>
-                        {['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM'].map((dayKey) => {
-                          const sched = schedule[dayKey];
-                          return (
-                            <div key={dayKey} className={`flex flex-row items-center gap-1.5 transition-opacity ${sched.enabled ? '' : 'opacity-40'}`}>
-                              <span className="w-9 text-[12px] font-bold text-[#555]">{dayKey}</span>
-                              <div className="flex-[2] flex flex-row gap-1">
-                                <input
-                                  type="time"
-                                  value={sched.open}
-                                  disabled={!sched.enabled}
-                                  onChange={(e) => updateScheduleDay(dayKey, 'open', e.target.value)}
-                                  className={`flex-1 w-0 border border-[#E0E0E0] rounded-[8px] p-1 text-[13px] text-center focus:outline-none [&::-webkit-calendar-picker-indicator]:hidden ${sched.enabled ? 'bg-white text-[#333]' : 'bg-[#F5F5F5] text-[#BDBDBD]'}`}
-                                />
-                                <input
-                                  type="time"
-                                  value={sched.close}
-                                  disabled={!sched.enabled}
-                                  onChange={(e) => updateScheduleDay(dayKey, 'close', e.target.value)}
-                                  className={`flex-1 w-0 border border-[#E0E0E0] rounded-[8px] p-1 text-[13px] text-center focus:outline-none [&::-webkit-calendar-picker-indicator]:hidden ${sched.enabled ? 'bg-white text-[#333]' : 'bg-[#F5F5F5] text-[#BDBDBD]'}`}
-                                />
-                              </div>
-                              <div className="flex-[2] flex flex-row gap-1">
-                                <input
-                                  type="time"
-                                  value={sched.enabled ? (sched.breakStart || '') : ''}
-                                  disabled={!sched.enabled}
-                                  onChange={(e) => updateScheduleDay(dayKey, 'breakStart', e.target.value || null)}
-                                  className={`flex-1 w-0 border border-[#E0E0E0] rounded-[8px] p-1 text-[13px] text-center focus:outline-none [&::-webkit-calendar-picker-indicator]:hidden ${sched.enabled ? 'bg-white text-[#333]' : 'bg-[#F5F5F5] text-[#BDBDBD]'}`}
-                                />
-                                <input
-                                  type="time"
-                                  value={sched.enabled ? (sched.breakEnd || '') : ''}
-                                  disabled={!sched.enabled}
-                                  onChange={(e) => updateScheduleDay(dayKey, 'breakEnd', e.target.value || null)}
-                                  className={`flex-1 w-0 border border-[#E0E0E0] rounded-[8px] p-1 text-[13px] text-center focus:outline-none [&::-webkit-calendar-picker-indicator]:hidden ${sched.enabled ? 'bg-white text-[#333]' : 'bg-[#F5F5F5] text-[#BDBDBD]'}`}
-                                />
-                              </div>
-                              <button
-                                onClick={() => {
-                                  const newEnabled = !sched.enabled;
-                                  updateScheduleDay(dayKey, 'enabled', newEnabled);
-                                  if (!newEnabled) {
-                                    updateScheduleDay(dayKey, 'breakStart', null);
-                                    updateScheduleDay(dayKey, 'breakEnd', null);
-                                  }
-                                }}
-                                className="w-[34px] flex justify-center shrink-0"
-                              >
-                                <div className={`w-[34px] h-[20px] rounded-full p-[2px] transition-colors relative ${sched.enabled ? 'bg-[#F5A623]' : 'bg-[#E0E0E0]'}`}>
-                                  <motion.div 
-                                      animate={{ x: sched.enabled ? 14 : 0 }}
-                                      className="w-[16px] h-[16px] bg-white rounded-full shadow-sm"
-                                  />
+
+                        {/* ── Botão de Ação Rápida Mobile ── */}
+                        <div className="flex items-center justify-between mb-1 px-0.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={copyMondayToWeekdays}
+                            className="text-[10px] sm:text-[11px] font-semibold text-[#D97706] hover:text-[#B45309] bg-[#FFFBEB] hover:bg-[#FEF3C7] border border-[#FDE68A] rounded-[6px] px-2 py-0.5 mt-[4px] ml-0 h-[25px] flex items-center gap-1 transition-colors cursor-pointer w-full justify-center shadow-2xs"
+                            title="Aplica o horário e pausa da Segunda para Terça a Sexta"
+                          >
+                            <Zap size={12} className="text-[#F5A623] fill-[#F5A623]" />
+                            <span>Replicar Segunda-feira para Ter–Sex</span>
+                          </button>
+                        </div>
+
+                        {/* ── Lista de Dias Compacta para Caber Sem Scroll ── */}
+                        <div className="flex-1 overflow-y-auto min-h-0 flex flex-col gap-1 pr-0.5 pt-0 mt-[8px]">
+                          {scheduleTab === 'hours' ? (
+                            // ABA 1: HORÁRIO DE ATENDIMENTO
+                            ['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM'].map((dayKey, idx) => {
+                              const sched = schedule[dayKey];
+                              const itemStyle: React.CSSProperties = {
+                                marginTop: idx === 0 ? '0px' : '2px',
+                                paddingTop: idx === 0 ? '2px' : idx === 1 || idx === 2 ? '4px' : undefined
+                              };
+                              return (
+                                <div
+                                  key={dayKey}
+                                  style={itemStyle}
+                                  className={`flex items-center justify-between py-1 px-2 rounded-[8px] border transition-all ${
+                                    sched.enabled
+                                      ? 'bg-white border-[#E5E7EB] shadow-2xs'
+                                      : 'bg-[#F9FAFB] border-[#E5E7EB]/50 opacity-45'
+                                  }`}
+                                >
+                                  {/* Identificação do Dia */}
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <div className={`w-6 h-6 rounded-[5px] flex items-center justify-center font-bold text-[10px] tracking-tight shrink-0 ${
+                                      sched.enabled ? 'bg-[#FFF3E0] text-[#D97706]' : 'bg-[#E5E7EB] text-[#9CA3AF]'
+                                    }`}>
+                                      {dayKey}
+                                    </div>
+                                    <span className="text-[12px] font-bold text-[#1F2937] leading-none truncate">
+                                      {DAY_LABELS[dayKey]}
+                                    </span>
+                                  </div>
+
+                                  {/* Inputs táteis amplos e Toggle */}
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    {sched.enabled ? (
+                                      <div className="flex items-center gap-1 bg-[#F9FAFB] p-0.5 rounded-[7px] border border-[#E5E7EB] transition-all">
+                                        {/* Hora Inicial */}
+                                        <div className="relative flex items-center justify-center bg-white border border-[#E5E7EB] hover:border-[#F5A623] rounded-[6px] w-[50px] sm:w-[56px] h-[28px] cursor-pointer shadow-2xs">
+                                          <span className="text-[12px] sm:text-[13px] font-bold text-[#111827] select-none pointer-events-none tracking-tight">
+                                            {sched.open || '--:--'}
+                                          </span>
+                                          <input
+                                            type="time"
+                                            value={sched.open}
+                                            onChange={(e) => updateScheduleDay(dayKey, 'open', e.target.value)}
+                                            className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
+                                          />
+                                        </div>
+
+                                        <span className="text-[#9CA3AF] text-[10px] font-semibold select-none px-0.5">às</span>
+
+                                        {/* Hora Final */}
+                                        <div className="relative flex items-center justify-center bg-white border border-[#E5E7EB] hover:border-[#F5A623] rounded-[6px] w-[50px] sm:w-[56px] h-[28px] cursor-pointer shadow-2xs">
+                                          <span className="text-[12px] sm:text-[13px] font-bold text-[#111827] select-none pointer-events-none tracking-tight">
+                                            {sched.close || '--:--'}
+                                          </span>
+                                          <input
+                                            type="time"
+                                            value={sched.close}
+                                            onChange={(e) => updateScheduleDay(dayKey, 'close', e.target.value)}
+                                            className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
+                                          />
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] font-medium text-[#9CA3AF] px-1 select-none">
+                                        Não atende
+                                      </span>
+                                    )}
+
+                                    {/* Toggle Dia */}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const newEnabled = !sched.enabled;
+                                        updateScheduleDay(dayKey, 'enabled', newEnabled);
+                                        if (!newEnabled) {
+                                          updateScheduleDay(dayKey, 'breakStart', null);
+                                          updateScheduleDay(dayKey, 'breakEnd', null);
+                                        }
+                                      }}
+                                      className="w-[30px] flex justify-center shrink-0 cursor-pointer"
+                                      title={sched.enabled ? `Desativar ${DAY_LABELS[dayKey]}` : `Ativar ${DAY_LABELS[dayKey]}`}
+                                    >
+                                      <div className={`w-[30px] h-[18px] rounded-full p-[2px] transition-colors relative ${sched.enabled ? 'bg-[#F5A623]' : 'bg-[#D1D5DB]'}`}>
+                                        <motion.div 
+                                          animate={{ x: sched.enabled ? 12 : 0 }}
+                                          className="w-[14px] h-[14px] bg-white rounded-full shadow-xs"
+                                        />
+                                      </div>
+                                    </button>
+                                  </div>
                                 </div>
-                              </button>
-                            </div>
-                          );
-                        })}
+                              );
+                            })
+                          ) : (
+                            // ABA 2: PAUSA / ALMOÇO
+                            ['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM'].map((dayKey, idx) => {
+                              const sched = schedule[dayKey];
+                              const hasPause = Boolean(sched.breakStart && sched.breakEnd);
+                              const itemStyle: React.CSSProperties = {
+                                marginTop: idx === 0 ? '0px' : '2px',
+                                paddingTop: idx === 0 ? '2px' : idx === 1 || idx === 2 ? '4px' : undefined
+                              };
+
+                              if (!sched.enabled) {
+                                return (
+                                  <div
+                                    key={dayKey}
+                                    style={itemStyle}
+                                    className="flex items-center justify-between py-1 px-2 rounded-[8px] border border-[#E5E7EB]/40 bg-[#F9FAFB] opacity-40"
+                                  >
+                                    <div className="flex items-center gap-1.5">
+                                      <div className="w-6 h-6 rounded-[5px] bg-[#E5E7EB] text-[#9CA3AF] flex items-center justify-center font-bold text-[10px]">
+                                        {dayKey}
+                                      </div>
+                                      <span className="text-[12px] font-semibold text-[#6B7280]">{DAY_LABELS[dayKey]}</span>
+                                    </div>
+                                    <span className="text-[10px] text-[#9CA3AF] pr-1">Fechada</span>
+                                  </div>
+                                );
+                              }
+
+                              return (
+                                <div
+                                  key={dayKey}
+                                  style={itemStyle}
+                                  className={`flex items-center justify-between py-1 px-2 rounded-[8px] border transition-all ${
+                                    hasPause
+                                      ? 'bg-[#F9FAFB] border-[#E5E7EB] shadow-2xs'
+                                      : 'bg-white border-[#E5E7EB]/70'
+                                  }`}
+                                >
+                                  {/* Identificação do Dia */}
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <div className="w-6 h-6 rounded-[5px] bg-[#FEF3C7] text-[#D97706] flex items-center justify-center font-bold text-[10px] shrink-0">
+                                      {dayKey}
+                                    </div>
+                                    <span className="text-[12px] font-bold text-[#1F2937] leading-none truncate">
+                                      {DAY_LABELS[dayKey]}
+                                    </span>
+                                  </div>
+
+                                  {/* Inputs de Pausa ou Botão de Ativação */}
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    {hasPause ? (
+                                      <div className="flex items-center gap-1 bg-[#F9FAFB] p-0.5 rounded-[7px] border border-[#E5E7EB] transition-all">
+                                        {/* Início Pausa */}
+                                        <div className="relative flex items-center justify-center bg-white border border-[#E5E7EB] hover:border-[#F5A623] rounded-[6px] w-[50px] sm:w-[56px] h-[28px] cursor-pointer shadow-2xs">
+                                          <span className="text-[12px] sm:text-[13px] font-bold text-[#374151] select-none pointer-events-none tracking-tight">
+                                            {sched.breakStart || '--:--'}
+                                          </span>
+                                          <input
+                                            type="time"
+                                            value={sched.breakStart || ''}
+                                            onChange={(e) => updateScheduleDay(dayKey, 'breakStart', e.target.value || null)}
+                                            className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
+                                          />
+                                        </div>
+
+                                        <span className="text-[#9CA3AF] text-[10px] font-semibold select-none px-0.5">às</span>
+
+                                        {/* Fim Pausa */}
+                                        <div className="relative flex items-center justify-center bg-white border border-[#E5E7EB] hover:border-[#F5A623] rounded-[6px] w-[50px] sm:w-[56px] h-[28px] cursor-pointer shadow-2xs">
+                                          <span className="text-[12px] sm:text-[13px] font-bold text-[#374151] select-none pointer-events-none tracking-tight">
+                                            {sched.breakEnd || '--:--'}
+                                          </span>
+                                          <input
+                                            type="time"
+                                            value={sched.breakEnd || ''}
+                                            onChange={(e) => updateScheduleDay(dayKey, 'breakEnd', e.target.value || null)}
+                                            className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
+                                          />
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => togglePauseDay(dayKey)}
+                                        className="text-[10px] font-semibold text-[#6B7280] hover:text-[#D97706] hover:bg-[#FFFBEB] border border-dashed border-[#D1D5DB] rounded-[6px] px-2 h-[28px] transition-colors cursor-pointer flex items-center"
+                                      >
+                                        + Pausa
+                                      </button>
+                                    )}
+
+                                    {/* Toggle Pausa */}
+                                    <button
+                                      type="button"
+                                      onClick={() => togglePauseDay(dayKey)}
+                                      className="w-[30px] flex justify-center shrink-0 cursor-pointer"
+                                      title={hasPause ? `Remover pausa de ${DAY_LABELS[dayKey]}` : `Adicionar pausa em ${DAY_LABELS[dayKey]}`}
+                                    >
+                                      <div className={`w-[30px] h-[18px] rounded-full p-[2px] transition-colors relative ${hasPause ? 'bg-[#F5A623]' : 'bg-[#D1D5DB]'}`}>
+                                        <motion.div 
+                                          animate={{ x: hasPause ? 12 : 0 }}
+                                          className="w-[14px] h-[14px] bg-white rounded-full shadow-xs"
+                                        />
+                                      </div>
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
                 </div>
 
                 {/* ── Baixo: botão principal ── */}
-                <div className="flex flex-col gap-2 mt-auto">
+                <div className={`flex flex-col gap-2 ${step === 4 ? 'mt-1.5' : 'mt-auto'}`}>
                   <button
                     onClick={handleNext}
                     disabled={(step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid) || (step === 3 && !isStep3Valid) || isFinishing}
-                    className={`w-full bg-[#F5A623] text-white h-[48px] rounded-[12px] font-bold text-[16px] transition-all flex items-center justify-center gap-2 ${((step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid) || (step === 3 && !isStep3Valid)) || isFinishing ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[#E0901A]'}`}
+                    className={`w-full bg-[#F5A623] text-white ${step === 4 ? 'h-[44px]' : 'h-[48px]'} rounded-[12px] font-bold text-[15px] sm:text-[16px] transition-all flex items-center justify-center gap-2 ${((step === 1 && !isStep1Valid) || (step === 2 && !isStep2Valid) || (step === 3 && !isStep3Valid)) || isFinishing ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[#E0901A]'}`}
                   >
                     {isFinishing ? (
                       <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>

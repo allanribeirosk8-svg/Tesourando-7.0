@@ -9,6 +9,27 @@
     color: #ffffff;
     font-family: 'Plus Jakarta Sans', sans-serif;
   }
+
+  /* Remove setas e ícones internos indesejados de input type="time" em todos os navegadores/celulares */
+  input[type="time"]::-webkit-calendar-picker-indicator,
+  input[type="time"]::-webkit-inner-spin-button,
+  input[type="time"]::-webkit-clear-button {
+    display: none !important;
+    opacity: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    pointer-events: none !important;
+  }
+
+  input[type="time"] {
+    -webkit-appearance: none !important;
+    -moz-appearance: textfield !important;
+    appearance: none !important;
+  }
 }
 
 /* Custom Scrollbar */

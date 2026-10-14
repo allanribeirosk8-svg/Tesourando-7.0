@@ -36,17 +36,22 @@ export const LancamentoModal: React.FC<LancamentoModalProps> = ({
   initialScope = 'shop',
   initialStaffId = ''
 }) => {
-  const { addTransaction, staff } = useStore();
+  const { addTransaction, staff, userRole, session } = useStore();
+  const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
   const activeStaff = staff.filter(s => s.status === 'active');
+  const currentStaff = staff.find(s => s.userId === session?.user?.id || s.id === session?.user?.id);
   
-  const [type, setType] = useState<'income' | 'expense'>(defaultType);
+  const [type, setType] = useState<'income' | 'expense'>(() => isAdmin ? defaultType : 'income');
   const [rawValue, setRawValue] = useState('0');
-  const [category, setCategory] = useState<Transaction['category']>(defaultType === 'income' ? 'tip' : 'rent');
+  const [category, setCategory] = useState<Transaction['category']>(() => (isAdmin && defaultType === 'expense') ? 'rent' : 'tip');
   const [description, setDescription] = useState('');
   
   // Escopo de pertencimento da movimentação manual (Obrigatório)
-  const [entryScope, setEntryScope] = useState<'shop' | 'staff'>(initialScope);
-  const [entryStaffId, setEntryStaffId] = useState<string>(initialStaffId || activeStaff[0]?.id || '');
+  const [entryScope, setEntryScope] = useState<'shop' | 'staff'>(() => isAdmin ? initialScope : 'staff');
+  const [entryStaffId, setEntryStaffId] = useState<string>(() => {
+    if (!isAdmin) return currentStaff?.id || activeStaff[0]?.id || '';
+    return initialStaffId || activeStaff[0]?.id || '';
+  });
   
   const [date, setDate] = useState(() => {
     const today = new Date();
@@ -58,20 +63,26 @@ export const LancamentoModal: React.FC<LancamentoModalProps> = ({
   // Reset state when opening/closing
   useEffect(() => {
     if (isOpen) {
-      setType(defaultType);
+      setType(isAdmin ? defaultType : 'income');
       setRawValue('0');
-      setCategory(defaultType === 'income' ? 'tip' : 'rent');
+      setCategory(isAdmin && defaultType === 'expense' ? 'rent' : 'tip');
       setDescription('');
       const today = new Date();
       setDate(today.toISOString().split('T')[0]);
       setIsSuccess(false);
-      setEntryScope(initialScope);
-      const defaultStaff = initialStaffId || activeStaff[0]?.id || staff[0]?.id || '';
-      setEntryStaffId(defaultStaff);
+      if (isAdmin) {
+        setEntryScope(activeStaff.length > 1 ? initialScope : 'shop');
+        const defaultStaff = initialStaffId || activeStaff[0]?.id || staff[0]?.id || '';
+        setEntryStaffId(defaultStaff);
+      } else {
+        setEntryScope('staff');
+        setEntryStaffId(currentStaff?.id || activeStaff[0]?.id || '');
+      }
     }
-  }, [isOpen, defaultType, initialScope, initialStaffId, staff]);
+  }, [isOpen, defaultType, initialScope, initialStaffId, staff, activeStaff.length, isAdmin, currentStaff]);
 
   const handleTypeChange = (newType: 'income' | 'expense') => {
+    if (!isAdmin && newType === 'expense') return;
     setType(newType);
     setCategory(newType === 'income' ? 'tip' : 'rent');
   };
@@ -139,34 +150,42 @@ export const LancamentoModal: React.FC<LancamentoModalProps> = ({
             <div className="w-12 h-1 bg-[#D0D8E4] dark:bg-[#3A3A3A] rounded-full mx-auto mb-4 shrink-0" />
             
             <h2 className="text-xl font-bold mb-4 w-full text-center flex items-center justify-center gap-2 shrink-0">
-              <span className="text-2xl">💸</span> Novo Lançamento
+              <span className="text-2xl">💸</span> {isAdmin ? 'Novo Lançamento' : 'Nova Entrada / Receita'}
             </h2>
 
-            {/* Toggle Tipo */}
-            <div className="flex w-full bg-[#F4F7FB] dark:bg-[#1A1A1A] p-1 rounded-2xl mb-4 shrink-0">
-              <button
-                type="button"
-                className={`flex-1 h-[44px] rounded-xl font-bold text-sm transition-colors cursor-pointer border-none ${
-                  type === 'income'
-                    ? 'bg-[#34D399] text-white shadow-sm'
-                    : 'text-[#8A98A8] dark:text-[#8A98A8]'
-                }`}
-                onClick={() => handleTypeChange('income')}
-              >
-                ENTRADA
-              </button>
-              <button
-                type="button"
-                className={`flex-1 h-[44px] rounded-xl font-bold text-sm transition-colors cursor-pointer border-none ${
-                  type === 'expense'
-                    ? 'bg-[#F87171] text-white shadow-sm'
-                    : 'text-[#8A98A8] dark:text-[#8A98A8]'
-                }`}
-                onClick={() => handleTypeChange('expense')}
-              >
-                SAÍDA
-              </button>
-            </div>
+            {/* Toggle Tipo (Apenas para Administrador) */}
+            {isAdmin ? (
+              <div className="flex w-full bg-[#F4F7FB] dark:bg-[#1A1A1A] p-1 rounded-2xl mb-4 shrink-0">
+                <button
+                  type="button"
+                  className={`flex-1 h-[44px] rounded-xl font-bold text-sm transition-colors cursor-pointer border-none ${
+                    type === 'income'
+                      ? 'bg-[#34D399] text-white shadow-sm'
+                      : 'text-[#8A98A8] dark:text-[#8A98A8]'
+                  }`}
+                  onClick={() => handleTypeChange('income')}
+                >
+                  ENTRADA
+                </button>
+                <button
+                  type="button"
+                  className={`flex-1 h-[44px] rounded-xl font-bold text-sm transition-colors cursor-pointer border-none ${
+                    type === 'expense'
+                      ? 'bg-[#F87171] text-white shadow-sm'
+                      : 'text-[#8A98A8] dark:text-[#8A98A8]'
+                  }`}
+                  onClick={() => handleTypeChange('expense')}
+                >
+                  SAÍDA
+                </button>
+              </div>
+            ) : (
+              <div className="w-full mb-3 flex items-center justify-center">
+                <span className="bg-[#34D399]/15 text-[#34D399] border border-[#34D399]/30 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">
+                  Entrada · Atendimento / Gorjeta / Venda
+                </span>
+              </div>
+            )}
 
             {/* Valor */}
             <div className="relative w-full mb-4 flex justify-center shrink-0">
@@ -182,65 +201,67 @@ export const LancamentoModal: React.FC<LancamentoModalProps> = ({
               />
             </div>
 
-            {/* ESCOPO DE PERTENCIMENTO DA MOVIMENTAÇÃO (OBRIGATÓRIO) */}
-            <div className="w-full mb-4 bg-[#F4F7FB] dark:bg-[#1A1A1A]/80 p-3 rounded-2xl border border-white/5 shrink-0">
-              <label className="block text-xs font-bold uppercase tracking-wider text-[#8A98A8] mb-2 flex items-center justify-between">
-                <span>Pertencimento do Lançamento</span>
-                <span className="text-[#34D399] text-[10px] font-black">Obrigatório</span>
-              </label>
+            {/* ESCOPO DE PERTENCIMENTO DA MOVIMENTAÇÃO (VISÍVEL APENAS PARA ADMIN QUANDO HOUVER MAIS DE 1 PROFISSIONAL) */}
+            {isAdmin && activeStaff.length > 1 && (
+              <div className="w-full mb-4 bg-[#F4F7FB] dark:bg-[#1A1A1A]/80 p-3 rounded-2xl border border-white/5 shrink-0">
+                <label className="block text-xs font-bold uppercase tracking-wider text-[#8A98A8] mb-2 flex items-center justify-between">
+                  <span>Pertencimento do Lançamento</span>
+                  <span className="text-[#34D399] text-[10px] font-black">Obrigatório</span>
+                </label>
 
-              <div className="grid grid-cols-2 gap-2 p-1 bg-white/5 rounded-xl border border-white/10">
-                <button
-                  type="button"
-                  onClick={() => setEntryScope('shop')}
-                  className={`py-2 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border-none ${
-                    entryScope === 'shop'
-                      ? 'bg-secondary text-white shadow-md font-black'
-                      : 'text-[#8A98A8] hover:text-white bg-transparent'
-                  }`}
-                >
-                  <Building2 size={14} /> Barbearia Inteira
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setEntryScope('staff')}
-                  className={`py-2 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border-none ${
-                    entryScope === 'staff'
-                      ? 'bg-[#8B7CFF] text-white shadow-md font-black'
-                      : 'text-[#8A98A8] hover:text-white bg-transparent'
-                  }`}
-                >
-                  <User size={14} /> Profissional
-                </button>
-              </div>
-
-              {/* Seletor de Profissional (se escopo === staff) */}
-              {entryScope === 'staff' && (
-                <div className="mt-3 animate-in fade-in duration-200">
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-[#8A98A8] mb-1">
-                    Selecione o Profissional Responsável
-                  </label>
-                  <select
-                    value={entryStaffId}
-                    onChange={(e) => setEntryStaffId(e.target.value)}
-                    className={`w-full h-[44px] px-3 rounded-xl border-none font-bold text-xs ${
-                      isDarkMode ? 'bg-[#242424] text-white border border-white/10' : 'bg-white text-slate-800'
-                    } focus:outline-none focus:ring-2 focus:ring-[#2898D8]/50 cursor-pointer`}
+                <div className="grid grid-cols-2 gap-2 p-1 bg-white/5 rounded-xl border border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => setEntryScope('shop')}
+                    className={`py-2 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border-none ${
+                      entryScope === 'shop'
+                        ? 'bg-secondary text-white shadow-md font-black'
+                        : 'text-[#8A98A8] hover:text-white bg-transparent'
+                    }`}
                   >
-                    {activeStaff.length === 0 ? (
-                      <option value="">Nenhum profissional cadastrado</option>
-                    ) : (
-                      activeStaff.map(s => (
-                        <option key={s.id} value={s.id} className="bg-[#242424] text-white">
-                          {s.name}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                    <Building2 size={14} /> Barbearia Inteira
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setEntryScope('staff')}
+                    className={`py-2 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border-none ${
+                      entryScope === 'staff'
+                        ? 'bg-[#8B7CFF] text-white shadow-md font-black'
+                        : 'text-[#8A98A8] hover:text-white bg-transparent'
+                    }`}
+                  >
+                    <User size={14} /> Profissional
+                  </button>
                 </div>
-              )}
-            </div>
+
+                {/* Seletor de Profissional (se escopo === staff) */}
+                {entryScope === 'staff' && (
+                  <div className="mt-3 animate-in fade-in duration-200">
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-[#8A98A8] mb-1">
+                      Selecione o Profissional Responsável
+                    </label>
+                    <select
+                      value={entryStaffId}
+                      onChange={(e) => setEntryStaffId(e.target.value)}
+                      className={`w-full h-[44px] px-3 rounded-xl border-none font-bold text-xs ${
+                        isDarkMode ? 'bg-[#242424] text-white border border-white/10' : 'bg-white text-slate-800'
+                      } focus:outline-none focus:ring-2 focus:ring-[#2898D8]/50 cursor-pointer`}
+                    >
+                      {activeStaff.length === 0 ? (
+                        <option value="">Nenhum profissional cadastrado</option>
+                      ) : (
+                        activeStaff.map(s => (
+                          <option key={s.id} value={s.id} className="bg-[#242424] text-white">
+                            {s.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Categorias */}
             <div className="w-full mb-4 shrink-0">

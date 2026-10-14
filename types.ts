@@ -324,11 +324,11 @@ export interface AppState {
   getStaffAvailability: (staffId: string) => Promise<StaffAvailability[]>;
   saveStaffAvailability: (availabilities: Omit<StaffAvailability, 'id'>[]) => Promise<void>;
   
-  addAppointment: (apt: Appointment, isExceptional?: boolean) => Promise<void>;
-  updateAppointment: (id: string, updates: Partial<Appointment>) => void;
-  finishAppointment: (id: string) => void;
-  revertAppointment: (id: string) => void;
-  markNoShow: (id: string) => void;
+  addAppointment: (apt: Appointment, isExceptional?: boolean, serviceIds?: string[]) => Promise<Appointment>;
+  updateAppointment: (id: string, updates: Partial<Appointment>) => Promise<void> | void;
+  finishAppointment: (id: string) => Promise<void>;
+  revertAppointment: (id: string) => Promise<void>;
+  markNoShow: (id: string) => Promise<void>;
   updateCustomerPhoto: (phone: string, base64Photo: string, description?: string) => void;
   updateCustomerAvatar: (phone: string, base64Photo: string) => void;
   updateCustomer: (phone: string, updates: Partial<Customer>) => void;

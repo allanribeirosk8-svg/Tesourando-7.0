@@ -32,7 +32,8 @@ import {
   Building2,
   User,
   Shield,
-  Calendar
+  Calendar,
+  Percent
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -78,8 +79,10 @@ export const CaixaView: React.FC = () => {
     markNoShow
   } = useStore();
 
+  const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
+
   const [activeTab, setActiveTab] = useState<'resumo' | 'extrato' | 'equipe' | 'relatorios'>('resumo');
-  const [relatoriosSubTab, setRelatoriosSubTab] = useState<'diagnostico' | 'clientes' | 'servicos' | 'agenda'>('diagnostico');
+  const [relatoriosSubTab, setRelatoriosSubTab] = useState<'diagnostico' | 'clientes' | 'servicos' | 'agenda'>(() => isAdmin ? 'diagnostico' : 'servicos');
   const [selectedStaffForCommission, setSelectedStaffForCommission] = useState<any | null>(null);
   const [commissionPaymentSuccess, setCommissionPaymentSuccess] = useState<string | null>(null);
 
@@ -120,12 +123,15 @@ export const CaixaView: React.FC = () => {
   const [filtroExtrato, setFiltroExtrato] = useState<'todas' | 'entradas' | 'saidas'>('todas');
 
   // Controle de Nível e Escopo Financeiro
-  const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
-
   const loggedInStaff = useMemo(() => {
     if (!session?.user?.id) return null;
     return staff.find(s => s.userId === session.user.id || s.id === session.user.id) || null;
   }, [staff, session]);
+
+  const hasMultipleStaff = useMemo(() => {
+    const activeStaff = staff.filter(s => s.status !== 'inactive');
+    return activeStaff.length > 1;
+  }, [staff]);
 
   const [financeScope, setFinanceScope] = useState<'shop' | 'staff'>(() => {
     if (!isAdmin) return 'staff';
@@ -146,13 +152,22 @@ export const CaixaView: React.FC = () => {
       } else if (staff.length > 0) {
         setSelectedStaffScopeId(staff[0].id);
       }
+      if (activeTab === 'equipe') {
+        setActiveTab('resumo');
+      }
+      if (relatoriosSubTab === 'diagnostico') {
+        setRelatoriosSubTab('servicos');
+      }
     } else {
+      if (!hasMultipleStaff && financeScope !== 'shop') {
+        setFinanceScope('shop');
+      }
       if (!selectedStaffScopeId && staff.length > 0) {
         const activeStaff = staff.filter(s => s.status === 'active');
         setSelectedStaffScopeId(activeStaff[0]?.id || staff[0].id);
       }
     }
-  }, [isAdmin, loggedInStaff, staff]);
+  }, [isAdmin, loggedInStaff, staff, hasMultipleStaff, financeScope, activeTab, relatoriosSubTab]);
 
   const selectedStaff = useMemo(() => {
     return staff.find(s => s.id === selectedStaffScopeId || s.userId === selectedStaffScopeId) || null;
@@ -228,21 +243,27 @@ export const CaixaView: React.FC = () => {
     });
   }, [transactions, dateRange]);
 
-  // Filtered appointments according to active scope (Shop vs Staff)
-  const periodAppointments = useMemo(() => {
+  const isAptForCurrentScope = React.useCallback((a: any) => {
     if (financeScope === 'shop' || !selectedStaffScopeId) {
-      return allPeriodAppointments;
+      return true;
     }
     const s = selectedStaff;
     const targetId = selectedStaffScopeId;
-    return allPeriodAppointments.filter(a => {
-      if (!a) return false;
-      if (a.staffId === targetId) return true;
-      if (s?.userId && (a.staffId === s.userId || a.userId === s.userId)) return true;
-      if (s?.id && (a.staffId === s.id || a.barberId === s.id)) return true;
-      return false;
-    });
-  }, [allPeriodAppointments, financeScope, selectedStaffScopeId, selectedStaff]);
+    if (!a) return false;
+    if (a.staffId === targetId) return true;
+    if (s?.userId && (a.staffId === s.userId || a.userId === s.userId)) return true;
+    if (s?.id && (a.staffId === s.id || a.barberId === s.id)) return true;
+    return false;
+  }, [financeScope, selectedStaffScopeId, selectedStaff]);
+
+  const scopedAllAppointments = useMemo(() => {
+    return appointments.filter(isAptForCurrentScope);
+  }, [appointments, isAptForCurrentScope]);
+
+  // Filtered appointments according to active scope (Shop vs Staff)
+  const periodAppointments = useMemo(() => {
+    return allPeriodAppointments.filter(isAptForCurrentScope);
+  }, [allPeriodAppointments, isAptForCurrentScope]);
 
   // Filtered transactions according to active scope (Shop vs Staff)
   const txNoPeriodo = useMemo(() => {
@@ -555,8 +576,8 @@ export const CaixaView: React.FC = () => {
       });
     }
 
-    // 4. Volume alto, lucro comprimido
-    if (atendimentos > 15 && lucroEstimado < faturamento * 0.5) {
+    // 4. Volume alto, lucro comprimido (Apenas Administrador/Dono)
+    if (isAdmin && atendimentos > 15 && lucroEstimado < faturamento * 0.5) {
       insights.push({
         emoji: '⚡', cor: 'yellow',
         titulo: 'Volume alto, lucro comprimido',
@@ -584,8 +605,8 @@ export const CaixaView: React.FC = () => {
       });
     }
 
-    // 7. Despesas crescendo mais rápido que receita
-    if (expenseDiff !== null && faturamentoDiff !== null && expenseDiff > faturamentoDiff + 20) {
+    // 7. Despesas crescendo mais rápido que receita (Apenas Administrador/Dono)
+    if (isAdmin && expenseDiff !== null && faturamentoDiff !== null && expenseDiff > faturamentoDiff + 20) {
       insights.push({
         emoji: '💰', cor: 'yellow',
         titulo: 'Despesas crescendo mais que a receita',
@@ -611,11 +632,11 @@ export const CaixaView: React.FC = () => {
           ref.setMonth(ref.getMonth() - (11 - i));
           const ano = ref.getFullYear();
           const mes = ref.getMonth(); // 0-based
-          const count = appointments.filter(a => {
+          const count = scopedAllAppointments.filter(a => {
             const dateParts = a.date.split('-');
             return a.status === 'completed' && parseInt(dateParts[0]) === ano && parseInt(dateParts[1]) - 1 === mes;
           }).length;
-          const receita = appointments
+          const receita = scopedAllAppointments
             .filter(a => {
               const dateParts = a.date.split('-');
               return a.status === 'completed' && parseInt(dateParts[0]) === ano && parseInt(dateParts[1]) - 1 === mes;
@@ -632,10 +653,10 @@ export const CaixaView: React.FC = () => {
           const wEndDate = new Date(ref);
           wEndDate.setDate(ref.getDate() + 6);
           const wEnd = wEndDate.toISOString().split('T')[0];
-          const count = appointments.filter(a =>
+          const count = scopedAllAppointments.filter(a =>
             a.status === 'completed' && a.date >= wStart && a.date <= wEnd
           ).length;
-          const receita = appointments
+          const receita = scopedAllAppointments
             .filter(a => a.status === 'completed' && a.date >= wStart && a.date <= wEnd)
             .reduce((s, a) => s + (a.price || 0), 0);
           const isSelected = i === 7; 
@@ -643,13 +664,13 @@ export const CaixaView: React.FC = () => {
           return { label, count, receita, isSelected };
         });
       } else if (periodo === 'ano') {
-        const anos = [...new Set(appointments.map(a => parseInt(a.date.split('-')[0])))].sort();
+        const anos = [...new Set(scopedAllAppointments.map(a => parseInt(a.date.split('-')[0])))].sort();
         if (anos.length < 2) return []; 
         return anos.map(ano => {
-          const count = appointments.filter(a =>
+          const count = scopedAllAppointments.filter(a =>
             a.status === 'completed' && parseInt(a.date.split('-')[0]) === ano
           ).length;
-          const receita = appointments
+          const receita = scopedAllAppointments
             .filter(a => a.status === 'completed' && parseInt(a.date.split('-')[0]) === ano)
             .reduce((s, a) => s + (a.price || 0), 0);
           return { label: String(ano), count, receita, isSelected: ano === selectedDate.getFullYear() };
@@ -670,7 +691,7 @@ export const CaixaView: React.FC = () => {
           d.setDate(d.getDate() + 1);
         }
 
-        appointments
+        scopedAllAppointments
           .filter(a => a.status === 'completed' && a.date >= noveStr)
           .forEach(a => {
             const dow = new Date(a.date + 'T12:00:00').getDay();
@@ -703,7 +724,7 @@ export const CaixaView: React.FC = () => {
                 <ArrowDown className="w-4 h-4 text-green-600" />
               </div>
               <span className="text-[#1E1B4B] font-medium text-sm flex items-center gap-2">
-                Entradas
+                {isAdmin ? 'Entradas' : 'Produção / Serviços'}
                 <ChevronDown className={`w-4 h-4 text-[#6B7280] transition-transform ${entradasExpanded ? 'rotate-180' : ''}`} />
               </span>
             </div>
@@ -725,36 +746,77 @@ export const CaixaView: React.FC = () => {
                 <span>🛍️ Produto</span>
                 <span className="text-green-600">{formatCurrency(totalProdutos)}</span>
               </div>
-              <div className="flex justify-between text-sm text-[#6B7280]">
-                <span>📦 Outros</span>
-                <span className="text-green-600">{formatCurrency(totalOutros)}</span>
-              </div>
+              {totalOutros > 0 && (
+                <div className="flex justify-between text-sm text-[#6B7280]">
+                  <span>📦 Outros</span>
+                  <span className="text-green-600">{formatCurrency(totalOutros)}</span>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Linha Saídas */}
-          <div className="flex items-center justify-between py-3 border-b border-black/[0.06]">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-red-100/80 flex items-center justify-center">
-                <ArrowUp className="w-4 h-4 text-red-500" />
+          {isAdmin ? (
+            <>
+              {/* Linha Saídas */}
+              <div className="flex items-center justify-between py-3 border-b border-black/[0.06]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-red-100/80 flex items-center justify-center">
+                    <ArrowUp className="w-4 h-4 text-red-500" />
+                  </div>
+                  <span className="text-[#1E1B4B] font-medium text-sm">Saídas</span>
+                </div>
+                <span className="text-red-500 font-semibold text-sm">{formatCurrency(expenseTotal)}</span>
               </div>
-              <span className="text-[#1E1B4B] font-medium text-sm">Saídas</span>
-            </div>
-            <span className="text-red-500 font-semibold text-sm">{formatCurrency(expenseTotal)}</span>
-          </div>
-          
-          {/* Saldo */}
-          <div className="flex items-center justify-between pt-3">
-            <span className="text-[#1E1B4B] font-semibold text-base">Saldo {periodo === 'mes' ? 'do mês' : 'do período'}</span>
-            <div className="flex flex-col items-end gap-1">
-              <span className={`font-black text-lg ${lucroEstimado >= 0 ? 'text-green-600' : 'text-red-500'}`}>{formatCurrency(lucroEstimado)}</span>
-              {lucroDiff !== null && (
-                <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${lucroDiff >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
-                  {lucroDiff >= 0 ? '↑' : '↓'} {lucroDiff >= 0 ? '+' : ''}{lucroDiff.toFixed(1)}% vs {periodo === 'mes' ? 'mês anterior' : 'período anterior'}
-                </span>
-              )}
-            </div>
-          </div>
+              
+              {/* Saldo */}
+              <div className="flex items-center justify-between pt-3">
+                <span className="text-[#1E1B4B] font-semibold text-base">Saldo {periodo === 'mes' ? 'do mês' : 'do período'}</span>
+                <div className="flex flex-col items-end gap-1">
+                  <span className={`font-black text-lg ${lucroEstimado >= 0 ? 'text-green-600' : 'text-red-500'}`}>{formatCurrency(lucroEstimado)}</span>
+                  {lucroDiff !== null && (
+                    <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${lucroDiff >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+                      {lucroDiff >= 0 ? '↑' : '↓'} {lucroDiff >= 0 ? '+' : ''}{lucroDiff.toFixed(1)}% vs {periodo === 'mes' ? 'mês anterior' : 'período anterior'}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Visão de Funcionário: Comissão e Total a Receber */}
+              {(() => {
+                const taxa = loggedInStaff?.commissionRate ?? (selectedStaff?.commissionRate || 0);
+                const valorComissao = aptIncome * (taxa / 100);
+                const totalReceber = valorComissao + totalGorjetas;
+
+                return (
+                  <>
+                    <div className="flex items-center justify-between py-3 border-b border-black/[0.06]">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-indigo-100/80 flex items-center justify-center">
+                          <Percent className="w-4 h-4 text-indigo-600" />
+                        </div>
+                        <span className="text-[#1E1B4B] font-medium text-sm">
+                          Comissão {taxa > 0 ? `(${taxa}%)` : ''}
+                        </span>
+                      </div>
+                      <span className="text-indigo-600 font-semibold text-sm">{formatCurrency(valorComissao)}</span>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-3">
+                      <span className="text-[#1E1B4B] font-semibold text-base">Total Estimado</span>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="font-black text-lg text-emerald-600">
+                          {formatCurrency(totalReceber)}
+                        </span>
+                        <span className="text-[11px] text-[#6B7280]">comissão + gorjetas</span>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+            </>
+          )}
         </div>
 
         {/* Card Atendimentos */}
@@ -962,11 +1024,17 @@ export const CaixaView: React.FC = () => {
         {/* Filtro de abas — inline estável, sem conflito de sticky scroll */}
         <div className="pb-1 bg-transparent">
           <div className="flex bg-surface/90 rounded-2xl p-1 gap-1 border border-white/10 shadow-sm">
-            {([
-              { key: 'todas',    label: 'Todas'    },
-              { key: 'entradas', label: 'Entradas' },
-              { key: 'saidas',   label: 'Saídas'   },
-            ] as const).map(({ key, label }) => {
+            {(isAdmin
+              ? [
+                  { key: 'todas',    label: 'Todas'    },
+                  { key: 'entradas', label: 'Entradas' },
+                  { key: 'saidas',   label: 'Saídas'   },
+                ]
+              : [
+                  { key: 'todas',    label: 'Todas'    },
+                  { key: 'entradas', label: 'Produção' },
+                ]
+            ).map(({ key, label }) => {
 
               const isActive = filtroExtrato === key;
 
@@ -1046,24 +1114,26 @@ export const CaixaView: React.FC = () => {
                     <span>{item.date.split('-').reverse().join('/')}</span>
                     <span>·</span>
                     <span>{getCategoryLabel(item.category, item.description)}</span>
-                    <span className={`inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-md font-bold ${
-                      linkedStaff
-                        ? 'bg-[#8B7CFF]/15 text-[#8B7CFF] border border-[#8B7CFF]/30'
-                        : 'bg-emerald-400/10 text-emerald-300 border border-emerald-400/20'
-                    }`}>
-                      {linkedStaff ? (
-                        <><User size={10} /> {formatShortName(linkedStaff.name)}</>
-                      ) : (
-                        <><Building2 size={10} /> Barbearia</>
-                      )}
-                    </span>
+                    {isAdmin && (
+                      <span className={`inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-md font-bold ${
+                        linkedStaff
+                          ? 'bg-[#8B7CFF]/15 text-[#8B7CFF] border border-[#8B7CFF]/30'
+                          : 'bg-emerald-400/10 text-emerald-300 border border-emerald-400/20'
+                      }`}>
+                        {linkedStaff ? (
+                          <><User size={10} /> {formatShortName(linkedStaff.name)}</>
+                        ) : (
+                          <><Building2 size={10} /> Barbearia</>
+                        )}
+                      </span>
+                    )}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <div className={`text-sm font-black ${item.type === 'income' ? 'text-[#34D399]' : 'text-[#F87171]'}`}>
                     {item.type === 'income' ? '+' : '-'} {formatCurrency(item.amount)}
                   </div>
-                  {!item.isAppointment && (
+                  {!item.isAppointment && isAdmin && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1082,12 +1152,12 @@ export const CaixaView: React.FC = () => {
 
             return (
               <div key={item.id} className="relative overflow-hidden rounded-2xl bg-surface border border-white/8 shadow-[0_4px_16px_rgba(0,0,0,0.3)] group">
-                {!item.isAppointment && (
+                {!item.isAppointment && isAdmin && (
                   <div className="absolute inset-y-0 right-0 w-20 bg-red-500 flex items-center justify-center -z-10">
                     <Trash2 size={20} className="text-white" />
                   </div>
                 )}
-                {!item.isAppointment ? (
+                {!item.isAppointment && isAdmin ? (
                   <motion.div 
                     id={`tx-${item.id}`}
                     drag="x"
@@ -1110,18 +1180,47 @@ export const CaixaView: React.FC = () => {
 
         {/* Sticky footer */}
         <div className="fixed bottom-[64px] left-0 right-0 bg-surface/90 backdrop-blur-[12px] border-t border-white/10 p-3 flex justify-between items-center text-[10px] font-bold z-20">
-          <div className="text-center">
-            <p className="text-title uppercase mb-1">Entradas</p>
-            <p className="text-[#34D399]">{formatCurrency(totalEntradas)}</p>
-          </div>
-          <div className="text-center">
-            <p className="text-title uppercase mb-1">Saídas</p>
-            <p className="text-[#F87171]">{formatCurrency(totalSaidas)}</p>
-          </div>
-          <div className="text-center">
-            <p className="text-title uppercase mb-1">Resultado</p>
-            <p className={resultado >= 0 ? 'text-[#34D399]' : 'text-[#F87171]'}>{formatCurrency(resultado)}</p>
-          </div>
+          {isAdmin ? (
+            <>
+              <div className="text-center">
+                <p className="text-title uppercase mb-1">Entradas</p>
+                <p className="text-[#34D399]">{formatCurrency(totalEntradas)}</p>
+              </div>
+              <div className="text-center">
+                <p className="text-title uppercase mb-1">Saídas</p>
+                <p className="text-[#F87171]">{formatCurrency(totalSaidas)}</p>
+              </div>
+              <div className="text-center">
+                <p className="text-title uppercase mb-1">Resultado</p>
+                <p className={resultado >= 0 ? 'text-[#34D399]' : 'text-[#F87171]'}>{formatCurrency(resultado)}</p>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-center">
+                <p className="text-title uppercase mb-1">Produção Total</p>
+                <p className="text-[#34D399] font-black">{formatCurrency(totalEntradas)}</p>
+              </div>
+              {(() => {
+                const taxa = loggedInStaff?.commissionRate ?? (selectedStaff?.commissionRate || 0);
+                const valorComissao = aptIncome * (taxa / 100);
+                const totalGorjetas = txNoPeriodo.filter(t => t.type === 'income' && t.category === 'tip' && !(t as any).linkedAppointmentId).reduce((s,t) => s+t.amount, 0);
+                const totalReceber = valorComissao + totalGorjetas;
+                return (
+                  <>
+                    <div className="text-center">
+                      <p className="text-title uppercase mb-1">Comissão {taxa > 0 ? `(${taxa}%)` : ''}</p>
+                      <p className="text-indigo-400 font-black">{formatCurrency(valorComissao)}</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-title uppercase mb-1">Total a Receber</p>
+                      <p className="text-emerald-400 font-black">{formatCurrency(totalReceber)}</p>
+                    </div>
+                  </>
+                );
+              })()}
+            </>
+          )}
         </div>
       </div>
     );
@@ -1133,8 +1232,9 @@ export const CaixaView: React.FC = () => {
     const sessenta = new Date(hoje);
     sessenta.setDate(hoje.getDate() - 60);
     const sessentaStr = sessenta.toISOString().split('T')[0];
+    const sourceApts = isAdmin && financeScope === 'shop' ? appointments : scopedAllAppointments;
     const clientesAtivos = new Set(
-      appointments
+      sourceApts
         .filter(a => a.status === 'completed' && a.date >= sessentaStr)
         .map(a => a.phone)
     ).size;
@@ -1157,14 +1257,14 @@ export const CaixaView: React.FC = () => {
     // Clientes inativos: último completed há mais de 30 dias
     const trintaStr = (() => { const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().split('T')[0]; })();
     const ultimoCorte: Record<string, string> = {};
-    appointments.filter(a => a.status === 'completed').forEach(a => {
+    sourceApts.filter(a => a.status === 'completed').forEach(a => {
       if (!ultimoCorte[a.phone] || a.date > ultimoCorte[a.phone]) ultimoCorte[a.phone] = a.date;
     });
     const inativos = Object.entries(ultimoCorte)
       .filter(([, date]) => date < trintaStr)
       .map(([phone, date]) => ({
         phone,
-        nome: appointments.find(a => a.phone === phone)?.clientName || phone,
+        nome: sourceApts.find(a => a.phone === phone)?.clientName || phone,
         diasAtraso: Math.floor((hoje.getTime() - new Date(date).getTime()) / (1000 * 60 * 60 * 24)),
       }))
       .sort((a, b) => b.diasAtraso - a.diasAtraso);
@@ -1172,7 +1272,7 @@ export const CaixaView: React.FC = () => {
     const inativosVisiveis = showAllInativos ? inativos : inativos.slice(0, 5);
 
     const noShowClientes = clientesArr
-      .map(c => ({ ...c, faltas: appointments.filter(a => a.phone === c.phone && a.status === 'no-show' && a.date >= dateRange.start && a.date <= dateRange.end).length }))
+      .map(c => ({ ...c, faltas: sourceApts.filter(a => a.phone === c.phone && a.status === 'no-show' && a.date >= dateRange.start && a.date <= dateRange.end).length }))
       .filter(c => c.faltas > 0)
       .sort((a, b) => b.faltas - a.faltas)
       .slice(0, 3);
@@ -1182,7 +1282,7 @@ export const CaixaView: React.FC = () => {
 
     // Novos clientes: primeiro atendimento de todos os tempos cai dentro do dateRange
     const novosClientes = clientesArr.filter(c => {
-      const todosApts = appointments
+      const todosApts = sourceApts
         .filter(a => a.phone === c.phone && a.status === 'completed')
         .map(a => a.date)
         .sort();
@@ -2171,21 +2271,23 @@ export const CaixaView: React.FC = () => {
       });
     }
 
-    // 3. Recomendar revisão de escala em profissionais com baixa presença
-    staffMetrics.forEach(m => {
-      if (m.total >= 3 && m.utilizationRate < 75) {
-        recsList.push({
-          id: `rec-scale-review-${m.staff.id}`,
-          title: `Revisar Escala de Trabalho: ${m.staff.name}`,
-          description: `${m.staff.name} está com apenas ${Math.round(m.utilizationRate)}% de presença. Sugerimos readequar seus horários ou dias de escala para reduzir janelas vazias na agenda.`,
-          priority: 'medium',
-          category: 'Gestão de Equipe',
-          actionLabel: 'Ajustar Escala',
-          actionType: 'adjust_schedule',
-          staffId: m.staff.id
-        });
-      }
-    });
+    // 3. Recomendar revisão de escala em profissionais com baixa presença (apenas Admin/Dono)
+    if (isAdmin) {
+      staffMetrics.forEach(m => {
+        if (m.total >= 3 && m.utilizationRate < 75) {
+          recsList.push({
+            id: `rec-scale-review-${m.staff.id}`,
+            title: `Revisar Escala de Trabalho: ${m.staff.name}`,
+            description: `${m.staff.name} está com apenas ${Math.round(m.utilizationRate)}% de presença. Sugerimos readequar seus horários ou dias de escala para reduzir janelas vazias na agenda.`,
+            priority: 'medium',
+            category: 'Gestão de Equipe',
+            actionLabel: 'Ajustar Escala',
+            actionType: 'adjust_schedule',
+            staffId: m.staff.id
+          });
+        }
+      });
+    }
 
     // 4. Sugerir campanha promocional em horários de baixa ocupação
     if (completedAptsCount >= 5) {
@@ -2213,8 +2315,8 @@ export const CaixaView: React.FC = () => {
       }
     }
 
-    // 5. Indicar atenção para profissionais abaixo da média do tenant
-    if (staffMetrics.length > 1 && avgGross > 0) {
+    // 5. Indicar atenção para profissionais abaixo da média do tenant (apenas Admin/Dono)
+    if (isAdmin && staffMetrics.length > 1 && avgGross > 0) {
       staffMetrics.forEach(m => {
         if (m.gross < avgGross * 0.5 && m.completed > 0) {
           recsList.push({
@@ -2648,7 +2750,7 @@ export const CaixaView: React.FC = () => {
     return (
       <div className="space-y-4 pb-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
         {/* Conteúdo da sub-aba ativa */}
-        {relatoriosSubTab === 'diagnostico' && renderDiagnosticoRelatorios()}
+        {isAdmin && relatoriosSubTab === 'diagnostico' && renderDiagnosticoRelatorios()}
         {relatoriosSubTab === 'clientes' && renderClientes()}
         {relatoriosSubTab === 'servicos' && renderServicos()}
         {relatoriosSubTab === 'agenda' && renderAgenda()}
@@ -2676,13 +2778,13 @@ export const CaixaView: React.FC = () => {
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-[#1E1B4B]">
+    <div className="w-full min-h-full flex-1 flex flex-col bg-[#1E1B4B]">
       {/* Scope, Period & Navigation Top Header (Unificado e Sticky) */}
       <div className="px-4 pt-3 pb-2.5 sticky top-0 bg-[#1E1B4B] z-40 border-b border-white/10 space-y-2 shadow-lg">
         
         {/* LINHA 1: SELETOR DE ESCOPO (QUEM - Categoria) */}
-        <div>
-          {isAdmin ? (
+        {isAdmin && hasMultipleStaff && (
+          <div>
             <div className={`grid grid-cols-2 bg-surface rounded-2xl p-1 gap-1 border transition-all duration-200 ${
               financeScope === 'staff'
                 ? 'border-[#8B7CFF]/30 shadow-[0_0_12px_rgba(139,124,255,0.12)]'
@@ -2723,49 +2825,33 @@ export const CaixaView: React.FC = () => {
                 <span className="truncate">Por Profissional</span>
               </button>
             </div>
-          ) : (
-            <div className="flex items-center gap-2.5 bg-[#8B7CFF]/10 border border-[#8B7CFF]/25 px-3.5 py-2 rounded-2xl w-full">
-              <Shield size={16} className="text-[#8B7CFF] shrink-0" />
-              <span className="text-xs font-bold text-white">
-                Painel Financeiro Individual
-              </span>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* LINHA 2: SELETOR DE PROFISSIONAL (QUEM - Sujeito Específico) */}
-        {financeScope === 'staff' && (
+        {isAdmin && hasMultipleStaff && financeScope === 'staff' && (
           <div className="w-full animate-in fade-in duration-200">
-            {isAdmin ? (
-              <div className="relative w-full">
-                <select
-                  value={selectedStaffScopeId}
-                  onChange={(e) => {
-                    setSelectedStaffScopeId(e.target.value);
-                    setSelectedStaffForCommission(null);
-                  }}
-                  className="w-full appearance-none bg-surface border border-[#8B7CFF]/50 rounded-2xl pl-9 pr-8 h-10 text-xs font-bold text-white focus:outline-none focus:border-[#8B7CFF] shadow-md cursor-pointer truncate"
-                >
-                  {staff.filter(s => s.status === 'active').map(s => {
-                    const isSelf = s.userId === session?.user?.id;
-                    return (
-                      <option key={s.id} value={s.id} className="bg-[#1E1B4B] text-white">
-                        {s.name} {isSelf ? '(Você)' : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-                <User size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8B7CFF] pointer-events-none" />
-                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-title pointer-events-none" />
-              </div>
-            ) : (
-              <div className="flex items-center gap-2.5 bg-surface border border-[#8B7CFF]/30 rounded-2xl px-3.5 h-10 w-full">
-                <User size={15} className="text-[#8B7CFF] shrink-0" />
-                <span className="text-xs font-bold text-white truncate">
-                  Profissional: {selectedStaff ? formatShortName(selectedStaff.name) : 'Seu Perfil'}
-                </span>
-              </div>
-            )}
+            <div className="relative w-full">
+              <select
+                value={selectedStaffScopeId}
+                onChange={(e) => {
+                  setSelectedStaffScopeId(e.target.value);
+                  setSelectedStaffForCommission(null);
+                }}
+                className="w-full appearance-none bg-surface border border-[#8B7CFF]/50 rounded-2xl pl-9 pr-8 h-10 text-xs font-bold text-white focus:outline-none focus:border-[#8B7CFF] shadow-md cursor-pointer truncate"
+              >
+                {staff.filter(s => s.status === 'active').map(s => {
+                  const isSelf = s.userId === session?.user?.id;
+                  return (
+                    <option key={s.id} value={s.id} className="bg-[#1E1B4B] text-white">
+                      {s.name} {isSelf ? '(Você)' : ''}
+                    </option>
+                  );
+                })}
+              </select>
+              <User size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8B7CFF] pointer-events-none" />
+              <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-title pointer-events-none" />
+            </div>
           </div>
         )}
 
@@ -2822,10 +2908,13 @@ export const CaixaView: React.FC = () => {
           </div>
         </div>
 
-        {/* LINHA 4: NAVEGAÇÃO PRINCIPAL DO FINANCEIRO (4 Abas Primárias - Nível 1) */}
+        {/* LINHA 4: NAVEGAÇÃO PRINCIPAL DO FINANCEIRO (Abas Primárias - Nível 1) */}
         <div className="pt-1">
-          <div className="grid grid-cols-4 bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner">
-            {(['resumo', 'extrato', 'equipe', 'relatorios'] as const).map(t => {
+          <div className={`grid ${isAdmin ? 'grid-cols-4' : 'grid-cols-3'} bg-surface rounded-2xl p-1 gap-1 border border-white/10 shadow-inner`}>
+            {(isAdmin
+              ? (['resumo', 'extrato', 'equipe', 'relatorios'] as const)
+              : (['resumo', 'extrato', 'relatorios'] as const)
+            ).map(t => {
               const isTabActive = activeTab === t;
               return (
                 <button
@@ -2874,13 +2963,20 @@ export const CaixaView: React.FC = () => {
         {/* LINHA 5: SUBTABS DE RELATÓRIOS (Subseções - Nível 2) */}
         {activeTab === 'relatorios' && (
           <div className="pt-1 animate-in fade-in duration-200">
-            <div className="grid grid-cols-4 w-full bg-surface/50 rounded-xl p-1 gap-1 border border-white/5 shadow-inner">
-              {[
-                { id: 'diagnostico', label: 'Geral', icon: Activity },
-                { id: 'clientes', label: 'Clientes', icon: Users },
-                { id: 'servicos', label: 'Serviços', icon: Scissors },
-                { id: 'agenda', label: 'Ocupação', icon: Calendar },
-              ].map(sub => {
+            <div className={`grid ${isAdmin ? 'grid-cols-4' : 'grid-cols-3'} w-full bg-surface/50 rounded-xl p-1 gap-1 border border-white/5 shadow-inner`}>
+              {(isAdmin
+                ? [
+                    { id: 'diagnostico', label: 'Geral', icon: Activity },
+                    { id: 'clientes', label: 'Clientes', icon: Users },
+                    { id: 'servicos', label: 'Serviços', icon: Scissors },
+                    { id: 'agenda', label: 'Ocupação', icon: Calendar },
+                  ]
+                : [
+                    { id: 'servicos', label: 'Serviços', icon: Scissors },
+                    { id: 'clientes', label: 'Clientes', icon: Users },
+                    { id: 'agenda', label: 'Ocupação', icon: Calendar },
+                  ]
+              ).map(sub => {
                 const Icon = sub.icon;
                 const isActive = relatoriosSubTab === sub.id;
                 return (
@@ -2913,37 +3009,39 @@ export const CaixaView: React.FC = () => {
         )}
 
         {/* LINHA 6: CONFIRMAÇÃO LEVE DE CONTEXTO */}
-        <div className="flex items-center justify-between px-1 pt-0.5 text-[10px]">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className={`w-2 h-2 rounded-full shrink-0 transition-colors ${financeScope === 'shop' ? 'bg-secondary' : 'bg-[#8B7CFF]'}`} />
-            <span className="text-title/80 font-medium truncate">
-              Visualizando:{' '}
-              <strong className="text-white font-bold">
-                {financeScope === 'shop'
-                  ? 'Barbearia inteira'
-                  : selectedStaff ? formatShortName(selectedStaff.name) : 'Profissional'}
-              </strong>
+        {isAdmin && (
+          <div className="flex items-center justify-between px-1 pt-0.5 text-[10px]">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 transition-colors ${financeScope === 'shop' ? 'bg-secondary' : 'bg-[#8B7CFF]'}`} />
+              <span className="text-title/80 font-medium truncate">
+                Visualizando:{' '}
+                <strong className="text-white font-bold">
+                  {financeScope === 'shop'
+                    ? 'Barbearia inteira'
+                    : selectedStaff ? formatShortName(selectedStaff.name) : 'Profissional'}
+                </strong>
+              </span>
+            </div>
+            <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded-md border transition-all ${
+              financeScope === 'shop'
+                ? 'text-title/60 border-transparent bg-transparent'
+                : 'text-[#8B7CFF] bg-[#8B7CFF]/15 border-[#8B7CFF]/30'
+            }`}>
+              {financeScope === 'shop' ? 'Consolidado' : 'Recorte Individual'}
             </span>
           </div>
-          <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded-md border transition-all ${
-            financeScope === 'shop'
-              ? 'text-title/60 border-transparent bg-transparent'
-              : 'text-[#8B7CFF] bg-[#8B7CFF]/15 border-[#8B7CFF]/30'
-          }`}>
-            {financeScope === 'shop' ? 'Consolidado' : 'Recorte Individual'}
-          </span>
-        </div>
+        )}
       </div>
 
       {/* Content Container (SEM overflow-y-auto para evitar duplo scroll) */}
       <div className="flex-1 px-4 w-full max-w-full overflow-x-hidden pt-3 pb-28 bg-[#1E1B4B]">
         {activeTab === 'resumo' && renderResumo()}
         {activeTab === 'extrato' && renderExtrato()}
-        {activeTab === 'equipe' && renderComissoes()}
+        {isAdmin && activeTab === 'equipe' && renderComissoes()}
         {activeTab === 'relatorios' && renderRelatorios()}
       </div>
 
-      {(activeTab === 'resumo' || activeTab === 'extrato') && (
+      {isAdmin && (activeTab === 'resumo' || activeTab === 'extrato') && (
         <div className={`fixed right-4 z-30 flex flex-col-reverse items-end gap-3 ${
           activeTab === 'resumo' ? 'bottom-[80px]' : 'bottom-[140px]'
         }`}>
@@ -3239,10 +3337,12 @@ export const CaixaView: React.FC = () => {
                                 setRecActionLoading(true);
                                 try {
                                   await finishAppointment(apt.id);
-                                } catch (e) {
-                                  console.error(e);
+                                } catch (e: any) {
+                                  console.error("[CaixaView] Erro ao concluir agendamento:", e);
+                                  alert(e?.message || "Não foi possível concluir o agendamento no servidor.");
+                                } finally {
+                                  setRecActionLoading(false);
                                 }
-                                setRecActionLoading(false);
                               }}
                               disabled={recActionLoading}
                               className="py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-[9px] font-bold uppercase tracking-wider rounded-lg transition-all border-none cursor-pointer"
@@ -3254,10 +3354,12 @@ export const CaixaView: React.FC = () => {
                                 setRecActionLoading(true);
                                 try {
                                   await markNoShow(apt.id);
-                                } catch (e) {
-                                  console.error(e);
+                                } catch (e: any) {
+                                  console.error("[CaixaView] Erro ao marcar no-show:", e);
+                                  alert(e?.message || "Não foi possível registrar no-show no servidor.");
+                                } finally {
+                                  setRecActionLoading(false);
                                 }
-                                setRecActionLoading(false);
                               }}
                               disabled={recActionLoading}
                               className="py-1.5 bg-rose-500 hover:bg-rose-600 text-white text-[9px] font-bold uppercase tracking-wider rounded-lg transition-all border-none cursor-pointer"
