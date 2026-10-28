@@ -206,8 +206,29 @@ export const CaixaView: React.FC = () => {
     return { start: fmt(start), end: fmt(end) };
   }, [periodo, selectedDate]);
 
+  const [isFinanceLoading, setIsFinanceLoading] = useState(false);
+  const isFirstFinanceRender = React.useRef(true);
+
   useEffect(() => {
-    loadTransactions(dateRange.start, dateRange.end);
+    let cancelled = false;
+    if (isFirstFinanceRender.current) {
+      isFirstFinanceRender.current = false;
+      Promise.resolve(loadTransactions(dateRange.start, dateRange.end)).catch(() => {});
+      return;
+    }
+
+    setIsFinanceLoading(true);
+    const minWait = new Promise(resolve => setTimeout(resolve, 160));
+    Promise.all([
+      Promise.resolve(loadTransactions(dateRange.start, dateRange.end)).catch(() => {}),
+      minWait
+    ]).finally(() => {
+      if (!cancelled) setIsFinanceLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [dateRange.start, dateRange.end]);
 
   const handlePrev = () => {
@@ -728,7 +749,11 @@ export const CaixaView: React.FC = () => {
                 <ChevronDown className={`w-4 h-4 text-[#6B7280] transition-transform ${entradasExpanded ? 'rotate-180' : ''}`} />
               </span>
             </div>
-            <span className="text-green-600 font-semibold text-sm">{formatCurrency(faturamento)}</span>
+            {isFinanceLoading ? (
+              <span className="h-5 w-24 rounded-md bg-slate-200 animate-pulse inline-block" />
+            ) : (
+              <span className="text-green-600 font-semibold text-sm">{formatCurrency(faturamento)}</span>
+            )}
           </div>
 
           {/* Breakdown expansível */}
@@ -736,20 +761,36 @@ export const CaixaView: React.FC = () => {
             <div className="pl-11 pb-2 pt-2 space-y-1">
               <div className="flex justify-between text-sm text-[#6B7280]">
                 <span>✂️ Atendimentos</span>
-                <span className="text-green-600">{formatCurrency(totalAtendimentosValor)}</span>
+                {isFinanceLoading ? (
+                  <span className="h-4 w-20 rounded bg-slate-200 animate-pulse inline-block" />
+                ) : (
+                  <span className="text-green-600">{formatCurrency(totalAtendimentosValor)}</span>
+                )}
               </div>
               <div className="flex justify-between text-sm text-[#6B7280]">
                 <span>🤝 Gorjeta</span>
-                <span className="text-green-600">{formatCurrency(totalGorjetas)}</span>
+                {isFinanceLoading ? (
+                  <span className="h-4 w-16 rounded bg-slate-200 animate-pulse inline-block" />
+                ) : (
+                  <span className="text-green-600">{formatCurrency(totalGorjetas)}</span>
+                )}
               </div>
               <div className="flex justify-between text-sm text-[#6B7280]">
                 <span>🛍️ Produto</span>
-                <span className="text-green-600">{formatCurrency(totalProdutos)}</span>
+                {isFinanceLoading ? (
+                  <span className="h-4 w-16 rounded bg-slate-200 animate-pulse inline-block" />
+                ) : (
+                  <span className="text-green-600">{formatCurrency(totalProdutos)}</span>
+                )}
               </div>
               {totalOutros > 0 && (
                 <div className="flex justify-between text-sm text-[#6B7280]">
                   <span>📦 Outros</span>
-                  <span className="text-green-600">{formatCurrency(totalOutros)}</span>
+                  {isFinanceLoading ? (
+                    <span className="h-4 w-16 rounded bg-slate-200 animate-pulse inline-block" />
+                  ) : (
+                    <span className="text-green-600">{formatCurrency(totalOutros)}</span>
+                  )}
                 </div>
               )}
             </div>
@@ -765,18 +806,28 @@ export const CaixaView: React.FC = () => {
                   </div>
                   <span className="text-[#1E1B4B] font-medium text-sm">Saídas</span>
                 </div>
-                <span className="text-red-500 font-semibold text-sm">{formatCurrency(expenseTotal)}</span>
+                {isFinanceLoading ? (
+                  <span className="h-5 w-20 rounded-md bg-slate-200 animate-pulse inline-block" />
+                ) : (
+                  <span className="text-red-500 font-semibold text-sm">{formatCurrency(expenseTotal)}</span>
+                )}
               </div>
               
               {/* Saldo */}
               <div className="flex items-center justify-between pt-3">
                 <span className="text-[#1E1B4B] font-semibold text-base">Saldo {periodo === 'mes' ? 'do mês' : 'do período'}</span>
                 <div className="flex flex-col items-end gap-1">
-                  <span className={`font-black text-lg ${lucroEstimado >= 0 ? 'text-green-600' : 'text-red-500'}`}>{formatCurrency(lucroEstimado)}</span>
-                  {lucroDiff !== null && (
-                    <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${lucroDiff >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
-                      {lucroDiff >= 0 ? '↑' : '↓'} {lucroDiff >= 0 ? '+' : ''}{lucroDiff.toFixed(1)}% vs {periodo === 'mes' ? 'mês anterior' : 'período anterior'}
-                    </span>
+                  {isFinanceLoading ? (
+                    <span className="h-6 w-28 rounded-md bg-slate-200 animate-pulse inline-block" />
+                  ) : (
+                    <>
+                      <span className={`font-black text-lg ${lucroEstimado >= 0 ? 'text-green-600' : 'text-red-500'}`}>{formatCurrency(lucroEstimado)}</span>
+                      {lucroDiff !== null && (
+                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${lucroDiff >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+                          {lucroDiff >= 0 ? '↑' : '↓'} {lucroDiff >= 0 ? '+' : ''}{lucroDiff.toFixed(1)}% vs {periodo === 'mes' ? 'mês anterior' : 'período anterior'}
+                        </span>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -800,15 +851,23 @@ export const CaixaView: React.FC = () => {
                           Comissão {taxa > 0 ? `(${taxa}%)` : ''}
                         </span>
                       </div>
-                      <span className="text-indigo-600 font-semibold text-sm">{formatCurrency(valorComissao)}</span>
+                      {isFinanceLoading ? (
+                        <span className="h-5 w-20 rounded-md bg-slate-200 animate-pulse inline-block" />
+                      ) : (
+                        <span className="text-indigo-600 font-semibold text-sm">{formatCurrency(valorComissao)}</span>
+                      )}
                     </div>
 
                     <div className="flex items-center justify-between pt-3">
                       <span className="text-[#1E1B4B] font-semibold text-base">Total Estimado</span>
                       <div className="flex flex-col items-end gap-1">
-                        <span className="font-black text-lg text-emerald-600">
-                          {formatCurrency(totalReceber)}
-                        </span>
+                        {isFinanceLoading ? (
+                          <span className="h-6 w-28 rounded-md bg-slate-200 animate-pulse inline-block" />
+                        ) : (
+                          <span className="font-black text-lg text-emerald-600">
+                            {formatCurrency(totalReceber)}
+                          </span>
+                        )}
                         <span className="text-[11px] text-[#6B7280]">comissão + gorjetas</span>
                       </div>
                     </div>
@@ -824,29 +883,41 @@ export const CaixaView: React.FC = () => {
           {/* Linha 1 — Atendimentos + badge inline */}
           <div className="flex items-center justify-between py-2 border-b border-black/[0.06]">
             <span className="text-[#1E1B4B] font-medium">✂️ Atendimentos</span>
-            <div className="flex items-center gap-2">
-              <span className="text-[#1E1B4B] font-bold">{totalAtendimentosMes}</span>
-              <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${Number(variacaoAtendimentos) >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
-                {Number(variacaoAtendimentos) >= 0 ? '↑' : '↓'} {Number(variacaoAtendimentos) >= 0 ? '+' : ''}{variacaoAtendimentos}%
-              </span>
-            </div>
+            {isFinanceLoading ? (
+              <span className="h-5 w-16 rounded-md bg-slate-200 animate-pulse inline-block" />
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-[#1E1B4B] font-bold">{totalAtendimentosMes}</span>
+                <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${Number(variacaoAtendimentos) >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+                  {Number(variacaoAtendimentos) >= 0 ? '↑' : '↓'} {Number(variacaoAtendimentos) >= 0 ? '+' : ''}{variacaoAtendimentos}%
+                </span>
+              </div>
+            )}
           </div>
           {/* Linha 2 — Ticket médio */}
           <div className="flex items-center justify-between py-2 border-b border-black/[0.06]">
             <span className="text-[#1E1B4B] font-medium">💰 Ticket médio</span>
-            <span className="text-green-600 font-semibold">{formatCurrency(ticketMedio)}</span>
+            {isFinanceLoading ? (
+              <span className="h-5 w-20 rounded-md bg-slate-200 animate-pulse inline-block" />
+            ) : (
+              <span className="text-green-600 font-semibold">{formatCurrency(ticketMedio)}</span>
+            )}
           </div>
           {/* Linha 3 — Faltas */}
           <div className="flex items-center justify-between pt-2">
             <span className="text-[#1E1B4B] font-medium">⚠️ Faltas</span>
-            <div className="flex items-center gap-2">
-              <span className="text-[#1E1B4B] font-bold">{totalFaltas}</span>
-              {(ticketMedio > 0 && totalFaltas > 0) && (
-                <span className="bg-red-100 text-red-600 font-black text-[10px] px-2 py-0.5 rounded-full">
-                  - {formatCurrency(valorPerdidoFaltas)}
-                </span>
-              )}
-            </div>
+            {isFinanceLoading ? (
+              <span className="h-5 w-12 rounded-md bg-slate-200 animate-pulse inline-block" />
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-[#1E1B4B] font-bold">{totalFaltas}</span>
+                {(ticketMedio > 0 && totalFaltas > 0) && (
+                  <span className="bg-red-100 text-red-600 font-black text-[10px] px-2 py-0.5 rounded-full">
+                    - {formatCurrency(valorPerdidoFaltas)}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -3035,10 +3106,17 @@ export const CaixaView: React.FC = () => {
 
       {/* Content Container (SEM overflow-y-auto para evitar duplo scroll) */}
       <div className="flex-1 px-4 w-full max-w-full overflow-x-hidden pt-3 pb-28 bg-[#1E1B4B]">
-        {activeTab === 'resumo' && renderResumo()}
-        {activeTab === 'extrato' && renderExtrato()}
-        {isAdmin && activeTab === 'equipe' && renderComissoes()}
-        {activeTab === 'relatorios' && renderRelatorios()}
+        <motion.div
+          key={`${activeTab}-${activeTab === 'relatorios' ? relatoriosSubTab : ''}-${financeScope}-${financeScope === 'staff' ? selectedStaffScopeId : 'shop'}-${periodo}-${dateRange.start}`}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+        >
+          {activeTab === 'resumo' && renderResumo()}
+          {activeTab === 'extrato' && renderExtrato()}
+          {isAdmin && activeTab === 'equipe' && renderComissoes()}
+          {activeTab === 'relatorios' && renderRelatorios()}
+        </motion.div>
       </div>
 
       {isAdmin && (activeTab === 'resumo' || activeTab === 'extrato') && (
@@ -3070,9 +3148,12 @@ export const CaixaView: React.FC = () => {
             )}
           </AnimatePresence>
           {/* Botão principal */}
-          <motion.button animate={{rotate: fabOpen ? 45 : 0}} transition={{duration:0.2}}
+          <motion.button
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1, rotate: fabOpen ? 45 : 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             onClick={()=>setFabOpen(v=>!v)}
-            className={`w-14 h-14 rounded-full text-white flex items-center justify-center transition-all cursor-pointer border-none ${
+            className={`w-14 h-14 rounded-full text-white flex items-center justify-center transition-colors cursor-pointer border-none ${
               financeScope === 'staff'
                 ? 'bg-[#8B7CFF] hover:bg-[#7C6CFF] shadow-[0_4px_20px_rgba(139,124,255,0.4)] opacity-[0.95]'
                 : 'bg-secondary hover:bg-secondary/90 shadow-xl opacity-[0.85]'

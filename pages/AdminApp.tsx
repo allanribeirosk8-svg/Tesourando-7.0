@@ -258,16 +258,11 @@ const ConfiguracoesScreen: React.FC<{
   const [isSwitching, setIsSwitching] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
 
-  const isStaff = userRole === 'staff';
-  const displayName = isStaff
-    ? (currentStaff?.name || 'Profissional')
-    : (barberProfile?.name || 'Barbearia');
-  const displayPhoto = isStaff
-    ? (currentStaff?.photo || undefined)
-    : (barberProfile?.photo || barberProfile?.avatar || undefined);
-  const displaySubtitle = isStaff
-    ? (currentStaff?.phone ? formatPhone(currentStaff.phone) : 'Barbeiro')
-    : (barberProfile?.phone ? formatPhone(barberProfile.phone) : (barberProfile?.shopName || 'Barbeiro'));
+  const displayName = currentStaff?.name || barberProfile?.name || 'Profissional';
+  const displayPhoto = currentStaff?.photo || barberProfile?.photo || barberProfile?.avatar || undefined;
+  const displaySubtitle = currentStaff?.phone
+    ? formatPhone(currentStaff.phone)
+    : (barberProfile?.phone ? formatPhone(barberProfile.phone) : (barberProfile?.shopName || ''));
 
   const userEmail = session?.user?.email || (session?.user?.user_metadata?.email as string) || '';
 
@@ -300,8 +295,11 @@ const ConfiguracoesScreen: React.FC<{
   return (
     <>
       <div className="px-4 pt-4 pb-24 relative space-y-6">
-        {/* Bloco de Perfil */}
-        <button 
+        {/* Bloco 1: Perfil (0ms) */}
+        <motion.button 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, delay: 0, ease: [0.22, 1, 0.36, 1] }}
           onClick={onOpenProfile}
           className="w-full bg-white/5 hover:bg-white/[0.07] rounded-2xl p-4 flex items-center gap-4 text-left transition-colors"
         >
@@ -323,11 +321,16 @@ const ConfiguracoesScreen: React.FC<{
             )}
           </div>
           <ChevronRight size={20} className="text-title shrink-0" />
-        </button>
+        </motion.button>
 
-        {/* Card "Meu Link de Agendamento" — versão refinada */}
+        {/* Bloco 2: Card "Meu Link de Agendamento" (50ms) */}
         {barberProfile?.slug && (
-          <div className="relative overflow-hidden bg-gradient-to-br from-[#2A2760] to-[#1E1B4B] border border-white/10 rounded-2xl p-4 space-y-4 shadow-xl">
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+            className="relative overflow-hidden bg-gradient-to-br from-[#2A2760] to-[#1E1B4B] border border-white/10 rounded-2xl p-4 space-y-4 shadow-xl"
+          >
             {/* Decoração de fundo */}
             <div className="absolute -right-8 -top-8 w-36 h-36 rounded-full bg-secondary/10 blur-2xl pointer-events-none" />
             
@@ -372,120 +375,128 @@ const ConfiguracoesScreen: React.FC<{
                 <span>Abrir</span>
               </button>
             </div>
-          </div>
+          </motion.div>
         )}
 
-        {/* Seção CONTA */}
-        <div className="space-y-4">
-          <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">CONTA</h3>
-          <div className="bg-surface rounded-2xl overflow-hidden flex flex-col">
-            <button 
-              onClick={onOpenProfile}
-              className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors border-b border-white/5"
-            >
-              <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
-                <User size={18} className="text-secondary" />
-              </div>
-              <div className="flex-1 text-left">
-                <p className="text-base font-medium text-white">Meu Perfil</p>
-                <p className="text-xs text-title mt-0.5">Nome, foto, telefone</p>
-              </div>
-              <ChevronRight size={18} className="text-title shrink-0" />
-            </button>
-            {permissions?.canManageWeeklySchedule && (
+        {/* Bloco 3: Grupo CONTA, ESTABELECIMENTO e SESSÃO (100ms) */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
+          className="space-y-6"
+        >
+          {/* Seção CONTA */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">CONTA</h3>
+            <div className="bg-surface rounded-2xl overflow-hidden flex flex-col">
               <button 
-                onClick={onOpenWeekly}
+                onClick={onOpenProfile}
                 className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors border-b border-white/5"
               >
                 <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
-                  <Calendar size={18} className="text-secondary" />
+                  <User size={18} className="text-secondary" />
                 </div>
                 <div className="flex-1 text-left">
-                  <p className="text-base font-medium text-white">Padrão Semanal</p>
-                  <p className="text-xs text-title mt-0.5">Horários e dias de trabalho</p>
+                  <p className="text-base font-medium text-white">Meu Perfil</p>
+                  <p className="text-xs text-title mt-0.5">Nome, foto, telefone</p>
                 </div>
                 <ChevronRight size={18} className="text-title shrink-0" />
               </button>
-            )}
-            
-            {permissions?.canManageStaff && (
-              <button 
-                onClick={onOpenStaff}
-                className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors"
-              >
-                <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
-                  <Users size={18} className="text-secondary" />
-                </div>
-                <div className="flex-1 text-left">
-                  <p className="text-base font-medium text-white">Gerenciar Equipe</p>
-                  <p className="text-xs text-title mt-0.5">Profissionais, comissões e disponibilidade</p>
-                </div>
-                <ChevronRight size={18} className="text-title shrink-0" />
-              </button>
-            )}
+              {permissions?.canManageWeeklySchedule && (
+                <button 
+                  onClick={onOpenWeekly}
+                  className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors border-b border-white/5"
+                >
+                  <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
+                    <Calendar size={18} className="text-secondary" />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <p className="text-base font-medium text-white">Padrão Semanal</p>
+                    <p className="text-xs text-title mt-0.5">Horários e dias de trabalho</p>
+                  </div>
+                  <ChevronRight size={18} className="text-title shrink-0" />
+                </button>
+              )}
+              
+              {permissions?.canManageStaff && (
+                <button 
+                  onClick={onOpenStaff}
+                  className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
+                    <Users size={18} className="text-secondary" />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <p className="text-base font-medium text-white">Gerenciar Equipe</p>
+                    <p className="text-xs text-title mt-0.5">Profissionais, comissões e disponibilidade</p>
+                  </div>
+                  <ChevronRight size={18} className="text-title shrink-0" />
+                </button>
+              )}
 
-            {userRole === 'staff' && (
-              <button 
-                onClick={onOpenWeekly}
-                className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors"
-              >
-                <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
-                  <Clock size={18} className="text-secondary" />
-                </div>
-                <div className="flex-1 text-left">
-                  <p className="text-base font-medium text-white">Minha Disponibilidade</p>
-                  <p className="text-xs text-title mt-0.5">Configurar meus dias e horários de trabalho</p>
-                </div>
-                <ChevronRight size={18} className="text-title shrink-0" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Seção ESTABELECIMENTO / MULTI-TENANT */}
-        {userContexts && userContexts.length > 1 && (
-          <div className="space-y-4 mt-6">
-            <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">ESTABELECIMENTO</h3>
-            <div className="bg-surface rounded-2xl overflow-hidden">
-              <button 
-                onClick={() => setShowSwitchModal(true)}
-                className="w-full flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors text-left"
-              >
-                <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center shrink-0 text-primary">
-                  <Building2 size={18} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-base font-medium text-white truncate">
-                    {barberProfile?.shopName || barberProfile?.shop_name || 'Trocar Barbearia'}
-                  </p>
-                  <p className="text-xs text-title mt-0.5">
-                    Você tem acesso a {userContexts.length} estabelecimentos
-                  </p>
-                </div>
-                <ChevronRight size={18} className="text-title shrink-0" />
-              </button>
+              {userRole === 'staff' && (
+                <button 
+                  onClick={onOpenWeekly}
+                  className="flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-full bg-secondary/10 flex items-center justify-center shrink-0">
+                    <Clock size={18} className="text-secondary" />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <p className="text-base font-medium text-white">Minha Disponibilidade</p>
+                    <p className="text-xs text-title mt-0.5">Configurar meus dias e horários de trabalho</p>
+                  </div>
+                  <ChevronRight size={18} className="text-title shrink-0" />
+                </button>
+              )}
             </div>
           </div>
-        )}
 
-        {/* Seção SESSÃO */}
-        <div className="space-y-4 mt-8">
-          <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">SESSÃO</h3>
-          <button 
-            onClick={() => setShowLogoutConfirm(true)}
-            className="w-full bg-surface rounded-2xl p-4 min-h-[60px] flex items-center gap-3 active:bg-red-500/10 transition-colors"
-          >
-            <div className="w-9 h-9 rounded-full bg-red-500/10 flex items-center justify-center shrink-0">
-              <LogOut size={18} className="text-red-500" />
+          {/* Seção ESTABELECIMENTO / MULTI-TENANT */}
+          {userContexts && userContexts.length > 1 && (
+            <div className="space-y-4 mt-6">
+              <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">ESTABELECIMENTO</h3>
+              <div className="bg-surface rounded-2xl overflow-hidden">
+                <button 
+                  onClick={() => setShowSwitchModal(true)}
+                  className="w-full flex items-center gap-3 p-4 min-h-[60px] active:bg-white/5 transition-colors text-left"
+                >
+                  <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center shrink-0 text-primary">
+                    <Building2 size={18} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-base font-medium text-white truncate">
+                      {barberProfile?.shopName || barberProfile?.shop_name || 'Trocar Barbearia'}
+                    </p>
+                    <p className="text-xs text-title mt-0.5">
+                      Você tem acesso a {userContexts.length} estabelecimentos
+                    </p>
+                  </div>
+                  <ChevronRight size={18} className="text-title shrink-0" />
+                </button>
+              </div>
             </div>
-            <p className="text-base font-medium text-red-500">Sair da conta</p>
-          </button>
-        </div>
+          )}
 
-        {/* Rodapé */}
-        <div className="pt-4 pb-8">
-          <p className="text-xs text-title/50 text-center">Meu Corte v1.0.0</p>
-        </div>
+          {/* Seção SESSÃO */}
+          <div className="space-y-4 mt-8">
+            <h3 className="text-xs font-semibold tracking-[0.08em] text-title px-4">SESSÃO</h3>
+            <button 
+              onClick={() => setShowLogoutConfirm(true)}
+              className="w-full bg-surface rounded-2xl p-4 min-h-[60px] flex items-center gap-3 active:bg-red-500/10 transition-colors"
+            >
+              <div className="w-9 h-9 rounded-full bg-red-500/10 flex items-center justify-center shrink-0">
+                <LogOut size={18} className="text-red-500" />
+              </div>
+              <p className="text-base font-medium text-red-500">Sair da conta</p>
+            </button>
+          </div>
+
+          {/* Rodapé */}
+          <div className="pt-4 pb-8">
+            <p className="text-xs text-title/50 text-center">Meu Corte v1.0.0</p>
+          </div>
+        </motion.div>
       </div>
 
       {/* Modal para Troca de Barbearia */}
@@ -925,14 +936,31 @@ export const AdminApp: React.FC = () => {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [isSetupCompleting, setIsSetupCompleting] = useState(false);
   const [showMissingTenantNotice, setShowMissingTenantNotice] = useState(false);
-  const [activeTab, setActiveTab] = useState<'agenda' | 'clientes' | 'servicos' | 'caixa' | 'configuracoes'>('agenda');
+  const [activeTab, setActiveTabState] = useState<'agenda' | 'clientes' | 'servicos' | 'caixa' | 'configuracoes'>('agenda');
+  const [tabDirection, setTabDirection] = useState<number>(0);
+  const TAB_ORDER: Record<'clientes' | 'servicos' | 'agenda' | 'caixa' | 'configuracoes', number> = {
+    clientes: 0,
+    servicos: 1,
+    agenda: 2,
+    caixa: 3,
+    configuracoes: 4,
+  };
+  const setActiveTab = useCallback((nextTab: 'agenda' | 'clientes' | 'servicos' | 'caixa' | 'configuracoes') => {
+    setActiveTabState(prev => {
+      if (prev === nextTab) return prev;
+      const prevIdx = TAB_ORDER[prev] ?? 2;
+      const nextIdx = TAB_ORDER[nextTab] ?? 2;
+      setTabDirection(nextIdx > prevIdx ? 1 : -1);
+      return nextTab;
+    });
+  }, []);
   const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
   const [showWeeklyModal, setShowWeeklyModal] = useState(false);
   const [showStaffModal, setShowStaffModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
-    const [showCalendarModal, setShowCalendarModal] = useState(false);
+  const [showCalendarModal, setShowCalendarModal] = useState(false);
   const [reschedulingApt, setReschedulingApt] = useState<Appointment | null>(null);
   const [targetCustomerPhone, setTargetCustomerPhone] = useState<string | null>(null);
   
@@ -1131,7 +1159,7 @@ export const AdminApp: React.FC = () => {
 
   const getGreeting = () => {
     const hour = new Date().getHours();
-    const name = barberProfile?.name || 'Barbeiro';
+    const name = currentStaff?.name || authContext?.profile?.name || onboardingState?.profile?.name || (barberProfile?.name && barberProfile.name !== 'Barbeiro' ? barberProfile.name : (userRole === 'admin_owner' ? 'Proprietário' : 'Profissional'));
     if (hour >= 5 && hour < 12) return `Bom dia, ${name}! ☀️`;
     if (hour >= 12 && hour < 18) return `Boa tarde, ${name}! 👋`;
     return `Boa noite, ${name}! 🌙`;
@@ -1249,16 +1277,19 @@ export const AdminApp: React.FC = () => {
       );
     }
 
-    if (activeContext?.kind === 'access_revoked') {
+    if (activeContext?.kind === 'access_revoked' || (authContext as any)?.status === 'access_revoked') {
+      const revokedReason = (activeContext?.kind === 'access_revoked' ? activeContext.reason : undefined)
+        || (authContext as any)?.inactiveReason
+        || 'Seu perfil de profissional nesta barbearia está inativo no momento. Entre em contato com a administração da barbearia para solicitar sua reativação.';
       return (
         <div className="h-[100dvh] flex flex-col items-center justify-center bg-[#1E1B4B] p-6 text-center text-white">
           <div className="max-w-md w-full bg-[#2A2456] rounded-2xl p-6 border border-white/10 shadow-xl space-y-4">
             <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
               <AlertTriangle size={24} />
             </div>
-            <h2 className="text-lg font-bold text-white">Acesso Revogado</h2>
+            <h2 className="text-lg font-bold text-white">Acesso Inativo</h2>
             <p className="text-sm text-gray-300">
-              {activeContext.reason || 'Seu acesso a esta barbearia foi revogado.'}
+              {revokedReason}
             </p>
             <div className="flex flex-col gap-2 pt-2">
               <button
@@ -1321,13 +1352,8 @@ export const AdminApp: React.FC = () => {
         <div className="flex items-center gap-3">
           {activeTab === 'agenda' ? (
             (() => {
-              const isStaffUser = userRole === 'staff';
-              const headerDisplayName = isStaffUser 
-                ? (currentStaff?.name || 'Profissional')
-                : (barberProfile.name || 'Barbeiro');
-              const headerDisplayPhoto = isStaffUser 
-                ? (currentStaff?.photo || undefined)
-                : (barberProfile.photo || undefined);
+              const headerDisplayName = currentStaff?.name || authContext?.profile?.name || onboardingState?.profile?.name || (barberProfile?.name && barberProfile.name !== 'Barbeiro' ? barberProfile.name : (userRole === 'admin_owner' ? 'Proprietário' : 'Profissional'));
+              const headerDisplayPhoto = currentStaff?.photo || authContext?.profile?.photo || onboardingState?.profile?.photo || (barberProfile?.photo || undefined);
 
               return (
                 <div className="flex items-center gap-3">
@@ -1399,52 +1425,60 @@ export const AdminApp: React.FC = () => {
       </motion.header>
 
       <main className={`relative flex-1 flex flex-col min-h-0 bg-[#1E1B4B] ${activeTab === 'agenda' ? 'overflow-hidden z-0' : activeTab === 'caixa' ? 'overflow-y-auto' : 'overflow-y-auto pb-[92px]'}`}>
-        {activeTab === 'agenda' && (
-            <AgendaView 
-                selectedDate={selectedDate}
-                setSelectedDate={setSelectedDate}
-                onOpenCustomer={handleNavigateToCustomer} 
-                showWeeklyModal={showWeeklyModal}
-                setShowWeeklyModal={setShowWeeklyModal}
-                onReschedule={setReschedulingApt}
-                onAddInSlot={openAddWithSlot}
-                handleCameraClick={handleCameraClick}
-                onSuccess={(msg) => {
-                  setSuccessMessage(msg);
-                  setTimeout(() => setSuccessMessage(null), 3000);
-                }}
-                onNavigateToCaixa={() => setActiveTab('caixa')}
+        <motion.div
+          key={activeTab}
+          initial={{ opacity: 0, y: 8, x: tabDirection * 6 }}
+          animate={{ opacity: 1, y: 0, x: 0 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className={`flex-1 flex flex-col min-h-0 w-full ${activeTab === 'agenda' ? 'overflow-hidden' : ''}`}
+        >
+          {activeTab === 'agenda' && (
+              <AgendaView 
+                  selectedDate={selectedDate}
+                  setSelectedDate={setSelectedDate}
+                  onOpenCustomer={handleNavigateToCustomer} 
+                  showWeeklyModal={showWeeklyModal}
+                  setShowWeeklyModal={setShowWeeklyModal}
+                  onReschedule={setReschedulingApt}
+                  onAddInSlot={openAddWithSlot}
+                  handleCameraClick={handleCameraClick}
+                  onSuccess={(msg) => {
+                    setSuccessMessage(msg);
+                    setTimeout(() => setSuccessMessage(null), 3000);
+                  }}
+                  onNavigateToCaixa={() => setActiveTab('caixa')}
+              />
+          )}
+          {activeTab === 'clientes' && (
+            <CustomersView 
+              initialPhone={targetCustomerPhone} 
+              clearInitial={() => setTargetCustomerPhone(null)} 
+              onNewAppointment={openAddForCustomer}
+              onAddCustomer={() => setShowAddCustomerModal(true)}
+              onSuccess={(msg) => {
+                setSuccessMessage(msg);
+                setTimeout(() => setSuccessMessage(null), 3000);
+              }}
             />
-        )}
-        {activeTab === 'clientes' && (
-          <CustomersView 
-            initialPhone={targetCustomerPhone} 
-            clearInitial={() => setTargetCustomerPhone(null)} 
-            onNewAppointment={openAddForCustomer}
-            onAddCustomer={() => setShowAddCustomerModal(true)}
-            onSuccess={(msg) => {
-              setSuccessMessage(msg);
-              setTimeout(() => setSuccessMessage(null), 3000);
-            }}
-          />
-        )}
-        {activeTab === 'caixa' && <CaixaView />}
-        {activeTab === 'configuracoes' && (
-          <ConfiguracoesScreen 
-            onOpenProfile={() => setShowProfileModal(true)} 
-            onOpenWeekly={() => setShowWeeklyModal(true)} 
-            onOpenStaff={() => setShowStaffModal(true)} 
-            onLogout={handleLogout} 
-          />
-        )}
-        {activeTab === 'servicos' && (
-          <ServicesView 
-            onSuccess={(msg) => {
-              setSuccessMessage(msg);
-              setTimeout(() => setSuccessMessage(null), 3000);
-            }}
-          />
-        )}
+          )}
+          {activeTab === 'caixa' && <CaixaView />}
+          {activeTab === 'configuracoes' && (
+            <ConfiguracoesScreen 
+              onOpenProfile={() => setShowProfileModal(true)} 
+              onOpenWeekly={() => setShowWeeklyModal(true)} 
+              onOpenStaff={() => setShowStaffModal(true)} 
+              onLogout={handleLogout} 
+            />
+          )}
+          {activeTab === 'servicos' && (
+            <ServicesView 
+              onSuccess={(msg) => {
+                setSuccessMessage(msg);
+                setTimeout(() => setSuccessMessage(null), 3000);
+              }}
+            />
+          )}
+        </motion.div>
       </main>
 
       {/* Success Toast */}
@@ -1570,12 +1604,12 @@ export const AdminApp: React.FC = () => {
                     key={item.id}
                     onClick={() => {
                       setActiveTab('agenda');
-                                          }}
-                    className="flex flex-col items-center justify-start flex-1 h-[64px] transition-all duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] active:scale-[0.92]"
+                    }}
+                    className="flex flex-col items-center justify-start flex-1 h-[64px] transition-transform duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.92]"
                     aria-label={item.ariaLabel}
                     aria-current={isActive ? 'page' : undefined}
                   >
-                    <div className="bg-secondary rounded-full flex items-center justify-center -translate-y-2.5 shadow-[0_4px_16px_rgba(249,148,23,0.45)] relative transition-all duration-[180ms]" style={{ padding: '10px 12px' }}>
+                    <div className={`bg-secondary rounded-full flex items-center justify-center -translate-y-2.5 relative transition-all duration-[200ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${isActive ? 'shadow-[0_6px_20px_rgba(249,148,23,0.6)] scale-[1.05] ring-2 ring-white/20' : 'shadow-[0_4px_16px_rgba(249,148,23,0.4)] opacity-90'}`} style={{ padding: '10px 12px' }}>
                       <item.icon size={26} className="text-white" />
                       {!isActive && pendingTodayCount > 0 && (
                         <div className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center text-[8px] font-bold border-2 border-white ">
@@ -1583,7 +1617,7 @@ export const AdminApp: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    <span className="text-white font-semibold text-[12px] -mt-1 transition-all duration-[180ms]">
+                    <span className={`font-semibold text-[12px] -mt-1 transition-colors duration-[180ms] ${isActive ? 'text-secondary' : 'text-white'}`}>
                       {item.label}
                     </span>
                   </button>
@@ -1597,15 +1631,19 @@ export const AdminApp: React.FC = () => {
                     setActiveTab(item.id as any);
                     if(item.id !== 'clientes') setTargetCustomerPhone(null);
                   }}
-                  className="flex flex-col items-center justify-center flex-1 h-full min-h-[44px] transition-all duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] active:scale-[0.88] active:opacity-75 relative"
+                  className="flex flex-col items-center justify-center flex-1 h-full min-h-[44px] transition-transform duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.88] active:opacity-75 relative"
                   aria-label={item.ariaLabel}
                   aria-current={isActive ? 'page' : undefined}
                 >
                   <div className="relative mb-0.5 flex flex-col items-center justify-center pt-1">
-                    <div className={`w-1 h-1 rounded-full bg-secondary transition-opacity duration-[180ms] ease-in-out absolute -top-1.5 ${isActive ? 'opacity-100' : 'opacity-0'}`} />
-                    <item.icon size={22} className={`transition-colors duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] ${isActive ? 'text-secondary' : 'text-white/40'}`} />
+                    <div
+                      className={`w-1.5 h-1.5 rounded-full bg-secondary transition-all duration-[200ms] ease-[cubic-bezier(0.22,1,0.36,1)] absolute -top-1.5 ${
+                        isActive ? 'opacity-100 scale-100 shadow-[0_0_8px_rgba(249,148,23,0.8)]' : 'opacity-0 scale-0'
+                      }`}
+                    />
+                    <item.icon size={22} className={`transition-all duration-[200ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${isActive ? 'text-secondary -translate-y-[1px] scale-[1.06]' : 'text-white/40 scale-100'}`} />
                   </div>
-                  <span className={`text-[12px] font-medium transition-colors duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] ${isActive ? 'text-secondary' : 'text-white/40'}`}>
+                  <span className={`text-[12px] font-medium transition-colors duration-[200ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${isActive ? 'text-secondary font-semibold' : 'text-white/40'}`}>
                     {item.label}
                   </span>
                 </button>
@@ -1668,11 +1706,38 @@ const AgendaView: React.FC<{
     onNavigateToCaixa?: () => void;
 }> = ({ selectedDate, setSelectedDate, onOpenCustomer, showWeeklyModal, setShowWeeklyModal, onReschedule, onAddInSlot, handleCameraClick, onSuccess, onNavigateToCaixa }) => {
   const { appointments, finishAppointment, revertAppointment, deleteAppointment, blockedSlots, unblockedSlots, toggleSlotAvailability, toggleSlotUnblock, weeklySchedule, markNoShow, toggleWeeklyBreak, fetchAppointmentsByDate, staff, currentStaff, selectedStaffId, setSelectedStaffId, barberProfile, activeTenant, session, userRole } = useStore();
+  const [isAgendaSwitching, setIsAgendaSwitching] = useState(false);
+  const isFirstAgendaRender = useRef(true);
   
+  // Context Switcher State (Minha agenda vs Equipe)
+  const [agendaContext, setAgendaContext] = useState<'mine' | 'team'>('mine');
+  const [teamFilter, setTeamFilter] = useState<'all' | string>('all');
+  const [showTeamFilterModal, setShowTeamFilterModal] = useState(false);
+  const isTeamMode = agendaContext === 'team';
+
   useEffect(() => {
-    fetchAppointmentsByDate(selectedDate);
+    let cancelled = false;
     setViewDate(new Date(selectedDate + 'T12:00:00'));
-  }, [selectedDate]);
+
+    if (isFirstAgendaRender.current) {
+      isFirstAgendaRender.current = false;
+      fetchAppointmentsByDate(selectedDate);
+      return;
+    }
+
+    setIsAgendaSwitching(true);
+    const minTimer = new Promise(r => setTimeout(r, 170));
+    Promise.all([
+      Promise.resolve(fetchAppointmentsByDate(selectedDate)).catch(() => {}),
+      minTimer
+    ]).finally(() => {
+      if (!cancelled) setIsAgendaSwitching(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDate, agendaContext, teamFilter]);
 
   const [activeSlotMenu, setActiveSlotMenu] = useState<string | null>(null);
   const [activeCancelMenu, setActiveCancelMenu] = useState<string | null>(null);
@@ -1684,15 +1749,9 @@ const AgendaView: React.FC<{
   const [finishingId, setFinishingId] = useState<string | null>(null);
   const [weeklyUnlockSlot, setWeeklyUnlockSlot] = useState<string | null>(null);
 
-  // Context Switcher State (Minha agenda vs Equipe)
-  const [agendaContext, setAgendaContext] = useState<'mine' | 'team'>('mine');
-  const [teamFilter, setTeamFilter] = useState<'all' | string>('all');
-  const [showTeamFilterModal, setShowTeamFilterModal] = useState(false);
-  const isTeamMode = agendaContext === 'team';
-
   const fullStaffList = useMemo(() => {
     const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
-    return [...staff].sort((a, b) => {
+    return staff.filter(s => s.status === 'active').sort((a, b) => {
       const aIsAdmin = (a.role === 'admin' || a.role === 'admin_owner' || a.userId === tenantOwnerId || a.id === tenantOwnerId) ? 1 : 0;
       const bIsAdmin = (b.role === 'admin' || b.role === 'admin_owner' || b.userId === tenantOwnerId || b.id === tenantOwnerId) ? 1 : 0;
       if (aIsAdmin !== bIsAdmin) {
@@ -1719,6 +1778,16 @@ const AgendaView: React.FC<{
       setAgendaContext('mine');
     }
   }, [userRole, agendaContext, totalTeamCount]);
+
+  useEffect(() => {
+    const viewerUserId = session?.user?.id;
+    const viewerStaff = staff.find(s => s.userId === viewerUserId || s.id === viewerUserId) || currentStaff;
+    if (agendaContext === 'mine') {
+      setSelectedStaffId(viewerStaff?.id || 'all');
+    } else {
+      setSelectedStaffId(teamFilter);
+    }
+  }, [agendaContext, teamFilter, staff, currentStaff, session?.user?.id, setSelectedStaffId]);
 
   const isAppointmentForContext = useCallback((a: Appointment) => {
     const viewerUserId = session?.user?.id;
@@ -1901,17 +1970,21 @@ const AgendaView: React.FC<{
 
   const agendaSwipeHandlers = useSwipe(handleAgendaSwipeLeft, handleAgendaSwipeRight);
 
+  const closeAllMenus = useCallback(() => {
+    setActiveSlotMenu(null);
+    setActiveCancelMenu(null);
+    setActiveNoShowMenu(null);
+    setActiveFinishMenu(null);
+    setActiveRevertMenu(null);
+    setActiveUnlockMenu(null);
+  }, []);
+
   // Outside click detection
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as HTMLElement;
-      if (!target.closest('.menu-container') && !target.closest('.slot-trigger')) {
-        setActiveSlotMenu(null);
-        setActiveCancelMenu(null);
-        setActiveNoShowMenu(null);
-        setActiveFinishMenu(null);
-        setActiveRevertMenu(null);
-        setActiveUnlockMenu(null);
+      if (!target.closest('.menu-container') && !target.closest('.slot-trigger') && !target.closest('.menu-trigger')) {
+        closeAllMenus();
       }
     };
 
@@ -1922,7 +1995,7 @@ const AgendaView: React.FC<{
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [activeSlotMenu, activeCancelMenu, activeNoShowMenu, activeFinishMenu, activeRevertMenu, activeUnlockMenu]);
+  }, [activeSlotMenu, activeCancelMenu, activeNoShowMenu, activeFinishMenu, activeRevertMenu, activeUnlockMenu, closeAllMenus]);
 
   const handleFinish = async (id: string) => {
     setFinishingId(id);
@@ -2012,7 +2085,13 @@ const AgendaView: React.FC<{
   return (
     <div className="flex-1 flex flex-col relative z-0 bg-[#363062] min-h-0">
       <div className="bg-[#1E1B4B] pt-2 pb-5 px-4 relative z-10 w-full shrink-0">
-        <div {...agendaSwipeHandlers} className="overflow-hidden">
+        <motion.div
+          {...agendaSwipeHandlers}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.18, delay: 0, ease: [0.22, 1, 0.36, 1] }}
+          className="overflow-hidden"
+        >
         {/* Integrated Calendar Header */}
         <div className="flex flex-col items-center relative">
           <div className="flex items-center justify-center w-full relative h-8">
@@ -2516,9 +2595,9 @@ const AgendaView: React.FC<{
             </motion.div>
           )}
         </AnimatePresence>
-      </div>
+        </motion.div>
 
-      {/* Summary Cards */}
+      {/* Summary Cards (50ms delay, subtle scale + fade) */}
       <div className="w-full px-4 mt-3 mb-0">
         <div 
           className="grid grid-cols-2 gap-3 items-stretch max-w-lg mx-auto"
@@ -2529,9 +2608,9 @@ const AgendaView: React.FC<{
           }}
         >
           <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0, duration: 0.35, ease: 'easeOut' }}
+            initial={{ opacity: 0, scale: 0.96, y: 6 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ delay: 0.05, duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             className="h-full flex flex-col"
           >
             <button 
@@ -2540,7 +2619,7 @@ const AgendaView: React.FC<{
                 isTeamMode 
                   ? 'bg-[#8B7CFF] shadow-[0_4px_14px_rgba(139,124,255,0.28)]' 
                   : 'bg-[#F99417] shadow-[0_4px_12px_rgba(0,0,0,0.18)]'
-              } relative overflow-hidden group text-left active:scale-[0.97] transition-all duration-300 min-h-[82px]`}
+              } relative overflow-hidden group text-left active:scale-[0.97] transition-transform duration-200 min-h-[82px]`}
             >
               {/* Decoração — círculo grande translúcido */}
               <div className="absolute -right-6 -top-6 w-32 h-32 rounded-full pointer-events-none"
@@ -2560,14 +2639,14 @@ const AgendaView: React.FC<{
           </motion.div>
 
           <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.08, duration: 0.35, ease: 'easeOut' }}
+            initial={{ opacity: 0, scale: 0.96, y: 6 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ delay: 0.05, duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             className="h-full flex flex-col"
           >
             <button 
               onClick={onNavigateToCaixa}
-              className="w-full h-full bg-white/[0.08] rounded-[14px] py-[12px] px-[14px] flex flex-col justify-between shadow-[0_4px_12px_rgba(0,0,0,0.18)] border border-white/5 relative overflow-hidden group text-left active:scale-[0.97] transition-all min-h-[82px]"
+              className="w-full h-full bg-white/[0.08] rounded-[14px] py-[12px] px-[14px] flex flex-col justify-between shadow-[0_4px_12px_rgba(0,0,0,0.18)] border border-white/5 relative overflow-hidden group text-left active:scale-[0.97] transition-transform duration-200 min-h-[82px]"
             >
               <span className="text-[10px] font-semibold text-white/70 uppercase tracking-[1.4px] leading-none mb-1.5 relative z-10">{stats.weekLabel}</span>
               <div className="flex flex-col relative z-10">
@@ -2581,16 +2660,22 @@ const AgendaView: React.FC<{
       </div>
       </div>
 
-      <div 
+      <motion.div 
         ref={scrollRef}
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: -parallaxOffset }}
+        transition={{
+          opacity: { delay: 0.09, duration: 0.24, ease: [0.22, 1, 0.36, 1] },
+          y: parallaxOffset > 0
+            ? { duration: 0.15, ease: 'easeOut' }
+            : { delay: 0.09, duration: 0.24, ease: [0.22, 1, 0.36, 1] }
+        }}
         style={{
-          transform: `translateY(-${parallaxOffset}px)`,
           marginBottom: `-${parallaxOffset}px`,
-          transition: 'transform 0.15s ease-out, margin-bottom 0.15s ease-out'
         }}
         className="flex-1 bg-[#F5F5F8] rounded-t-[28px] mt-0 pt-0 px-4 shadow-[0_-4px_16px_rgba(0,0,0,0.1)] pb-28 relative z-10 min-h-0 overflow-y-auto"
       >
-        <div className="space-y-4 animate-in fade-in slide-in-from-top-4 duration-500">
+        <div className="space-y-4">
         <div className={`sticky top-0 z-20 bg-[#F5F5F8] pt-5 pb-2 -mx-4 px-4 flex items-center relative justify-between gap-2`}>
           {activeFilter !== 'concluidos' && (
             <SectionHeader 
@@ -2655,7 +2740,23 @@ const AgendaView: React.FC<{
           </div>
         )}
 
-        {(!dayConfig?.isOpen && currentDayAppointments.length === 0) ? (
+        {isAgendaSwitching ? (
+          <div className="grid grid-cols-1 gap-3 pt-1">
+            {[0, 1, 2, 3].map((idx) => (
+              <div
+                key={`agenda-skeleton-${idx}`}
+                className="bg-white rounded-2xl p-3.5 border border-slate-200/70 shadow-sm flex items-center gap-3 min-h-[60px]"
+              >
+                <div className="w-14 h-7 rounded-xl bg-slate-200/70 animate-pulse shrink-0" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-3.5 w-36 rounded-md bg-slate-200/70 animate-pulse" />
+                  <div className="h-2.5 w-24 rounded-md bg-slate-200/60 animate-pulse" />
+                </div>
+                <div className="w-8 h-8 rounded-full bg-slate-200/70 animate-pulse shrink-0" />
+              </div>
+            ))}
+          </div>
+        ) : (!dayConfig?.isOpen && currentDayAppointments.length === 0) ? (
             <div className="bg-surface  p-12 rounded-[2rem] border-2 border-dashed border-title/30  text-center space-y-3 ">
                 <div className="w-12 h-12 bg-primary/40  rounded-full flex items-center justify-center mx-auto text-title">
                     <Lock size={24} />
@@ -2722,57 +2823,60 @@ const AgendaView: React.FC<{
                          return (
                             <div key={slot} className="relative">
                                 <div 
-                                    onClick={() => {
+                                    onClick={(e) => {
+                                        e.stopPropagation();
                                         if (isManualBlocked) {
-                                            setActiveUnlockMenu(isUnlockOpen ? null : slot);
+                                            const next = isUnlockOpen ? null : slot;
+                                            closeAllMenus();
+                                            setActiveUnlockMenu(next);
                                         } else {
                                             setWeeklyUnlockSlot(slot);
                                         }
                                     }}
-                                    className="bg-red-50/20  border border-red-100/50  p-3 rounded-2xl flex items-center justify-between opacity-70  cursor-pointer min-h-[44px]"
+                                    className="bg-red-50/20 border border-red-100/50 p-3 rounded-2xl flex items-center justify-between opacity-70 cursor-pointer min-h-[44px]"
                                 >
-                                    <div className="text-lg font-black text-title  w-14">{slot}</div>
+                                    <div className="text-lg font-black text-title w-14">{slot}</div>
                                     <div className="flex flex-col items-end flex-1 pr-4">
-                                        <div className="flex items-center gap-1.5 text-red-400 ">
+                                        <div className="flex items-center gap-1.5 text-red-400">
                                             {!isManualBlocked && isWeeklyBreak && <Repeat size={12} className="animate-pulse" />}
                                             <span className="text-[9px] font-black uppercase tracking-widest">
                                                 {!isManualBlocked && isWeeklyBreak ? 'BLOQUEADO PELO PADRÃO SEMANAL' : 'BLOQUEADO'}
                                             </span>
                                         </div>
                                         {!isManualBlocked && isWeeklyBreak && (
-                                            <span className="text-[8px] text-title  font-bold uppercase tracking-tighter">Regra Recorrente</span>
+                                            <span className="text-[8px] text-title font-bold uppercase tracking-tighter">Regra Recorrente</span>
                                         )}
                                     </div>
-                                    <div className="w-10 h-10 flex items-center justify-center text-red-200 ">
+                                    <div className="w-10 h-10 flex items-center justify-center text-red-200">
                                         <Lock size={20} />
                                     </div>
                                 </div>
-                                <AnimatePresence>
-                                    {isUnlockOpen && (
-                                        <motion.div 
-                                            initial={{ opacity: 0, scale: 0.95 }}
-                                            animate={{ opacity: 1, scale: 1 }}
-                                            exit={{ opacity: 0, scale: 0.95 }}
-                                            className="menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 z-10 px-3"
+                                <div 
+                                    aria-hidden={!isUnlockOpen}
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{ backgroundColor: '#2D2856' }}
+                                    className={`menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 px-3 shadow-lg transition-opacity duration-150 ease-out ${
+                                        isUnlockOpen ? 'opacity-100 pointer-events-auto z-20' : 'opacity-0 pointer-events-none -z-10'
+                                    }`}
+                                >
+                                    <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Deseja desbloquear?</p>
+                                    <div className="flex gap-2">
+                                        <button 
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); toggleSlotAvailability(selectedDate, slot); setActiveUnlockMenu(null); onSuccess?.('Horário liberado para hoje!'); }}
+                                            className="h-8 px-4 bg-green-500 hover:bg-green-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
                                         >
-                                            <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Deseja desbloquear?</p>
-                                            <div className="flex gap-2">
-                                                <button 
-                                                    onClick={() => { toggleSlotAvailability(selectedDate, slot); setActiveUnlockMenu(null); onSuccess?.('Horário liberado para hoje!'); }}
-                                                    className="h-8 px-4 bg-green-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
-                                                >
-                                                    Sim
-                                                </button>
-                                                <button 
-                                                    onClick={() => setActiveUnlockMenu(null)}
-                                                    className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                                >
-                                                    Não
-                                                </button>
-                                            </div>
-                                        </motion.div>
-                                    )}
-                                </AnimatePresence>
+                                            Sim
+                                        </button>
+                                        <button 
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); setActiveUnlockMenu(null); }}
+                                            className="h-8 px-4 bg-primary hover:bg-primary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                                        >
+                                            Não
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                          );
                     }
@@ -2781,7 +2885,12 @@ const AgendaView: React.FC<{
                         return (
                             <div key={slot} className={`relative mb-2 h-[56px] rounded-xl overflow-hidden shadow-[0_2px_6px_rgba(30,27,75,0.06)] flex flex-row items-stretch ${past ? 'opacity-40 grayscale pointer-events-none' : 'cursor-pointer group'}`}>
                                 <div 
-                                    onClick={() => setActiveSlotMenu(isQuickActionOpen ? null : slot)} 
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        const next = isQuickActionOpen ? null : slot;
+                                        closeAllMenus();
+                                        setActiveSlotMenu(next);
+                                    }} 
                                     className="slot-trigger flex-1 flex flex-row items-center px-4 bg-white hover:bg-gray-50 transition-colors outline-none focus:outline-none active:outline-none"
                                 >
                                     <div className="text-[16px] font-bold text-[#1E1B4B] w-14 shrink-0">{slot}</div>
@@ -2793,50 +2902,47 @@ const AgendaView: React.FC<{
                                     </div>
                                 </div>
                                 
-                                <AnimatePresence>
-                                    {isQuickActionOpen && (
-                                        <motion.div 
-                                            initial={{ x: 10, opacity: 0 }}
-                                            animate={{ x: 0, opacity: 1 }}
-                                            exit={{ x: 10, opacity: 0 }}
-                                            className="menu-container absolute top-0 bottom-0 right-0 left-[calc(3.5rem+1rem)] bg-surface/90 backdrop-blur-md shadow-lg rounded-r-2xl flex items-stretch z-50 overflow-hidden border-y-2 border-r-2 border-title/30"
-                                        >
-                                            <button 
-                                                onClick={(e) => { e.stopPropagation(); toggleSlotAvailability(selectedDate, slot); setActiveSlotMenu(null); }}
-                                                className="flex-[0.75] flex flex-col items-center justify-center gap-1 bg-[#E53935] hover:bg-[#D32F2F] text-white transition-colors"
-                                            >
-                                                <Ban size={16} />
-                                                <span className="text-[10px] font-bold uppercase">Bloquear</span>
-                                            </button>
-                                            <button 
-                                                onClick={(e) => { e.stopPropagation(); onAddInSlot(selectedDate, slot); setActiveSlotMenu(null); }}
-                                                className="flex-[1.25] flex flex-col items-center justify-center gap-1 bg-[#F5A623] hover:bg-[#E89B20] text-white transition-colors"
-                                            >
-                                                <Calendar size={16} />
-                                                <span className="text-[10px] font-bold uppercase">Agendar</span>
-                                            </button>
-                                            <button 
-                                                onClick={(e) => { e.stopPropagation(); setActiveSlotMenu(null); }}
-                                                className="w-10 flex items-center justify-center text-white bg-[#1E1B4B] hover:bg-[#2A265E] transition-colors"
-                                            >
-                                                <X size={20} />
-                                            </button>
-                                        </motion.div>
-                                    )}
-                                </AnimatePresence>
+                                <div 
+                                    aria-hidden={!isQuickActionOpen}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`menu-container absolute top-0 bottom-0 right-0 left-[calc(3.5rem+1rem)] bg-surface/90 backdrop-blur-md shadow-lg rounded-r-2xl flex items-stretch overflow-hidden border-y-2 border-r-2 border-title/30 transition-opacity duration-150 ease-out ${
+                                        isQuickActionOpen ? 'opacity-100 pointer-events-auto z-50' : 'opacity-0 pointer-events-none -z-10'
+                                    }`}
+                                >
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); toggleSlotAvailability(selectedDate, slot); setActiveSlotMenu(null); }}
+                                        className="flex-[0.75] flex flex-col items-center justify-center gap-1 bg-[#E53935] hover:bg-[#D32F2F] text-white transition-colors"
+                                    >
+                                        <Ban size={16} />
+                                        <span className="text-[10px] font-bold uppercase">Bloquear</span>
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); onAddInSlot(selectedDate, slot); setActiveSlotMenu(null); }}
+                                        className="flex-[1.25] flex flex-col items-center justify-center gap-1 bg-[#F5A623] hover:bg-[#E89B20] text-white transition-colors"
+                                    >
+                                        <Calendar size={16} />
+                                        <span className="text-[10px] font-bold uppercase">Agendar</span>
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setActiveSlotMenu(null); }}
+                                        className="w-10 flex items-center justify-center text-white bg-[#1E1B4B] hover:bg-[#2A265E] transition-colors"
+                                    >
+                                        <X size={20} />
+                                    </button>
+                                </div>
                             </div>
                         );
                     }
 
                     return (
-                        <motion.div 
+                        <div 
                             key={apt.id} 
-                            layout
-                            initial={false}
-                            animate={isFinishing ? { scale: [1, 1.05, 1] } : { scale: 1 }}
-                            transition={{ duration: 0.4 }}
-                            className={`relative rounded-2xl shadow-[0_3px_12px_rgba(0,0,0,0.35)] min-h-[44px] overflow-hidden transition-all duration-500 flex
-                                ${isActuallyCompleted ? 'bg-green-500/10 border-l-4 border-l-green-500 opacity-75' : isNoShow ? 'bg-amber-500/10 border-l-4 border-l-amber-400 opacity-65' : isFinishing ? 'bg-green-500/10 border-l-4 border-l-green-400' : 'bg-surface border-l-4 border-l-secondary'}`}
+                            style={{ backgroundColor: '#2D2856' }}
+                            className={`relative rounded-2xl shadow-[0_3px_12px_rgba(0,0,0,0.35)] min-h-[44px] overflow-hidden flex bg-surface
+                                ${isActuallyCompleted ? 'border-l-4 border-l-green-500 opacity-75' : isNoShow ? 'border-l-4 border-l-amber-400 opacity-65' : 'border-l-4 border-l-secondary'}`}
                         >
                             <div className="flex-1 min-w-0">
                                 {/* Header do Card */}
@@ -2894,8 +3000,9 @@ const AgendaView: React.FC<{
                                 <div className="flex items-center gap-4">
                                     <div className="flex flex-col items-center gap-1 w-[40px] h-[47px]">
                                         <button 
+                                            type="button"
                                             disabled={isNoShow}
-                                            onClick={() => handleCameraClick(apt.phone)}
+                                            onClick={(e) => { e.stopPropagation(); handleCameraClick(apt.phone); }}
                                             className={`w-10 h-10 flex items-center justify-center transition-colors rounded-xl ${isNoShow ? 'text-muted opacity-30 cursor-not-allowed' : 'text-violet-400 hover:bg-violet-400/15'}`}
                                         >
                                             <Camera size={18} />
@@ -2905,7 +3012,8 @@ const AgendaView: React.FC<{
 
                                     <div className="flex flex-col items-center gap-1 w-[40px] h-[47px]">
                                         <button 
-                                            onClick={() => onOpenCustomer(apt.phone)}
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); onOpenCustomer(apt.phone); }}
                                             className="w-10 h-10 flex items-center justify-center rounded-xl transition-colors text-sky-400 hover:bg-sky-400/15"
                                         >
                                             <User size={18} />
@@ -2915,8 +3023,9 @@ const AgendaView: React.FC<{
 
                                     <div className="flex flex-col items-center gap-1 w-[40px] h-[47px]">
                                         <button 
+                                            type="button"
                                             disabled={isActuallyCompleted || isNoShow}
-                                            onClick={() => onReschedule(apt)}
+                                            onClick={(e) => { e.stopPropagation(); onReschedule(apt); }}
                                             className={`w-10 h-10 flex items-center justify-center transition-colors rounded-xl ${isActuallyCompleted || isNoShow ? 'text-muted opacity-30 cursor-not-allowed' : 'text-emerald-400 hover:bg-emerald-400/15'}`}
                                         >
                                             <Edit3 size={18} />
@@ -2926,9 +3035,15 @@ const AgendaView: React.FC<{
 
                                     <div className="flex flex-col items-center gap-1 w-[40px] h-[47px]">
                                         <button 
+                                            type="button"
                                             disabled={isActuallyCompleted || isNoShow}
-                                            onClick={() => setActiveNoShowMenu(apt.id)}
-                                            className={`w-10 h-10 flex items-center justify-center transition-colors rounded-xl ${isActuallyCompleted || isNoShow ? 'text-muted opacity-30 cursor-not-allowed' : 'text-red-400 hover:bg-red-400/15'}`}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                const next = isNoShowOpen ? null : apt.id;
+                                                closeAllMenus();
+                                                setActiveNoShowMenu(next);
+                                            }}
+                                            className={`menu-trigger w-10 h-10 flex items-center justify-center transition-colors rounded-xl ${isActuallyCompleted || isNoShow ? 'text-muted opacity-30 cursor-not-allowed' : 'text-red-400 hover:bg-red-400/15'}`}
                                         >
                                             <ThumbsDown size={18} />
                                         </button>
@@ -2941,17 +3056,35 @@ const AgendaView: React.FC<{
                         {/* Botões de Ação Laterais */}
                             <div className="w-14 flex flex-col items-center justify-center gap-4 border-l border-white/5 bg-white/5 shrink-0">
                                 <button 
+                                    type="button"
                                     disabled={isActuallyCompleted || isNoShow}
-                                    onClick={() => setActiveCancelMenu(apt.id)}
-                                    className={`w-8 h-8 rounded-full flex items-center justify-center transition-all shrink-0 ${isActuallyCompleted || isNoShow ? 'text-muted opacity-20 cursor-not-allowed' : 'text-red-400 hover:bg-red-400/15 transition-all'}`}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        const next = isCancelOpen ? null : apt.id;
+                                        closeAllMenus();
+                                        setActiveCancelMenu(next);
+                                    }}
+                                    className={`menu-trigger w-8 h-8 rounded-full flex items-center justify-center transition-colors shrink-0 ${isActuallyCompleted || isNoShow ? 'text-muted opacity-20 cursor-not-allowed' : 'text-red-400 hover:bg-red-400/15'}`}
                                     title="Cancelar"
                                 >
                                     <Trash2 size={16} />
                                 </button>
                                 <button 
+                                    type="button"
                                     disabled={isFinishing}
-                                    onClick={() => (isActuallyCompleted || isNoShow) ? setActiveRevertMenu(apt.id) : setActiveFinishMenu(apt.id)}
-                                    className={`w-8 h-8 rounded-full flex items-center justify-center transition-all shrink-0 ${isActuallyCompleted ? 'bg-green-400/15 text-green-300 border border-green-400/25 hover:bg-green-400/25' : isNoShow ? 'bg-amber-400/15 text-amber-300 border border-amber-400/25 hover:bg-amber-400/25' : 'bg-secondary text-white shadow-md shadow-secondary/30 active:scale-90'}`}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (isActuallyCompleted || isNoShow) {
+                                            const next = isRevertOpen ? null : apt.id;
+                                            closeAllMenus();
+                                            setActiveRevertMenu(next);
+                                        } else {
+                                            const next = isFinishOpen ? null : apt.id;
+                                            closeAllMenus();
+                                            setActiveFinishMenu(next);
+                                        }
+                                    }}
+                                    className={`menu-trigger w-8 h-8 rounded-full flex items-center justify-center transition-colors shrink-0 ${isActuallyCompleted ? 'bg-green-400/15 text-green-300 border border-green-400/25 hover:bg-green-400/25' : isNoShow ? 'bg-amber-400/15 text-amber-300 border border-amber-400/25 hover:bg-amber-400/25' : 'bg-secondary text-white shadow-md shadow-secondary/30'}`}
                                     title={(isActuallyCompleted || isNoShow) ? "Retornar atendimento" : "Confirmar"}
                                 >
                                     {(isActuallyCompleted || isNoShow) ? <RotateCcw size={16} /> : <Check size={16} />}
@@ -2959,129 +3092,148 @@ const AgendaView: React.FC<{
                             </div>
 
                             {/* Menu de Cancelamento */}
-                            <AnimatePresence>
-                                {isCancelOpen && (
-                                    <motion.div 
-                                        initial={{ opacity: 0, scale: 0.95 }}
-                                        animate={{ opacity: 1, scale: 1 }}
-                                        exit={{ opacity: 0, scale: 0.95 }}
-                                        className="menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 z-10 px-3"
+                            <div 
+                                aria-hidden={!isCancelOpen}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ backgroundColor: '#2D2856' }}
+                                className={`menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 px-3 shadow-lg transition-opacity duration-150 ease-out ${
+                                    isCancelOpen ? 'opacity-100 pointer-events-auto z-20' : 'opacity-0 pointer-events-none -z-10'
+                                }`}
+                            >
+                                <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Deseja cancelar?</p>
+                                <div className="flex gap-2">
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { 
+                                            e.stopPropagation();
+                                            setActiveCancelMenu(null); 
+                                            deleteAppointment(apt.id); 
+                                            onSuccess?.('Agendamento excluído com sucesso!');
+                                        }}
+                                        className="h-8 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
                                     >
-                                        <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Deseja cancelar?</p>
-                                        <div className="flex gap-2">
-                                            <button 
-                                                onClick={() => { 
-                                                    deleteAppointment(apt.id); 
-                                                    setActiveCancelMenu(null); 
-                                                    onSuccess?.('Agendamento excluído com sucesso!');
-                                                }}
-                                                className="h-8 px-4 bg-red-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
-                                            >
-                                                Sim
-                                            </button>
-                                            <button 
-                                                onClick={() => setActiveCancelMenu(null)}
-                                                className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                            >
-                                                Não
-                                            </button>
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
+                                        Sim
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setActiveCancelMenu(null);
+                                        }}
+                                        className="h-8 px-4 bg-primary hover:bg-primary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                                    >
+                                        Não
+                                    </button>
+                                </div>
+                            </div>
 
                             {/* Menu de Não Compareceu */}
-                            <AnimatePresence>
-                                {isNoShowOpen && (
-                                    <motion.div 
-                                        initial={{ opacity: 0, scale: 0.95 }}
-                                        animate={{ opacity: 1, scale: 1 }}
-                                        exit={{ opacity: 0, scale: 0.95 }}
-                                        className="menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 z-10 px-3"
+                            <div 
+                                aria-hidden={!isNoShowOpen}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ backgroundColor: '#2D2856' }}
+                                className={`menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 px-3 shadow-lg transition-opacity duration-150 ease-out ${
+                                    isNoShowOpen ? 'opacity-100 pointer-events-auto z-20' : 'opacity-0 pointer-events-none -z-10'
+                                }`}
+                            >
+                                <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Confirmar falta?</p>
+                                <div className="flex gap-2">
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { 
+                                            e.stopPropagation();
+                                            setActiveNoShowMenu(null); 
+                                            markNoShow(apt.id); 
+                                            onSuccess?.('Falta registrada com sucesso!');
+                                        }}
+                                        className="h-8 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
                                     >
-                                        <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Confirmar falta?</p>
-                                        <div className="flex gap-2">
-                                            <button 
-                                                onClick={() => { 
-                                                    markNoShow(apt.id); 
-                                                    setActiveNoShowMenu(null); 
-                                                    onSuccess?.('Falta registrada com sucesso!');
-                                                }}
-                                                className="h-8 px-4 bg-amber-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
-                                            >
-                                                Sim
-                                            </button>
-                                            <button 
-                                                onClick={() => setActiveNoShowMenu(null)}
-                                                className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                            >
-                                                Não
-                                            </button>
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
+                                        Sim
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setActiveNoShowMenu(null);
+                                        }}
+                                        className="h-8 px-4 bg-primary hover:bg-primary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                                    >
+                                        Não
+                                    </button>
+                                </div>
+                            </div>
 
                             {/* Menu de Conclusão */}
-                            <AnimatePresence>
-                                {isFinishOpen && (
-                                    <motion.div 
-                                        initial={{ opacity: 0, scale: 0.95 }}
-                                        animate={{ opacity: 1, scale: 1 }}
-                                        exit={{ opacity: 0, scale: 0.95 }}
-                                        className="menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 z-10 px-3"
+                            <div 
+                                aria-hidden={!isFinishOpen}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ backgroundColor: '#2D2856' }}
+                                className={`menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 px-3 shadow-lg transition-opacity duration-150 ease-out ${
+                                    isFinishOpen ? 'opacity-100 pointer-events-auto z-20' : 'opacity-0 pointer-events-none -z-10'
+                                }`}
+                            >
+                                <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Finalizar atendimento?</p>
+                                <div className="flex gap-2">
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { 
+                                            e.stopPropagation();
+                                            setActiveFinishMenu(null); 
+                                            handleFinish(apt.id); 
+                                        }}
+                                        className="h-8 px-4 bg-green-600 hover:bg-green-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
                                     >
-                                        <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Finalizar atendimento?</p>
-                                        <div className="flex gap-2">
-                                            <button 
-                                                onClick={() => { handleFinish(apt.id); setActiveFinishMenu(null); }}
-                                                className="h-8 px-4 bg-green-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
-                                            >
-                                                Sim
-                                            </button>
-                                            <button 
-                                                onClick={() => setActiveFinishMenu(null)}
-                                                className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                            >
-                                                Não
-                                            </button>
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
+                                        Sim
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setActiveFinishMenu(null);
+                                        }}
+                                        className="h-8 px-4 bg-primary hover:bg-primary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                                    >
+                                        Não
+                                    </button>
+                                </div>
+                            </div>
 
                             {/* Menu de Retorno */}
-                            <AnimatePresence>
-                                {isRevertOpen && (
-                                    <motion.div 
-                                        initial={{ opacity: 0, scale: 0.95 }}
-                                        animate={{ opacity: 1, scale: 1 }}
-                                        exit={{ opacity: 0, scale: 0.95 }}
-                                        className="menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 z-10 px-3"
+                            <div 
+                                aria-hidden={!isRevertOpen}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ backgroundColor: '#2D2856' }}
+                                className={`menu-container absolute inset-0 bg-surface rounded-2xl flex items-center justify-center gap-3 px-3 shadow-lg transition-opacity duration-150 ease-out ${
+                                    isRevertOpen ? 'opacity-100 pointer-events-auto z-20' : 'opacity-0 pointer-events-none -z-10'
+                                }`}
+                            >
+                                <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Retornar atendimento?</p>
+                                <div className="flex gap-2">
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => { 
+                                            e.stopPropagation();
+                                            setActiveRevertMenu(null); 
+                                            revertAppointment(apt.id); 
+                                            onSuccess?.('Atendimento retornado com sucesso!');
+                                        }}
+                                        className="h-8 px-4 bg-secondary hover:bg-secondary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
                                     >
-                                        <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Retornar atendimento?</p>
-                                        <div className="flex gap-2">
-                                            <button 
-                                                onClick={() => { 
-                                                    revertAppointment(apt.id); 
-                                                    setActiveRevertMenu(null); 
-                                                    onSuccess?.('Atendimento retornado com sucesso!');
-                                                }}
-                                                className="h-8 px-4 bg-secondary text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
-                                            >
-                                                Sim
-                                            </button>
-                                            <button 
-                                                onClick={() => setActiveRevertMenu(null)}
-                                                className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                            >
-                                                Não
-                                            </button>
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
-                        </motion.div>
+                                        Sim
+                                    </button>
+                                    <button 
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setActiveRevertMenu(null);
+                                        }}
+                                        className="h-8 px-4 bg-primary hover:bg-primary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                                    >
+                                        Não
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     );
                 })}
             </div>
@@ -3117,7 +3269,7 @@ const AgendaView: React.FC<{
                         return (
                             <div 
                                 key={apt.id}
-                                className={`rounded-[12px] shadow-[0_2px_6px_rgba(0,0,0,0.06)] overflow-hidden transition-all duration-300 border-l-[4px] ${
+                                className={`rounded-[12px] shadow-[0_2px_6px_rgba(0,0,0,0.06)] overflow-hidden transition-colors duration-300 border-l-[4px] ${
                                     isNoShow
                                         ? 'bg-[#F5A623]/[0.06] border-[#F5A623]'
                                         : 'bg-[#48C78E]/[0.06] border-[#48C78E]'
@@ -3166,6 +3318,7 @@ const AgendaView: React.FC<{
                                                 <div className="flex items-center justify-between bg-transparent py-2 w-full">
                                                     <div className="flex gap-3">
                                                         <button 
+                                                            type="button"
                                                             disabled={isNoShow}
                                                             onClick={(e) => { e.stopPropagation(); handleCameraClick(apt.phone); }}
                                                             className={`w-10 h-10 flex items-center justify-center transition-colors rounded-full ${isNoShow ? 'bg-[#1E1B4B]/[0.04] text-[#1E1B4B]/20 grayscale' : 'bg-[#1E1B4B]/[0.08] text-[#1E1B4B]/50 hover:bg-[#1E1B4B]/[0.12]'}`}
@@ -3175,6 +3328,7 @@ const AgendaView: React.FC<{
                                                         </button>
 
                                                         <button 
+                                                            type="button"
                                                             onClick={(e) => { e.stopPropagation(); onOpenCustomer(apt.phone); }}
                                                             className="w-10 h-10 flex items-center justify-center rounded-full transition-colors bg-[#1E1B4B]/[0.08] text-[#1E1B4B]/50 hover:bg-[#1E1B4B]/[0.12]"
                                                             title="Cliente"
@@ -3185,8 +3339,14 @@ const AgendaView: React.FC<{
 
                                                     <div className="flex-1 flex justify-end">
                                                         <button 
-                                                            onClick={(e) => { e.stopPropagation(); setActiveRevertMenu(apt.id); }}
-                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors bg-[#1E1B4B] text-[#FFFFFF] hover:bg-[#1E1B4B]/90"
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                const next = isRevertOpen ? null : apt.id;
+                                                                closeAllMenus();
+                                                                setActiveRevertMenu(next);
+                                                            }}
+                                                            className="menu-trigger flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors bg-[#1E1B4B] text-[#FFFFFF] hover:bg-[#1E1B4B]/90 cursor-pointer"
                                                         >
                                                             <RotateCcw size={14} />
                                                             <span>Retornar</span>
@@ -3195,36 +3355,40 @@ const AgendaView: React.FC<{
                                                 </div>
 
                                                 {/* Revert Menu Overlay */}
-                                                <AnimatePresence>
-                                                    {isRevertOpen && (
-                                                        <motion.div 
-                                                            initial={{ opacity: 0 }}
-                                                            animate={{ opacity: 1 }}
-                                                            exit={{ opacity: 0 }}
-                                                            className="absolute inset-0 bg-surface flex items-center justify-center gap-3 z-20 px-4"
+                                                <div 
+                                                    aria-hidden={!isRevertOpen}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    style={{ backgroundColor: '#2D2856' }}
+                                                    className={`menu-container absolute inset-0 bg-surface flex items-center justify-center gap-3 px-4 shadow-lg transition-opacity duration-150 ease-out ${
+                                                        isRevertOpen ? 'opacity-100 pointer-events-auto z-20' : 'opacity-0 pointer-events-none -z-10'
+                                                    }`}
+                                                >
+                                                    <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Retornar atendimento?</p>
+                                                    <div className="flex gap-2">
+                                                        <button 
+                                                            type="button"
+                                                            onClick={(e) => { 
+                                                                e.stopPropagation();
+                                                                setActiveRevertMenu(null); 
+                                                                revertAppointment(apt.id); 
+                                                                onSuccess?.('Atendimento retornado com sucesso!');
+                                                            }}
+                                                            className="h-8 px-4 bg-secondary hover:bg-secondary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
                                                         >
-                                                            <p className="text-white text-[9px] font-black uppercase tracking-widest flex-1">Retornar atendimento?</p>
-                                                            <div className="flex gap-2">
-                                                                <button 
-                                                                    onClick={() => { 
-                                                                        revertAppointment(apt.id); 
-                                                                        setActiveRevertMenu(null); 
-                                                                        onSuccess?.('Atendimento retornado com sucesso!');
-                                                                    }}
-                                                                    className="h-8 px-4 bg-secondary text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg"
-                                                                >
-                                                                    Sim
-                                                                </button>
-                                                                <button 
-                                                                    onClick={() => setActiveRevertMenu(null)}
-                                                                    className="h-8 px-4 bg-primary text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                                                >
-                                                                    Não
-                                                                </button>
-                                                            </div>
-                                                        </motion.div>
-                                                    )}
-                                                </AnimatePresence>
+                                                            Sim
+                                                        </button>
+                                                        <button 
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setActiveRevertMenu(null);
+                                                            }}
+                                                            className="h-8 px-4 bg-primary hover:bg-primary/80 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                                                        >
+                                                            Não
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </motion.div>
                                     )}
@@ -3236,7 +3400,7 @@ const AgendaView: React.FC<{
             </div>
         )}
       </div>
-      </div>
+      </motion.div>
 
       {/* Decision Modal for Weekly Unlock */}
       <AnimatePresence>
@@ -3669,17 +3833,18 @@ const AddAppointmentModal: React.FC<{
   };
 
   const isAdmin = userRole === 'admin_owner' || userRole === 'admin';
-  const myStaff = useMemo(() => staff.find(s => s.userId === session?.user?.id || s.id === session?.user?.id) || currentStaff, [staff, session?.user?.id, currentStaff]);
+  const activeStaffMembers = useMemo(() => staff.filter(s => s.status === 'active'), [staff]);
+  const myStaff = useMemo(() => activeStaffMembers.find(s => s.userId === session?.user?.id || s.id === session?.user?.id) || (currentStaff?.status === 'active' ? currentStaff : null), [activeStaffMembers, session?.user?.id, currentStaff]);
   const initialStaffId = useMemo(() => {
     if (!isAdmin) {
-      return currentStaff?.id || myStaff?.id || '';
+      return (currentStaff?.status === 'active' ? currentStaff.id : '') || myStaff?.id || '';
     }
     if (selectedStaffId && selectedStaffId !== 'all') {
-      const selectedMember = staff.find(s => s.id === selectedStaffId || s.userId === selectedStaffId);
+      const selectedMember = activeStaffMembers.find(s => s.id === selectedStaffId || s.userId === selectedStaffId);
       if (selectedMember) return selectedMember.id;
     }
-    return currentStaff?.id || myStaff?.id || staff[0]?.id || '';
-  }, [isAdmin, currentStaff?.id, myStaff?.id, selectedStaffId, staff]);
+    return (currentStaff?.status === 'active' ? currentStaff.id : '') || myStaff?.id || activeStaffMembers[0]?.id || '';
+  }, [isAdmin, currentStaff, myStaff, selectedStaffId, activeStaffMembers]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -3917,8 +4082,8 @@ const AddAppointmentModal: React.FC<{
       }
 
       const effectiveStaffId = isAdmin 
-        ? (data.staffId || currentStaff?.id || myStaff?.id || staff[0]?.id) 
-        : (currentStaff?.id || myStaff?.id);
+        ? (data.staffId || (currentStaff?.status === 'active' ? currentStaff.id : '') || (myStaff?.status === 'active' ? myStaff.id : '') || activeStaffMembers[0]?.id) 
+        : ((currentStaff?.status === 'active' ? currentStaff.id : '') || (myStaff?.status === 'active' ? myStaff.id : ''));
 
       if (!effectiveStaffId) {
         throw new Error("Profissional não identificado.");
@@ -4400,7 +4565,7 @@ const AddAppointmentModal: React.FC<{
                 )}
               </div>
             )}
-            {isAdmin && staff.length > 1 && (
+            {isAdmin && activeStaffMembers.length > 1 && (
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-title uppercase tracking-widest ml-1 flex items-center gap-1">
                   Profissional
@@ -4412,7 +4577,7 @@ const AddAppointmentModal: React.FC<{
                     onChange={e => setFormData({ ...formData, staffId: e.target.value })}
                     className="w-full px-4 py-3 rounded-2xl bg-primary/40 border-none text-white text-sm focus:outline-none focus:ring-1 focus:ring-[#F99417]"
                   >
-                    {staff.map((s: any) => (
+                    {activeStaffMembers.map((s: any) => (
                       <option key={s.id} value={s.id} className="bg-[#1E1B4B] text-white">{s.name}</option>
                     ))}
                   </select>
@@ -4957,7 +5122,12 @@ const ServicesView: React.FC<{ onSuccess?: (msg: string) => void }> = ({ onSucce
   return (
     <div className="min-h-full bg-transparent px-4 pt-5 pb-28 space-y-6">
       {permissions?.canManageServices && (
-        <div className="bg-surface p-4 rounded-3xl space-y-3">
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.2, delay: 0, ease: [0.22, 1, 0.36, 1] }}
+          className="bg-surface p-4 rounded-3xl space-y-3"
+        >
           <h2 className="font-semibold text-sm text-white  uppercase tracking-widest">Novo Serviço</h2>
           <form onSubmit={handleSubmit} className="space-y-3">
             <Input 
@@ -4997,10 +5167,15 @@ const ServicesView: React.FC<{ onSuccess?: (msg: string) => void }> = ({ onSucce
             </div>
             <Button type="submit" fullWidth className="h-11">Adicionar Serviço</Button>
           </form>
-        </div>
+        </motion.div>
       )}
 
-      <div className="pt-2">
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.22, delay: 0.07, ease: [0.22, 1, 0.36, 1] }}
+        className="pt-2"
+      >
         <div className="flex items-center gap-4 mb-4">
           <div className="h-px flex-1 bg-title/30 "></div>
           <h3 className="text-[10px] font-black text-title border-white/10 uppercase tracking-[0.2em]">Serviços Cadastrados</h3>
@@ -5009,60 +5184,70 @@ const ServicesView: React.FC<{ onSuccess?: (msg: string) => void }> = ({ onSucce
 
         {permissions?.canManageServices ? (
           <Reorder.Group axis="y" values={services} onReorder={reorderServices} className="flex flex-col">
-            {services.map((s) => (
-              <Reorder.Item 
-                key={s.id}
-                value={s}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-surface p-3 flex items-center gap-3 group border-b border-white/5 last:border-0"
-              >
-                <div className="cursor-grab active:cursor-grabbing text-title  hover:text-title transition-colors shrink-0">
-                  <GripVertical size={20} />
-                </div>
-                
-                <div className="flex-1 min-w-0">
-                  <p className="font-bold text-white  text-base truncate">{s.name}</p>
-                  <p className="text-secondary  font-medium text-xs">
-                    {formatCurrency(s.price)} | {s.duration} min
-                  </p>
-                </div>
-                
-                <div className="flex gap-1">
-                  <button 
-                    onClick={() => startEditing(s)} 
-                    className="p-2 text-title hover:text-secondary transition-colors"
-                  >
-                    <Edit3 size={18} />
-                  </button>
-                  <button 
-                    onClick={() => removeService(s.id)} 
-                    className="p-2 text-red-300 hover:text-red-500 transition-colors"
-                  >
-                    <Trash2 size={18} />
-                  </button>
-                </div>
-              </Reorder.Item>
-            ))}
+            <AnimatePresence initial={false}>
+              {services.map((s, idx) => (
+                <Reorder.Item 
+                  key={s.id}
+                  value={s}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: -16, transition: { duration: 0.16 } }}
+                  transition={{ duration: 0.2, delay: Math.min(idx, 6) * 0.03, ease: [0.22, 1, 0.36, 1] }}
+                  className="bg-surface p-3 flex items-center gap-3 group border-b border-white/5 last:border-0"
+                >
+                  <div className="cursor-grab active:cursor-grabbing text-title  hover:text-title transition-colors shrink-0">
+                    <GripVertical size={20} />
+                  </div>
+                  
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-white  text-base truncate">{s.name}</p>
+                    <p className="text-secondary  font-medium text-xs">
+                      {formatCurrency(s.price)} | {s.duration} min
+                    </p>
+                  </div>
+                  
+                  <div className="flex gap-1">
+                    <button 
+                      onClick={() => startEditing(s)} 
+                      className="p-2 text-title hover:text-secondary transition-colors"
+                    >
+                      <Edit3 size={18} />
+                    </button>
+                    <button 
+                      onClick={() => removeService(s.id)} 
+                      className="p-2 text-red-300 hover:text-red-500 transition-colors"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                </Reorder.Item>
+              ))}
+            </AnimatePresence>
           </Reorder.Group>
         ) : (
           <div className="flex flex-col">
-            {services.map((s) => (
-              <div 
-                key={s.id}
-                className="bg-surface p-4 flex items-center justify-between border-b border-white/5 last:border-0 rounded-2xl mb-2"
-              >
-                <div className="flex-1 min-w-0">
-                  <p className="font-bold text-white text-base truncate">{s.name}</p>
-                  <p className="text-secondary font-medium text-xs mt-0.5">
-                    {formatCurrency(s.price)} | {s.duration} min
-                  </p>
-                </div>
-              </div>
-            ))}
+            <AnimatePresence initial={false}>
+              {services.map((s, idx) => (
+                <motion.div 
+                  key={s.id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: -16 }}
+                  transition={{ duration: 0.2, delay: Math.min(idx, 6) * 0.03, ease: [0.22, 1, 0.36, 1] }}
+                  className="bg-surface p-4 flex items-center justify-between border-b border-white/5 last:border-0 rounded-2xl mb-2"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-white text-base truncate">{s.name}</p>
+                    <p className="text-secondary font-medium text-xs mt-0.5">
+                      {formatCurrency(s.price)} | {s.duration} min
+                    </p>
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
           </div>
         )}
-      </div>
+      </motion.div>
 
       <AnimatePresence>
         {editingService && (
@@ -5161,7 +5346,7 @@ const CustomersView: React.FC<{
   onAddCustomer: () => void;
   onSuccess?: (msg: string) => void;
 }> = ({ initialPhone, clearInitial, onNewAppointment, onAddCustomer, onSuccess }) => {
-  const { customers } = useStore();
+  const { customers, isLoading: isStoreLoading } = useStore();
   const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -5205,7 +5390,12 @@ const CustomersView: React.FC<{
 
   return (
     <div className="px-4 pt-5 pb-24 space-y-4 relative">
-      <div className="space-y-2">
+      <motion.div
+        initial={{ opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+        className="space-y-2"
+      >
         <Input label="Buscar Cliente" placeholder="Nome ou telefone..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} inputClassName="bg-surface border-white/10 text-white placeholder:text-muted shadow-[0_2px_8px_rgba(0,0,0,0.3)]" />
         <p className="text-[10px] text-title uppercase tracking-widest font-bold px-1 mb-1">
           {searchTerm 
@@ -5213,21 +5403,49 @@ const CustomersView: React.FC<{
             : `${customerList.length} ${customerList.length === 1 ? 'cliente cadastrado' : 'clientes cadastrados'}`
           }
         </p>
-      </div>
+      </motion.div>
 
-      {customerList.length === 0 ? (
-        <div className="bg-surface  p-12 rounded-[2rem] border-2 border-dashed border-title/30  text-center space-y-3">
-          <div className="w-12 h-12 bg-primary/40  rounded-full flex items-center justify-center mx-auto text-title ">
+      {isStoreLoading ? (
+        <div className="flex flex-col gap-2">
+          {[0, 1, 2, 3].map((idx) => (
+            <div
+              key={`customer-skeleton-${idx}`}
+              className="bg-white/5 animate-pulse rounded-2xl px-4 py-3 flex items-center gap-3 h-16"
+            >
+              <div className="w-9 h-9 rounded-full bg-white/10 shrink-0 mr-3" />
+              <div className="flex-1 space-y-2">
+                <div className="h-3.5 w-36 rounded bg-white/10" />
+                <div className="h-2.5 w-24 rounded bg-white/10" />
+              </div>
+              <div className="w-8 h-8 rounded-full bg-white/10 shrink-0 ml-2" />
+            </div>
+          ))}
+        </div>
+      ) : customerList.length === 0 ? (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+          className="bg-surface p-12 rounded-[2rem] border-2 border-dashed border-title/30 text-center space-y-3"
+        >
+          <div className="w-12 h-12 bg-primary/40 rounded-full flex items-center justify-center mx-auto text-title">
             <UserX size={24} />
           </div>
           <p className="text-title font-bold text-sm uppercase tracking-widest">Nenhum cliente encontrado</p>
-        </div>
+        </motion.div>
       ) : (
         <div className="flex flex-col gap-2">
-          {customerList.map(cust => {
+          {customerList.map((cust, idx) => {
             return (
-              <div 
-                key={cust.phone} 
+              <motion.div 
+                key={cust.phone}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                  duration: 0.2,
+                  delay: Math.min(idx, 7) * 0.03,
+                  ease: [0.22, 1, 0.36, 1]
+                }}
                 onClick={() => setSelectedPhone(normalizePhone(cust.phone))} 
                 className="bg-surface rounded-2xl px-4 py-3 flex items-center gap-3 h-16 cursor-pointer"
               >
@@ -5265,19 +5483,22 @@ const CustomersView: React.FC<{
                     <FaWhatsapp size={18} />
                   </a>
                 </div>
-              </div>
+              </motion.div>
             );
           })}
         </div>
       )}
 
       {/* FAB */}
-      <button 
+      <motion.button 
+        initial={{ opacity: 0, scale: 0.8 }}
+        animate={{ opacity: 0.85, scale: 1 }}
+        transition={{ duration: 0.22, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
         onClick={onAddCustomer}
-        className="fixed bottom-24 right-6 w-14 h-14 bg-secondary text-white rounded-full shadow-2xl flex items-center justify-center hover:bg-secondary active:scale-90 transition-all z-50 pointer-events-auto opacity-[0.85]"
+        className="fixed bottom-24 right-6 w-14 h-14 bg-secondary text-white rounded-full shadow-2xl flex items-center justify-center hover:bg-secondary active:scale-90 transition-transform z-50 pointer-events-auto"
       >
         <Plus size={28} strokeWidth={3} />
-      </button>
+      </motion.button>
     </div>
   );
 };

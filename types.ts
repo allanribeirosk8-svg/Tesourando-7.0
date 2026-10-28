@@ -145,6 +145,9 @@ export interface Appointment {
   observation?: string;
   status: 'pending' | 'completed' | 'no-show';
   createdAt: number;
+  isExceptional?: boolean;
+  exceptionalBy?: string | null;
+  exceptionalAt?: string | null;
 }
 
 export interface Customer {
@@ -209,7 +212,8 @@ export type AccessKind =
   | 'admin_ready'
   | 'staff_ready'
   | 'multi_tenant_selection'
-  | 'no_membership';
+  | 'no_membership'
+  | 'access_revoked';
 
 export interface UserBarbershopContext {
   barbershop: Barbershop;
@@ -321,6 +325,7 @@ export interface AppState {
   updateStaff: (id: string, updates: Partial<Staff>) => Promise<void>;
   deleteStaff: (id: string) => Promise<void>;
   removeStaffFromBarbershop: (params: { staffProfileId: string; staffUserId?: string | null; barbershopId: string }) => Promise<void>;
+  reactivateStaff: (staffProfileId: string, barbershopId?: string) => Promise<void>;
   getStaffAvailability: (staffId: string) => Promise<StaffAvailability[]>;
   saveStaffAvailability: (availabilities: Omit<StaffAvailability, 'id'>[]) => Promise<void>;
   
@@ -370,6 +375,13 @@ export interface Barbershop {
   ownerId: string;
   name: string;
   slug: string;
+  phone?: string;
+  businessPhone?: string;
+  address?: string;
+  logo?: string;
+  description?: string;
+  instagram?: string;
+  website?: string;
   createdAt: string;
 }
 

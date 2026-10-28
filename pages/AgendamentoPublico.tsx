@@ -291,11 +291,32 @@ export default function AgendamentoPublico() {
         const existingInfo = existingApts || [];
 
         const [breaksRes, blockedRes] = await Promise.all([
-          supabase.from('weekly_breaks').select('time').eq('user_id', profile.id).eq('day_of_week', dayOfWeek),
+          supabase.from('weekly_breaks').select('*').eq('user_id', profile.id).eq('day_of_week', dayOfWeek),
           supabase.from('blocked_slots').select('time').eq('user_id', profile.id).eq('date', selectedDate)
         ]);
 
-        const tenantBreaks = breaksRes.data?.map(b => b.time.substring(0, 5)) || [];
+        const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+        const toTimeStr = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+        const expandBreakRow = (b: any): string[] => {
+          const rawStart = (b.start_time || b.time || '').substring(0, 5);
+          if (!rawStart) return [];
+          if (b.end_time) {
+            const rawEnd = b.end_time.startsWith('24:00') ? '24:00' : b.end_time.substring(0, 5);
+            const sMin = toMin(rawStart);
+            const eMin = rawEnd === '24:00' ? 24 * 60 : toMin(rawEnd);
+            if (eMin > sMin && eMin - sMin <= 24 * 60) {
+              const res: string[] = [];
+              for (let m = sMin; m < eMin; m += 30) res.push(toTimeStr(m));
+              return res;
+            }
+          }
+          return [rawStart];
+        };
+
+        const allBreakRows = (breaksRes.data || []) as any[];
+        const tenantBreaks = allBreakRows
+          .filter(b => b.staff_id == null)
+          .flatMap(expandBreakRow);
         const tenantBlocked = blockedRes.data?.map(b => b.time.substring(0, 5)) || [];
         const evaluableStaff = staff.length > 0 ? staff : [{
           id: profile.id,
@@ -303,7 +324,6 @@ export default function AgendamentoPublico() {
         }];
 
         const allSlots = generateTimeSlots(dayConfig.start_time, dayConfig.end_time);
-        const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const endDayMin = toMin(dayConfig.end_time.substring(0, 5));
         const totalDuration = selectedServices.reduce((sum, s) => sum + s.duration, 0);
 
@@ -323,6 +343,9 @@ export default function AgendamentoPublico() {
 
         function isStaffFree(staffId: string, slot: string, slotMin: number, slotEndMin: number): boolean {
           const individualAvail = staffAvailabilities.find(a => a.staff_id === staffId && a.day_of_week === dayOfWeek);
+          const directStaffBreaks = allBreakRows
+            .filter(b => b.staff_id === staffId)
+            .flatMap(expandBreakRow);
 
           if (individualAvail) {
             if (!individualAvail.is_open) return false;
@@ -330,10 +353,13 @@ export default function AgendamentoPublico() {
             const staffEndMin = toMin(individualAvail.end_time.substring(0, 5));
             if (slotMin < staffStartMin || slotEndMin > staffEndMin) return false;
 
-            const staffBreaks = (individualAvail.breaks || []).map((b: string) => b.substring(0, 5));
+            const staffBreaks = [
+              ...(individualAvail.breaks || []).map((b: string) => b.substring(0, 5)),
+              ...directStaffBreaks
+            ];
             if (staffBreaks.includes(slot)) return false;
           } else {
-            if (tenantBreaks.includes(slot)) return false;
+            if (tenantBreaks.includes(slot) || directStaffBreaks.includes(slot)) return false;
           }
 
           const conflict = existingInfo.some(apt => {

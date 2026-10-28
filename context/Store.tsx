@@ -34,10 +34,10 @@ const DEFAULT_WEEKLY: Record<number, DayConfig> = {
 };
 
 const DEFAULT_SERVICES: ServiceItem[] = [
-  { id: '1', name: 'Corte de Cabelo', price: 35, duration: 30 },
-  { id: '2', name: 'Barba', price: 25, duration: 30 },
-  { id: '3', name: 'Corte + Barba', price: 50, duration: 60 },
-  { id: '4', name: 'Pezinho / Sobrancelha', price: 10, duration: 30 },
+  { id: '00000000-0000-0000-0000-000000000001', name: 'Corte de Cabelo', price: 35, duration: 30 },
+  { id: '00000000-0000-0000-0000-000000000002', name: 'Barba', price: 25, duration: 30 },
+  { id: '00000000-0000-0000-0000-000000000003', name: 'Corte + Barba', price: 50, duration: 60 },
+  { id: '00000000-0000-0000-0000-000000000004', name: 'Pezinho / Sobrancelha', price: 10, duration: 30 },
 ];
 
 const DEFAULT_PROFILE: BarberProfile = {
@@ -79,6 +79,10 @@ export const AppProvider: React.FC<{
   const [session, setSession] = useState<Session | null>(null);
   const [activeContext, setActiveContext] = useState<ActiveContext | null>(null);
   const [activeBarbershopId, setActiveBarbershopId] = useState<string | null>(null);
+  const activeBarbershopIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeBarbershopIdRef.current = activeBarbershopId;
+  }, [activeBarbershopId]);
   const [activeMembershipRole, setActiveMembershipRole] = useState<MembershipRole | null>(null);
   const [activeStaffProfileId, setActiveStaffProfileId] = useState<string | null>(null);
   const [authenticatedUserId, setAuthenticatedUserId] = useState<string | null>(null);
@@ -507,7 +511,8 @@ export const AppProvider: React.FC<{
         dbApts,
         dbCustomers,
         dbServices,
-        dbProfile,
+        dbUserProfile,
+        dbShop,
         dbWeekly,
         dbBlocked,
         dbUnblocked,
@@ -525,8 +530,12 @@ export const AppProvider: React.FC<{
           console.warn('[STORE] Aviso ao buscar serviços:', err);
           return [];
         }),
-        supabaseService.getProfile(barbershopId).catch(err => {
-          console.warn('[STORE] Aviso ao buscar perfil:', err);
+        supabaseService.getUserProfile(sessionUserId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar perfil do usuário:', err);
+          return null;
+        }),
+        supabaseService.getBarbershop(barbershopId).catch(err => {
+          console.warn('[STORE] Aviso ao buscar dados da barbearia:', err);
           return null;
         }),
         supabaseService.getWeeklySchedule(barbershopId).catch(err => {
@@ -566,8 +575,26 @@ export const AppProvider: React.FC<{
 
       const finalServices = dbServices && dbServices.length > 0 ? dbServices : DEFAULT_SERVICES;
       setServices(finalServices);
-      setBarberProfile(dbProfile || DEFAULT_PROFILE);
-      setWeeklySchedule({ ...DEFAULT_WEEKLY, ...(dbWeekly || {}) });
+      
+      const combinedProfile: BarberProfile = {
+        name: dbUserProfile?.name || 'Barbeiro',
+        personalPhone: dbUserProfile?.personalPhone || '',
+        photo: dbUserProfile?.photo || '',
+        shopName: dbShop?.name || 'Meu Corte',
+        businessPhone: dbShop?.businessPhone || dbShop?.phone || '',
+        address: dbShop?.address || '',
+        logo: dbShop?.logo || '',
+        description: dbShop?.description || '',
+        instagram: dbShop?.instagram || '',
+        website: dbShop?.website || '',
+        slug: dbShop?.slug || ''
+      };
+      setBarberProfile(combinedProfile);
+      if (dbShop) {
+        setBarbershop(dbShop);
+      }
+      const baseWeeklySchedule: Record<number, DayConfig> = { ...DEFAULT_WEEKLY, ...(dbWeekly || {}) };
+      setWeeklySchedule(baseWeeklySchedule);
       setBlockedSlots(dbBlocked || {});
       setUnblockedSlots(dbUnblocked || {});
       setStaff(dbStaff || []);
@@ -581,13 +608,38 @@ export const AppProvider: React.FC<{
 
       setUserRole(resolvedRole);
 
-      let activeStaffUser: Staff | null = resolvedAuthCtx.staffProfile || null;
-      if (!activeStaffUser && dbStaff) {
-        activeStaffUser = dbStaff.find((s: any) => s.userId === sessionUserId) || null;
+      let activeStaffUser: Staff | null = null;
+      if (dbStaff && dbStaff.length > 0) {
+        activeStaffUser = dbStaff.find((s: any) => s.userId === sessionUserId || s.id === sessionUserId) || null;
+      }
+      if (!activeStaffUser && resolvedAuthCtx.staffProfile) {
+        activeStaffUser = resolvedAuthCtx.staffProfile;
       }
       setCurrentStaff(activeStaffUser);
       if (resolvedRole === 'staff' && activeStaffUser?.id) {
         setSelectedStaffId(activeStaffUser.id);
+      }
+
+      if (activeStaffUser?.id) {
+        try {
+          const staffAvail = await supabaseService.getStaffAvailability(activeStaffUser.id);
+          if (requestId === bootRequestIdRef.current && staffAvail && staffAvail.length > 0) {
+            const mergedSchedule: Record<number, DayConfig> = { ...baseWeeklySchedule };
+            staffAvail.forEach(item => {
+              if (typeof item.dayOfWeek === 'number' && item.dayOfWeek >= 0 && item.dayOfWeek <= 6) {
+                mergedSchedule[item.dayOfWeek] = {
+                  start: normalizeTime(item.startTime),
+                  end: normalizeTime(item.endTime),
+                  isOpen: Boolean(item.isOpen),
+                  breaks: Array.from(new Set((item.breaks || []).map(b => normalizeTime(b)).filter(Boolean)))
+                };
+              }
+            });
+            setWeeklySchedule(mergedSchedule);
+          }
+        } catch (availErr) {
+          console.warn('[STORE] Aviso ao sincronizar disponibilidade individual no boot:', availErr);
+        }
       }
 
       console.info('[STORE] Carregamento principal concluído');
@@ -820,6 +872,21 @@ export const AppProvider: React.FC<{
               
               if (index !== -1) {
                 if (!apt.date || !apt.time || !apt.clientName) {
+                  return prev;
+                }
+                const existing = prev[index];
+                if (
+                  existing.status === apt.status &&
+                  existing.date === apt.date &&
+                  existing.time === apt.time &&
+                  existing.service === apt.service &&
+                  existing.price === apt.price &&
+                  existing.duration === apt.duration &&
+                  existing.clientName === apt.clientName &&
+                  existing.phone === apt.phone &&
+                  existing.staffId === apt.staffId &&
+                  existing.observation === apt.observation
+                ) {
                   return prev;
                 }
                 const next = [...prev];
@@ -1384,13 +1451,24 @@ export const AppProvider: React.FC<{
       throw new Error("Profissional não identificado.");
     }
 
+    const targetStaff = staff.find(s => s.id === effectiveStaffId || s.userId === effectiveStaffId);
+    if (!targetStaff) {
+      console.error("[addAppointment] Profissional não pertence à barbearia ativa:", effectiveStaffId);
+      throw new Error("Profissional não pertence a esta barbearia.");
+    }
+    if (targetStaff.status === 'inactive') {
+      console.warn("[addAppointment] Tentativa de agendamento para profissional inativo:", effectiveStaffId);
+      throw new Error("Não é possível realizar agendamentos para um profissional inativo.");
+    }
+
     const finalApt: Appointment = {
       ...apt,
       time: normalizedTimeValue,
       observation: finalObservation,
       tenantId: resolvedTenantId,
       staffId: effectiveStaffId,
-      userId: currentUserId || ''
+      userId: currentUserId || '',
+      isExceptional: !!isExceptional || !!apt.isExceptional
     };
 
     // 3. Conflict validation (strictly scoped by staffId)
@@ -1411,8 +1489,8 @@ export const AppProvider: React.FC<{
 
     if (isStaff) {
       // Para staff: criação EXCLUSIVA via RPC create_my_appointment no backend
-      let targetServiceIds: string[] = serviceIds || [];
-      if (!targetServiceIds || targetServiceIds.length === 0) {
+      let targetServiceIds: string[] = (serviceIds || []).filter(isUuid);
+      if (targetServiceIds.length === 0) {
         const aptServiceNames = (apt.service || '').split('+').map(s => s.trim().toLowerCase());
         targetServiceIds = services
           .filter(s => aptServiceNames.some(name => s.name.toLowerCase().includes(name) || name.includes(s.name.toLowerCase())))
@@ -1420,12 +1498,28 @@ export const AppProvider: React.FC<{
           .filter(isUuid);
       }
 
-      if (targetServiceIds.length === 0 && services.length > 0) {
-        targetServiceIds = [services[0].id];
+      if (targetServiceIds.length === 0) {
+        const validServices = services.map(s => s.id).filter(isUuid);
+        if (validServices.length > 0) {
+          targetServiceIds = [validServices[0]];
+        }
+      }
+
+      if (targetServiceIds.length === 0 && resolvedTenantId) {
+        try {
+          const remoteServices = await supabaseService.getServices(resolvedTenantId);
+          const validRemote = (remoteServices || []).map(s => s.id).filter(isUuid);
+          if (validRemote.length > 0) {
+            targetServiceIds = [validRemote[0]];
+            setServices(remoteServices);
+          }
+        } catch (srvErr) {
+          console.warn('[addAppointment] Aviso ao carregar serviços remotos:', srvErr);
+        }
       }
 
       if (targetServiceIds.length === 0) {
-        throw new Error("Nenhum serviço válido identificado para este agendamento.");
+        throw new Error("Nenhum serviço válido identificado. Cadastre ao menos um serviço para a barbearia.");
       }
 
       savedApt = await supabaseService.createMyAppointment({
@@ -1625,14 +1719,30 @@ export const AppProvider: React.FC<{
         return;
       }
 
+      const previousStatus = apt.status;
+
+      // 1. Atualização otimista imediata para evitar flicker na UI
+      setAppointments(prevApts => 
+        prevApts.map(a => a.id === id ? { ...a, status: 'completed' } : a)
+      );
+
       // Chamada à RPC segura e idempotente no Supabase
-      const res = await supabaseService.completeMyAppointment(id);
+      let res;
+      try {
+        res = await supabaseService.completeMyAppointment(id);
+      } catch (rpcErr) {
+        setAppointments(prevApts => 
+          prevApts.map(a => a.id === id ? { ...a, status: previousStatus } : a)
+        );
+        throw rpcErr;
+      }
       const completedApt = res.appointment;
 
-      // 1. Atualizar agendamento local SOMENTE APÓS persistência confirmada pelo banco
-      setAppointments(prevApts => 
-        prevApts.map(a => a.id === id ? { ...a, ...completedApt, status: 'completed' } : a)
-      );
+      if (completedApt) {
+        setAppointments(prevApts => 
+          prevApts.map(a => a.id === id ? { ...a, ...completedApt, status: 'completed' } : a)
+        );
+      }
 
       // 2. Atualizar contadores do cliente localmente
       const normalizedPhone = normalizePhone(apt.phone);
@@ -1715,12 +1825,14 @@ export const AppProvider: React.FC<{
     const apt = appointmentsRef.current.find(a => a.id === id);
     if (!apt || apt.status !== 'pending') return;
 
+    const previousStatus = apt.status;
+
+    setAppointments(prevApts => 
+      prevApts.map(a => a.id === id ? { ...a, status: 'no-show' } : a)
+    );
+
     try {
       await supabaseService.markAppointmentNoShow(id);
-
-      setAppointments(prevApts => 
-        prevApts.map(a => a.id === id ? { ...a, status: 'no-show' } : a)
-      );
 
       const normalizedPhone = normalizePhone(apt.phone);
       setCustomers(prevCusts => {
@@ -1776,6 +1888,9 @@ export const AppProvider: React.FC<{
         }
       }
     } catch (err) {
+      setAppointments(prevApts => 
+        prevApts.map(a => a.id === id ? { ...a, status: previousStatus } : a)
+      );
       console.error('[markNoShow] Erro ao registrar no-show:', err);
       throw err;
     }
@@ -1793,12 +1908,12 @@ export const AppProvider: React.FC<{
     if (!apt || apt.status === 'pending') return;
     const currentStatus = apt.status;
 
+    setAppointments(prevApts => 
+      prevApts.map(a => a.id === id ? { ...a, status: 'pending' } : a)
+    );
+
     try {
       await supabaseService.revertAppointment(id);
-
-      setAppointments(prevApts => 
-        prevApts.map(a => a.id === id ? { ...a, status: 'pending' } : a)
-      );
 
       const normalizedPhone = normalizePhone(apt.phone);
       setCustomers(prevCusts => {
@@ -1836,6 +1951,9 @@ export const AppProvider: React.FC<{
         setTransactions(prev => prev.filter(t => t.linkedAppointmentId !== id));
       }
     } catch (err) {
+      setAppointments(prevApts => 
+        prevApts.map(a => a.id === id ? { ...a, status: currentStatus } : a)
+      );
       console.error('[revertAppointment] Erro ao reverter agendamento:', err);
       throw err;
     }
@@ -2391,8 +2509,19 @@ export const AppProvider: React.FC<{
       };
       
       await supabaseService.saveStaff(payload);
-      const freshStaff = await supabaseService.getStaff(currentBarbershopId);
-      setStaff(freshStaff);
+
+      // Context guard: garantir que o usuário não trocou de contexto durante a chamada assíncrona
+      const activeIdNow = activeBarbershopIdRef.current || activeBarbershopId;
+      if (activeIdNow === currentBarbershopId) {
+        const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+        setStaff(freshStaff);
+        if (currentStaff && (currentStaff.id === id || currentStaff.userId === (updates.userId || existing?.userId))) {
+          const updatedSelf = freshStaff.find(s => s.id === currentStaff.id || (s.userId && s.userId === currentStaff.userId));
+          if (updatedSelf) {
+            setCurrentStaff(updatedSelf);
+          }
+        }
+      }
 
       const targetUserId = updates.userId || existing?.userId;
       if (targetUserId) {
@@ -2401,7 +2530,7 @@ export const AppProvider: React.FC<{
             if (m.userId === targetUserId) {
               return {
                 ...m,
-                role: updates.role === 'admin' ? 'admin' : 'staff',
+                role: updates.role === 'admin' ? 'admin' : (updates.role === 'staff' ? 'staff' : m.role),
                 name: updates.name || m.name,
                 phone: updates.phone || m.phone
               };
@@ -2422,16 +2551,49 @@ export const AppProvider: React.FC<{
     barbershopId: string;
   }) => {
     try {
-      await supabaseService.removeStaffFromBarbershop(params);
       const currentBarbershopId = params.barbershopId || activeBarbershopId || activeTenant?.id || barbershop?.id;
-      if (currentBarbershopId) {
+      if (!currentBarbershopId) {
+        throw new Error('Contexto da barbearia não encontrado ao remover profissional.');
+      }
+
+      await supabaseService.removeStaffFromBarbershop({
+        ...params,
+        barbershopId: currentBarbershopId
+      });
+
+      const activeIdNow = activeBarbershopIdRef.current || activeBarbershopId;
+      if (activeIdNow === currentBarbershopId) {
         const freshStaff = await supabaseService.getStaff(currentBarbershopId);
         setStaff(freshStaff);
-      } else {
-        setStaff(prev => prev.map(s => s.id === params.staffProfileId ? { ...s, status: 'inactive' } : s));
+        if (selectedStaffId === params.staffProfileId) {
+          setSelectedStaffId('all');
+        }
       }
     } catch (err) {
       console.error('[removeStaffFromBarbershop] Erro:', err);
+      throw err;
+    }
+  }, [activeBarbershopId, activeTenant?.id, barbershop?.id, selectedStaffId, setSelectedStaffId]);
+
+  const reactivateStaff = useCallback(async (staffProfileId: string, barbershopId?: string) => {
+    try {
+      const currentBarbershopId = barbershopId || activeBarbershopId || activeTenant?.id || barbershop?.id;
+      if (!currentBarbershopId) {
+        throw new Error('Contexto da barbearia não encontrado ao reativar profissional.');
+      }
+
+      await supabaseService.reactivateStaff({
+        staffProfileId,
+        barbershopId: currentBarbershopId
+      });
+
+      const activeIdNow = activeBarbershopIdRef.current || activeBarbershopId;
+      if (activeIdNow === currentBarbershopId) {
+        const freshStaff = await supabaseService.getStaff(currentBarbershopId);
+        setStaff(freshStaff);
+      }
+    } catch (err) {
+      console.error('[reactivateStaff] Erro:', err);
       throw err;
     }
   }, [activeBarbershopId, activeTenant?.id, barbershop?.id]);
@@ -2443,18 +2605,16 @@ export const AppProvider: React.FC<{
         throw new Error('Contexto da barbearia não encontrado ao remover profissional.');
       }
       const target = staff.find(s => s.id === id);
-      await supabaseService.removeStaffFromBarbershop({
+      await removeStaffFromBarbershop({
         staffProfileId: id,
         staffUserId: target?.userId,
         barbershopId: currentBarbershopId
       });
-      const freshStaff = await supabaseService.getStaff(currentBarbershopId);
-      setStaff(freshStaff);
     } catch (err) {
       console.error('Error deleting staff member:', err);
       throw err;
     }
-  }, [activeBarbershopId, activeTenant?.id, barbershop?.id, staff]);
+  }, [activeBarbershopId, activeTenant?.id, barbershop?.id, removeStaffFromBarbershop, staff]);
 
   const getStaffAvailability = useCallback(async (staffId: string) => {
     try {
@@ -2465,14 +2625,88 @@ export const AppProvider: React.FC<{
     }
   }, []);
 
+  useEffect(() => {
+    const selfOrOwnerStaff =
+      currentStaff ||
+      staff.find(
+        s =>
+          (session?.user?.id && (s.userId === session.user.id || s.id === session.user.id)) ||
+          s.membershipRole === 'owner' ||
+          s.role === 'owner'
+      ) ||
+      null;
+    const targetStaffId =
+      selectedStaffId && selectedStaffId !== 'all' ? selectedStaffId : selfOrOwnerStaff?.id;
+    if (!targetStaffId || !activeBarbershopId) return;
+
+    let cancelled = false;
+    supabaseService.getStaffAvailability(targetStaffId)
+      .then(availList => {
+        if (cancelled || !availList || availList.length === 0) return;
+        setWeeklySchedule(prev => {
+          const next: Record<number, DayConfig> = { ...prev };
+          availList.forEach(item => {
+            if (typeof item.dayOfWeek === 'number' && item.dayOfWeek >= 0 && item.dayOfWeek <= 6) {
+              next[item.dayOfWeek] = {
+                start: normalizeTime(item.startTime),
+                end: normalizeTime(item.endTime),
+                isOpen: Boolean(item.isOpen),
+                breaks: Array.from(new Set((item.breaks || []).map(b => normalizeTime(b)).filter(Boolean)))
+              };
+            }
+          });
+          return next;
+        });
+      })
+      .catch(err => {
+        console.warn('[STORE] Aviso ao sincronizar disponibilidade do profissional selecionado:', err);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStaffId, currentStaff?.id, staff, session?.user?.id, activeBarbershopId]);
+
   const saveStaffAvailability = useCallback(async (availabilities: Omit<StaffAvailability, 'id'>[]) => {
     try {
       await supabaseService.saveStaffAvailability(availabilities);
+      if (availabilities.length > 0) {
+        const savedStaffId = availabilities[0].staffId;
+        const selfOrOwnerStaff =
+          currentStaff ||
+          staff.find(
+            s =>
+              (session?.user?.id && (s.userId === session.user.id || s.id === session.user.id)) ||
+              s.membershipRole === 'owner' ||
+              s.role === 'owner'
+          ) ||
+          null;
+        const activeTargetStaffId =
+          selectedStaffId && selectedStaffId !== 'all' ? selectedStaffId : selfOrOwnerStaff?.id;
+        if ((activeTargetStaffId && savedStaffId === activeTargetStaffId) || userRole === 'staff') {
+          setWeeklySchedule(prev => {
+            const next: Record<number, DayConfig> = { ...prev };
+            availabilities.forEach(item => {
+              if (typeof item.dayOfWeek === 'number' && item.dayOfWeek >= 0 && item.dayOfWeek <= 6) {
+                next[item.dayOfWeek] = {
+                  start: normalizeTime(item.startTime),
+                  end: normalizeTime(item.endTime),
+                  isOpen: Boolean(item.isOpen),
+                  breaks: item.isOpen
+                    ? Array.from(new Set((item.breaks || []).map(b => normalizeTime(b)).filter(Boolean)))
+                    : []
+                };
+              }
+            });
+            return next;
+          });
+        }
+      }
     } catch (err) {
       console.error('Error in saveStaffAvailability callback:', err);
       throw err;
     }
-  }, []);
+  }, [selectedStaffId, currentStaff, staff, session?.user?.id, userRole]);
 
   
   return (
@@ -2513,6 +2747,7 @@ export const AppProvider: React.FC<{
       updateStaff,
       deleteStaff,
       removeStaffFromBarbershop,
+      reactivateStaff,
       getStaffAvailability,
       saveStaffAvailability,
 

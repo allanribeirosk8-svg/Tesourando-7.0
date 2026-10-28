@@ -45,7 +45,7 @@ serve(async (req) => {
       });
     }
 
-    // 1. Validação estrita de formato YYYY-MM-DD
+    // 1. Validação estrita de formato YYYY-MM-DD e existência real no calendário
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     const cleanDate = date.trim();
     if (!dateRegex.test(cleanDate)) {
@@ -53,6 +53,31 @@ serve(async (req) => {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    const [year, month, day] = cleanDate.split('-').map(Number);
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    if (
+      isNaN(dateObj.getTime()) ||
+      dateObj.getUTCFullYear() !== year ||
+      dateObj.getUTCMonth() !== month - 1 ||
+      dateObj.getUTCDate() !== day
+    ) {
+      return new Response(JSON.stringify({ error: 'Data inexistente ou inválida no calendário.' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Validação estrita de tipo de staff_id (se fornecido, deve ser UUID válido)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (staff_id !== undefined && staff_id !== null && String(staff_id).trim() !== '') {
+      if (typeof staff_id !== 'string' || !uuidRegex.test(staff_id.trim())) {
+        return new Response(JSON.stringify({ error: 'Parâmetro staff_id deve ser um UUID válido.' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // Validação de data não passada (baseada no dia atual em horário local de Brasília/tenant UTC-3)
@@ -120,7 +145,23 @@ serve(async (req) => {
       });
     }
 
-    const duration = servList.reduce((sum: number, s: any) => sum + (Number(s.duration) || 30), 0);
+    for (const s of servList) {
+      const d = Number(s.duration);
+      if (isNaN(d) || d <= 0) {
+        return new Response(JSON.stringify({ error: `Serviço "${s.id}" possui duração inválida cadastrada na barbearia.` }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    const duration = servList.reduce((sum: number, s: any) => sum + Number(s.duration), 0);
+    if (duration <= 0 || duration > 720) {
+      return new Response(JSON.stringify({ error: 'Duração total de serviços inválida. Deve estar entre 1 e 720 minutos.' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     // 4. Validar se o staff_id fornecido pertence a este tenant e está ativo
     let targetStaffId: string | null = null;
@@ -143,11 +184,19 @@ serve(async (req) => {
     }
 
     // 5. Obter lista de todos os profissionais ativos do tenant
-    const { data: allActiveStaff } = await supabaseAdmin
+    const { data: allActiveStaff, error: activeStaffErr } = await supabaseAdmin
       .from('staff_profiles')
       .select('id')
       .eq('barbershop_id', barbershopId)
       .eq('status', 'active');
+
+    if (activeStaffErr) {
+      console.error('[get-public-availability] Erro ao consultar profissionais ativos:', activeStaffErr);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar equipe.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     const activeStaffIds = (allActiveStaff || []).map((s: any) => s.id);
     if (activeStaffIds.length === 0) {
@@ -162,26 +211,27 @@ serve(async (req) => {
     const dateObj = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
     const dayOfWeek = dateObj.getUTCDay();
 
-    // 7. Horário de funcionamento do dia exclusivamente por barbershop_id
-    const { data: sched } = await supabaseAdmin
+    // 7. Horário de funcionamento geral da barbearia (base para herança)
+    const { data: sched, error: schedErr } = await supabaseAdmin
       .from('weekly_schedule')
       .select('start_time, end_time, is_open')
       .eq('barbershop_id', barbershopId)
       .eq('day_of_week', dayOfWeek)
       .maybeSingle();
 
-    if (!sched || !sched.is_open) {
-      return new Response(JSON.stringify({ available_slots: [] }), {
-        status: 200,
+    if (schedErr) {
+      console.error('[get-public-availability] Erro ao consultar weekly_schedule:', schedErr);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar funcionamento da barbearia.' }), {
+        status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    // 8. Buscar pausas semanais, bloqueios e desbloqueios de data do tenant
-    const [breaksRes, blockedRes, unblockedRes] = await Promise.all([
+    // 8. Buscar pausas semanais, bloqueios, desbloqueios e disponibilidade individual
+    const [breaksRes, blockedRes, unblockedRes, staffAvailRes] = await Promise.all([
       supabaseAdmin
         .from('weekly_breaks')
-        .select('time, start_time, end_time')
+        .select('time, start_time, end_time, staff_id')
         .eq('barbershop_id', barbershopId)
         .eq('day_of_week', dayOfWeek),
       supabaseAdmin
@@ -193,10 +243,50 @@ serve(async (req) => {
         .from('unblocked_slots')
         .select('time, staff_id')
         .eq('barbershop_id', barbershopId)
-        .eq('date', cleanDate)
+        .eq('date', cleanDate),
+      supabaseAdmin
+        .from('staff_availability')
+        .select('*')
+        .eq('barbershop_id', barbershopId)
+        .eq('day_of_week', dayOfWeek)
+        .in('staff_id', targetStaffId ? [targetStaffId] : activeStaffIds)
     ]);
 
-    const tenantBreaks = (breaksRes.data || []).map((b: any) => {
+    // Tratar explicitamente erros de todas as consultas essenciais (nunca ignorar nem converter em lista vazia)
+    if (breaksRes.error) {
+      console.error('[get-public-availability] Erro ao consultar weekly_breaks:', breaksRes.error);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar intervalos da barbearia.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (blockedRes.error) {
+      console.error('[get-public-availability] Erro ao consultar blocked_slots:', blockedRes.error);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar bloqueios da barbearia.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (unblockedRes.error) {
+      console.error('[get-public-availability] Erro ao consultar unblocked_slots:', unblockedRes.error);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar desbloqueios da barbearia.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (staffAvailRes.error) {
+      console.error('[get-public-availability] Erro ao consultar staff_availability:', staffAvailRes.error);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar disponibilidade da equipe.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const allBreaks = breaksRes.data || [];
+    const tenantGeneralBreaks = allBreaks.filter((b: any) => !b.staff_id).map((b: any) => {
       const start = b.start_time ? String(b.start_time).substring(0, 5) : String(b.time || '').substring(0, 5);
       const end = b.end_time ? String(b.end_time).substring(0, 5) : null;
       return { start, end };
@@ -204,18 +294,28 @@ serve(async (req) => {
 
     const blockedRows = blockedRes.data || [];
     const unblockedRows = unblockedRes.data || [];
+    const staffAvailMap = new Map<string, any>();
+    (staffAvailRes.data || []).forEach((sa: any) => staffAvailMap.set(sa.staff_id, sa));
 
     // 9. Buscar agendamentos do tenant no dia (não cancelados/não no-show)
-    const { data: apts } = await supabaseAdmin
+    const { data: apts, error: aptsErr } = await supabaseAdmin
       .from('appointments')
       .select('time, duration, staff_id')
       .eq('barbershop_id', barbershopId)
       .eq('date', cleanDate)
       .not('status', 'in', '("cancelled","no-show")');
 
+    if (aptsErr) {
+      console.error('[get-public-availability] Erro ao consultar appointments:', aptsErr);
+      return new Response(JSON.stringify({ error: 'Erro ao consultar agendamentos existentes.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const existingApts = apts || [];
 
-    // 10. Geração e validação dos slots
+    // 10. Construir grade efetiva por profissional (substituição individual ou herança geral)
     const toMin = (t: string) => {
       const [h, m] = t.split(':').map(Number);
       return h * 60 + m;
@@ -226,48 +326,161 @@ serve(async (req) => {
       return `${h}:${m}`;
     };
 
-    const startMin = toMin(String(sched.start_time).substring(0, 5));
-    const endMin = toMin(String(sched.end_time).substring(0, 5));
-    const rawSlots: string[] = [];
-
-    for (let m = startMin; m + duration <= endMin; m += 30) {
-      rawSlots.push(toStr(m));
+    interface EffectiveSchedule {
+      staffId: string;
+      isOpen: boolean;
+      startMin: number;
+      endMin: number;
+      hasIndividual: boolean;
+      breaks: string[];
     }
 
-    // Se for hoje, filtrar horários já passados
+    const candidateIds = targetStaffId ? [targetStaffId] : activeStaffIds;
+    const effectiveStaffSchedules: EffectiveSchedule[] = [];
+
+    const parseEndTimeMin = (t: string, startMin: number) => {
+      const raw = String(t || '').trim();
+      if (raw.startsWith('24:00')) return 1440;
+      const min = toMin(raw.substring(0, 5));
+      if (min === 0 && startMin > 0) {
+        console.warn(`[get-public-availability] Aviso: end_time "00:00" detectado para expediente iniciado às ${startMin}min. Representação canônica esperada é "24:00".`);
+        return 1440;
+      }
+      return min;
+    };
+
+    for (const sId of candidateIds) {
+      const ind = staffAvailMap.get(sId);
+      if (ind) {
+        if (ind.is_open) {
+          const sMin = toMin(String(ind.start_time).substring(0, 5));
+          const actualEnd = parseEndTimeMin(ind.end_time, sMin);
+          effectiveStaffSchedules.push({
+            staffId: sId,
+            isOpen: true,
+            startMin: sMin,
+            endMin: actualEnd,
+            hasIndividual: true,
+            breaks: Array.isArray(ind.breaks) ? ind.breaks : []
+          });
+        }
+      } else {
+        // Herança da grade geral da barbearia
+        if (sched && sched.is_open) {
+          const sMin = toMin(String(sched.start_time).substring(0, 5));
+          const actualEnd = parseEndTimeMin(sched.end_time, sMin);
+          effectiveStaffSchedules.push({
+            staffId: sId,
+            isOpen: true,
+            startMin: sMin,
+            endMin: actualEnd,
+            hasIndividual: false,
+            breaks: []
+          });
+        }
+      }
+    }
+
+    // Se nenhum profissional candidato tiver expediente aberto hoje, retorna vazio
+    if (effectiveStaffSchedules.length === 0) {
+      return new Response(JSON.stringify({ available_slots: [] }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Gerar conjunto de slots candidatos a partir de cada grade efetiva dos profissionais
+    // Suporta inícios não alinhados à hora cheia (ex: 08:15, 08:45)
+    const slotMinutesSet = new Set<number>();
+    for (const eff of effectiveStaffSchedules) {
+      for (let m = eff.startMin; m + duration <= eff.endMin && m + duration <= 1440; m += 30) {
+        slotMinutesSet.add(m);
+      }
+    }
+    const rawSlots = Array.from(slotMinutesSet)
+      .sort((a, b) => a - b)
+      .map(m => toStr(m));
+
     const currentMinToday = (localNow.getHours() * 60) + localNow.getMinutes();
 
-    // Helper: verifica se um horário está explicitamente desbloqueado
-    const isSlotExplicitlyUnblocked = (sId: string | null, slotMin: number) => {
-      return unblockedRows.some((u: any) => {
-        if (u.staff_id && sId && u.staff_id !== sId) return false;
-        const uTimeStr = String(u.time || '').substring(0, 5);
-        return uTimeStr && toMin(uTimeStr) === slotMin;
-      });
+    // Desbloqueio geral: staff_id IS NULL. Supera exclusivamente pausas/bloqueios gerais.
+    const isGeneralUnblockedForSlot = (slotMin: number) => {
+      return unblockedRows.some((u: any) => !u.staff_id && toMin(String(u.time || '').substring(0, 5)) === slotMin);
+    };
+
+    // Desbloqueio individual: staff_id = sId. Supera exclusivamente pausas/bloqueios deste profissional.
+    const isStaffIndividualUnblockedForSlot = (sId: string, slotMin: number) => {
+      return unblockedRows.some((u: any) => u.staff_id === sId && toMin(String(u.time || '').substring(0, 5)) === slotMin);
     };
 
     // Helper: verifica se um profissional específico está disponível durante o intervalo do slot
-    const isStaffFreeForSlot = (sId: string, slotMin: number, slotEndMin: number) => {
-      const explicitlyUnblocked = isSlotExplicitlyUnblocked(sId, slotMin);
+    const isStaffFreeForSlot = (eff: EffectiveSchedule, slotMin: number, slotEndMin: number) => {
+      // 1. Expediente efetivo deste profissional
+      if (slotMin < eff.startMin || slotEndMin > eff.endMin) {
+        return false;
+      }
 
-      // Bloqueio de slot específico ou geral do tenant
-      if (!explicitlyUnblocked) {
-        const isBlocked = blockedRows.some((b: any) => {
-          if (b.staff_id && b.staff_id !== sId) return false;
+      // 1.1 Ancoragem estrita ao início do expediente deste profissional (passos de 30 min)
+      // Garante que profissionais com inícios distintos (ex: 08:00 vs 08:15) só recebam slots alinhados à sua grade
+      if ((slotMin - eff.startMin) % 30 !== 0) {
+        return false;
+      }
+
+      // 2. Pausas e Bloqueios Gerais da Barbearia
+      const generalUnblocked = isGeneralUnblockedForSlot(slotMin);
+      if (!generalUnblocked) {
+        // Pausas gerais aplicam-se apenas a quem NÃO possui grade individual própria (herança geral)
+        if (!eff.hasIndividual) {
+          const fallsInGeneralBreak = tenantGeneralBreaks.some((brk: any) => {
+            if (!brk.start) return false;
+            const brkStartMin = toMin(brk.start);
+            const brkEndMin = brk.end ? toMin(brk.end) : brkStartMin + 30;
+            return slotMin < brkEndMin && slotEndMin > brkStartMin;
+          });
+          if (fallsInGeneralBreak) return false;
+        }
+
+        // Bloqueio pontual geral de calendário fecha a barbearia para todos
+        const hasGeneralBlock = blockedRows.some((b: any) => {
+          if (b.staff_id) return false;
           const bTimeStr = String(b.time || '').substring(0, 5);
           if (!bTimeStr) return false;
           const bMin = toMin(bTimeStr);
-          const bEndMin = bMin + 30; // duração padrão do bloqueio de slot
+          const bEndMin = bMin + 30;
           return slotMin < bEndMin && slotEndMin > bMin;
         });
-        if (isBlocked) return false;
+        if (hasGeneralBlock) return false;
       }
 
-      // Conflito com agendamentos existentes
+      // 3. Pausas e Bloqueios Individuais deste profissional
+      const individualUnblocked = isStaffIndividualUnblockedForSlot(eff.staffId, slotMin);
+      if (!individualUnblocked) {
+        if (eff.hasIndividual) {
+          const hasBreak = eff.breaks.some((brk: string) => {
+            const bMin = toMin(String(brk).substring(0, 5));
+            return slotMin < bMin + 30 && slotEndMin > bMin;
+          });
+          if (hasBreak) return false;
+        }
+
+        // Bloqueio pontual específico deste profissional
+        const hasStaffBlock = blockedRows.some((b: any) => {
+          if (b.staff_id !== eff.staffId) return false;
+          const bTimeStr = String(b.time || '').substring(0, 5);
+          if (!bTimeStr) return false;
+          const bMin = toMin(bTimeStr);
+          const bEndMin = bMin + 30;
+          return slotMin < bEndMin && slotEndMin > bMin;
+        });
+        if (hasStaffBlock) return false;
+      }
+
+      // 4. Conflito com agendamentos existentes (sempre verificado, mesmo com desbloqueio)
       const hasConflict = existingApts.some((apt: any) => {
-        if (apt.staff_id !== sId) return false;
+        if (apt.staff_id !== eff.staffId) return false;
         const aMin = toMin(String(apt.time).substring(0, 5));
-        const aEndMin = aMin + (Number(apt.duration) || 30);
+        const aptDuration = Number(apt.duration) > 0 ? Number(apt.duration) : 30;
+        const aEndMin = aMin + aptDuration;
         return slotMin < aEndMin && slotEndMin > aMin;
       });
       if (hasConflict) return false;
@@ -283,37 +496,15 @@ serve(async (req) => {
 
       const slotMin = toMin(slot);
       const slotEndMin = slotMin + duration;
-      const generalUnblocked = isSlotExplicitlyUnblocked(null, slotMin);
-
-      if (!generalUnblocked) {
-        // Pausas gerais da barbearia
-        const fallsInBreak = tenantBreaks.some((brk: any) => {
-          if (!brk.start) return false;
-          const brkStartMin = toMin(brk.start);
-          const brkEndMin = brk.end ? toMin(brk.end) : brkStartMin + 30;
-          return slotMin < brkEndMin && slotEndMin > brkStartMin;
-        });
-        if (fallsInBreak) return false;
-
-        // Bloqueio geral do tenant sem staff_id atribuído
-        const hasGeneralBlock = blockedRows.some((b: any) => {
-          if (b.staff_id) return false;
-          const bTimeStr = String(b.time || '').substring(0, 5);
-          if (!bTimeStr) return false;
-          const bMin = toMin(bTimeStr);
-          const bEndMin = bMin + 30;
-          return slotMin < bEndMin && slotEndMin > bMin;
-        });
-        if (hasGeneralBlock) return false;
-      }
 
       if (targetStaffId) {
         // Regra para profissional específico:
-        return isStaffFreeForSlot(targetStaffId, slotMin, slotEndMin);
+        const eff = effectiveStaffSchedules.find(e => e.staffId === targetStaffId);
+        if (!eff) return false;
+        return isStaffFreeForSlot(eff, slotMin, slotEndMin);
       } else {
-        // Regra "qualquer profissional":
-        // O horário está disponível se pelo menos UM dos profissionais ativos do tenant estiver livre
-        return activeStaffIds.some((sId: string) => isStaffFreeForSlot(sId, slotMin, slotEndMin));
+        // Regra "qualquer profissional": avalia cada candidato efetivo com suas respectivas regras e desbloqueios
+        return effectiveStaffSchedules.some(eff => isStaffFreeForSlot(eff, slotMin, slotEndMin));
       }
     });
 

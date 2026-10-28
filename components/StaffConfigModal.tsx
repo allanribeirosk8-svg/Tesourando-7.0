@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft, Calendar, Coffee, ArrowLeft, Mail, Lock, Shield, Camera, AlertTriangle, AlertCircle } from 'lucide-react';
+import { X, Plus, Trash2, Edit2, Save, Clock, Phone, User, Percent, ChevronLeft, Calendar, Coffee, ArrowLeft, Mail, Lock, Shield, Camera, AlertTriangle, AlertCircle, RotateCcw, CheckCircle } from 'lucide-react';
 import { useStore } from '../context/Store';
 import { Staff, StaffAvailability } from '../types';
 import { compressImage, formatPhone } from '../utils/helpers';
@@ -11,7 +11,21 @@ interface StaffConfigModalProps {
 }
 
 export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) => {
-  const { staff, addStaff, createStaffDirectly, updateStaff, deleteStaff, removeStaffFromBarbershop, userRole, session, barberProfile, activeTenant, updateBarberProfile } = useStore();
+  const { 
+    staff, 
+    addStaff, 
+    createStaffDirectly, 
+    updateStaff, 
+    deleteStaff, 
+    removeStaffFromBarbershop, 
+    reactivateStaff,
+    userRole, 
+    session, 
+    barberProfile, 
+    activeTenant, 
+    activeBarbershopId,
+    updateBarberProfile 
+  } = useStore();
   
   // Telas internas: 'list' | 'edit_form'
   const [view, setView] = useState<'list' | 'edit_form'>('list');
@@ -19,24 +33,24 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
   // Modal unificado de horários de trabalho
   const [scheduleModalStaff, setScheduleModalStaff] = useState<Staff | null>(null);
 
-  // Identificar se um membro é o dono da barbearia
+  // Identificar com precisão se um membro é o verdadeiro dono da barbearia
   const isOwnerMember = React.useCallback((member: Staff) => {
-    const tenantOwnerId = activeTenant?.id || barberProfile?.id;
+    const ownerUserId = activeTenant?.ownerId || barberProfile?.id || session?.user?.id;
     return (
-      member.id === tenantOwnerId || 
-      member.userId === tenantOwnerId || 
+      member.membershipRole === 'owner' ||
       member.role === 'owner' ||
-      member.role === 'admin' ||
-      (userRole === 'admin_owner' && (member.userId === session?.user?.id || member.id === session?.user?.id))
+      (member.role as any) === 'admin_owner' ||
+      (!!ownerUserId && (member.userId === ownerUserId || member.id === ownerUserId)) ||
+      (((userRole as any) === 'admin_owner' || userRole === 'owner') && (member.userId === session?.user?.id || member.id === session?.user?.id))
     );
-  }, [activeTenant?.id, barberProfile?.id, session?.user?.id, userRole]);
+  }, [activeTenant?.ownerId, barberProfile?.id, session?.user?.id, userRole]);
 
   // Identificar se é o usuário atualmente logado
   const isCurrentUser = React.useCallback((member: Staff) => {
     if (session?.user?.id && (member.userId === session.user.id || member.id === session.user.id)) {
       return true;
     }
-    if (userRole === 'admin_owner' && isOwnerMember(member)) {
+    if (((userRole as any) === 'admin_owner' || userRole === 'owner') && isOwnerMember(member)) {
       return true;
     }
     return false;
@@ -46,15 +60,27 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
   const staffListToRender = React.useMemo(() => {
     const tenantOwnerId = activeTenant?.id || barberProfile?.id || session?.user?.id;
     return [...staff].sort((a, b) => {
-      const aIsAdmin = (a.role === 'admin' || a.role === 'admin_owner' || a.userId === tenantOwnerId || a.id === tenantOwnerId) ? 1 : 0;
-      const bIsAdmin = (b.role === 'admin' || b.role === 'admin_owner' || b.userId === tenantOwnerId || b.id === tenantOwnerId) ? 1 : 0;
+      const aIsAdmin = (a.role === 'admin' || (a.role as any) === 'admin_owner' || a.role === 'owner' || a.membershipRole === 'owner' || a.userId === tenantOwnerId || a.id === tenantOwnerId) ? 1 : 0;
+      const bIsAdmin = (b.role === 'admin' || (b.role as any) === 'admin_owner' || b.role === 'owner' || b.membershipRole === 'owner' || b.userId === tenantOwnerId || b.id === tenantOwnerId) ? 1 : 0;
       if (aIsAdmin !== bIsAdmin) {
         return bIsAdmin - aIsAdmin;
       }
       return (a.name || '').localeCompare(b.name || '');
     });
   }, [staff, activeTenant?.id, barberProfile?.id, session?.user?.id]);
+
+  const activeStaffList = React.useMemo(() => {
+    return staffListToRender.filter(s => s.status !== 'inactive');
+  }, [staffListToRender]);
+
+  const inactiveStaffList = React.useMemo(() => {
+    return staffListToRender.filter(s => s.status === 'inactive');
+  }, [staffListToRender]);
   
+  // Feedback visual de ações (sucesso ou erro) e estados de carregamento
+  const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [reactivatingStaffId, setReactivatingStaffId] = useState<string | null>(null);
+
   // Profissional em edição ou configuração
   const [selectedStaffMember, setSelectedStaffMember] = useState<Staff | null>(null);
   
@@ -109,6 +135,14 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
 
   // Inicializar formulário de cadastro/edição
   const openEditForm = (member: Staff | null) => {
+    if (member && member.status === 'inactive') {
+      setActionFeedback({
+        type: 'error',
+        message: 'Profissionais inativos não podem ser editados diretamente. Reative o profissional primeiro.'
+      });
+      setTimeout(() => setActionFeedback(null), 4000);
+      return;
+    }
     setSelectedStaffMember(member);
     setFormError(null);
     if (member) {
@@ -184,16 +218,19 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
     setIsSubmitting(true);
 
     try {
-      const commRate = parseFloat(commission) || 0;
+      const parsedComm = parseFloat(commission);
+      const commRate = Number.isFinite(parsedComm) ? Math.min(100, Math.max(0, parsedComm)) : 0;
+
       if (selectedStaffMember) {
         const isOwner = isOwnerMember(selectedStaffMember);
         const finalRole = isOwner ? 'admin' : role;
+        const finalStatus = isOwner ? 'active' : status;
 
         await updateStaff(selectedStaffMember.id, {
           name: name.trim(),
           phone: phone.trim(),
           commissionRate: commRate,
-          status: status,
+          status: finalStatus,
           photo: photo || undefined,
           role: finalRole
         });
@@ -207,6 +244,12 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
             photo: photo || barberProfile.photo
           });
         }
+
+        setActionFeedback({
+          type: 'success',
+          message: `Dados do profissional ${name.trim()} atualizados com sucesso!`
+        });
+        setTimeout(() => setActionFeedback(null), 4000);
       } else {
         await createStaffDirectly({
           email: trimmedEmail,
@@ -217,38 +260,77 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
           photo: photo || undefined,
           commissionRate: commRate
         });
+
+        setActionFeedback({
+          type: 'success',
+          message: `Novo profissional ${name.trim()} cadastrado com sucesso!`
+        });
+        setTimeout(() => setActionFeedback(null), 4000);
       }
       setView('list');
     } catch (err: any) {
       if (err?.isValidationError) {
         console.warn('[CREATE_STAFF_UI] Validação impediu o cadastro:', err.message);
       } else {
-        console.error('[CREATE_STAFF_UI] Erro inesperado ao salvar profissional:', err);
+        console.error('[CREATE_STAFF_UI] Erro ao salvar profissional:', err);
       }
       const errorMsg = err?.message || 'Erro ao salvar profissional. Verifique os dados e tente novamente.';
       setFormError(errorMsg);
-      scrollToEmail();
+      if (!selectedStaffMember) {
+        scrollToEmail();
+      }
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleConfirmRemoveStaff = async () => {
-    if (!staffToRemove) return;
+    if (!staffToRemove || isRemoving) return;
     setIsRemoving(true);
     setRemoveError(null);
     try {
+      const targetShopId = activeBarbershopId || activeTenant?.id || '';
       await removeStaffFromBarbershop({
         staffProfileId: staffToRemove.id,
         staffUserId: staffToRemove.userId,
-        barbershopId: activeTenant?.id || ''
+        barbershopId: targetShopId
       });
+      const removedName = staffToRemove.name;
       setStaffToRemove(null);
+      setActionFeedback({
+        type: 'success',
+        message: `${removedName} foi removido da equipe ativa e transferido para a seção "Inativos/Removidos". O histórico foi preservado.`
+      });
+      setTimeout(() => setActionFeedback(null), 5000);
     } catch (err: any) {
       console.error('[REMOVE_STAFF] Erro ao remover profissional:', err);
       setRemoveError(err?.message || 'Erro ao remover profissional. Tente novamente.');
     } finally {
       setIsRemoving(false);
+    }
+  };
+
+  const handleReactivateStaff = async (member: Staff) => {
+    if (reactivatingStaffId) return;
+    setReactivatingStaffId(member.id);
+    setActionFeedback(null);
+    try {
+      const targetShopId = activeBarbershopId || activeTenant?.id || '';
+      await reactivateStaff(member.id, targetShopId);
+      setActionFeedback({
+        type: 'success',
+        message: `Profissional ${member.name} reativado com sucesso na equipe!`
+      });
+      setTimeout(() => setActionFeedback(null), 4000);
+    } catch (err: any) {
+      console.error('[REACTIVATE_STAFF] Erro ao reativar profissional:', err);
+      setActionFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao reativar profissional na barbearia.'
+      });
+      setTimeout(() => setActionFeedback(null), 5000);
+    } finally {
+      setReactivatingStaffId(null);
     }
   };
 
@@ -311,116 +393,208 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
 
         {/* Conteúdo com Scroll */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+
+          {/* Banner de feedback de ações rápidas */}
+          {actionFeedback && (
+            <motion.div 
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center gap-2.5 shadow-lg ${
+                actionFeedback.type === 'success'
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 shadow-emerald-500/10'
+                  : 'bg-red-500/15 border-red-500/30 text-red-300 shadow-red-500/10'
+              }`}
+            >
+              {actionFeedback.type === 'success' ? (
+                <CheckCircle size={16} className="text-emerald-400 shrink-0" />
+              ) : (
+                <AlertCircle size={16} className="text-red-400 shrink-0" />
+              )}
+              <span className="leading-snug">{actionFeedback.message}</span>
+            </motion.div>
+          )}
           
           {/* VISÃO 1: Listagem de Profissionais */}
           {view === 'list' && (
-            <div className="space-y-4">
-              <div className="flex justify-between items-center gap-2">
-                <span className="text-[8px] font-bold text-title uppercase tracking-wider">
-                  {staffListToRender.length} profissionais na equipe
-                </span>
-                <button
-                  onClick={() => openEditForm(null)}
-                  style={{ width: '152.953px', height: '31px' }}
-                  className="w-[153px] h-[31px] flex items-center justify-center gap-1.5 rounded-xl bg-primary hover:bg-primary/95 text-xs font-bold text-white transition-all active:scale-95 shrink-0"
-                >
-                  <Plus size={14} />
-                  <span>Novo Profissional</span>
-                </button>
-              </div>
-
-              {staffListToRender.length === 0 ? (
-                <div className="bg-white/5 rounded-2xl p-8 text-center space-y-2">
-                  <User size={36} className="text-title/40 mx-auto" />
-                  <p className="text-sm font-medium text-white">Nenhum profissional cadastrado</p>
-                  <p className="text-xs text-title/60">Sua barbearia está utilizando o cadastro do dono como padrão.</p>
+            <div className="space-y-6">
+              {/* Seção 1: Profissionais Ativos */}
+              <div className="space-y-4">
+                <div className="flex justify-between items-center gap-2">
+                  <span className="text-[10px] font-black text-white/80 uppercase tracking-wider">
+                    Equipe Ativa ({activeStaffList.length})
+                  </span>
+                  <button
+                    onClick={() => openEditForm(null)}
+                    style={{ width: '152.953px', height: '31px' }}
+                    className="w-[153px] h-[31px] flex items-center justify-center gap-1.5 rounded-xl bg-primary hover:bg-primary/95 text-xs font-bold text-white transition-all active:scale-95 shrink-0"
+                  >
+                    <Plus size={14} />
+                    <span>Novo Profissional</span>
+                  </button>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {staffListToRender.map((member) => {
-                    const isOwner = isOwnerMember(member);
-                    const showYou = isCurrentUser(member);
-                    const memberPhoto = member.photo || (isOwner ? barberProfile?.photo : undefined);
-                    
-                    return (
-                      <div 
-                        key={member.id}
-                        className={`bg-white/5 border ${isOwner ? 'border-[#F99417]/30 bg-[#F99417]/5' : 'border-white/5'} rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className={`w-11 h-11 rounded-full ${isOwner ? 'bg-[#F99417]/20 text-[#F99417]' : 'bg-primary/20 text-primary'} flex items-center justify-center font-bold text-base shrink-0 overflow-hidden border border-white/10`}>
-                            {memberPhoto ? (
-                              <img src={memberPhoto} alt={member.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                            ) : (
-                              member.name.substring(0, 2).toUpperCase()
-                            )}
-                          </div>
-                          <div>
-                            <h4 className="text-sm font-bold text-white flex flex-wrap items-center gap-2">
-                              <span>{member.name}</span>
-                              {showYou && (
-                                <span className="text-[#F99417] text-xs font-black tracking-tight">(Você)</span>
-                              )}
-                              {isOwner || member.role === 'admin' || member.role === 'admin_owner' ? (
-                                <span className="bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1">
-                                  <Shield size={10} />
-                                  Administrador
-                                </span>
+
+                {activeStaffList.length === 0 ? (
+                  <div className="bg-white/5 rounded-2xl p-8 text-center space-y-2">
+                    <User size={36} className="text-title/40 mx-auto" />
+                    <p className="text-sm font-medium text-white">Nenhum profissional ativo</p>
+                    <p className="text-xs text-title/60">Cadastre um novo profissional ou reative um membro da lista abaixo.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {activeStaffList.map((member) => {
+                      const isOwner = isOwnerMember(member);
+                      const showYou = isCurrentUser(member);
+                      const memberPhoto = member.photo || (isOwner ? barberProfile?.photo : undefined);
+                      
+                      return (
+                        <div 
+                          key={member.id}
+                          className={`bg-white/5 border ${isOwner ? 'border-[#F99417]/30 bg-[#F99417]/5' : 'border-white/5'} rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`w-11 h-11 rounded-full ${isOwner ? 'bg-[#F99417]/20 text-[#F99417]' : 'bg-primary/20 text-primary'} flex items-center justify-center font-bold text-base shrink-0 overflow-hidden border border-white/10`}>
+                              {memberPhoto ? (
+                                <img src={memberPhoto} alt={member.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                               ) : (
-                                <span className="bg-blue-500/15 text-blue-400 border border-blue-500/30 text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1">
-                                  <User size={10} />
-                                  Profissional
-                                </span>
-                              )}
-                              {member.status === 'inactive' && (
-                                <span className="bg-red-500/10 text-red-400 text-[10px] font-black uppercase px-2 py-0.5 rounded-full">Inativo</span>
-                              )}
-                            </h4>
-                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-xs text-title">
-                              <span className="flex items-center gap-1">
-                                <Percent size={12} className="text-secondary" />
-                                {member.commissionRate}% de comissão
-                              </span>
-                              {member.phone && (
-                                <span className="flex items-center gap-1">
-                                  <Phone size={12} />
-                                  {formatPhone(member.phone)}
-                                </span>
+                                member.name.substring(0, 2).toUpperCase()
                               )}
                             </div>
+                            <div>
+                              <h4 className="text-sm font-bold text-white flex flex-wrap items-center gap-2">
+                                <span>{member.name}</span>
+                                {showYou && (
+                                  <span className="text-[#F99417] text-xs font-black tracking-tight">(Você)</span>
+                                )}
+                                {isOwner ? (
+                                  <span className="bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1">
+                                    <Shield size={10} />
+                                    Proprietário
+                                  </span>
+                                ) : member.role === 'admin' || member.role === 'admin_owner' ? (
+                                  <span className="bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1">
+                                    <Shield size={10} />
+                                    Administrador
+                                  </span>
+                                ) : (
+                                  <span className="bg-blue-500/15 text-blue-400 border border-blue-500/30 text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1">
+                                    <User size={10} />
+                                    Profissional
+                                  </span>
+                                )}
+                              </h4>
+                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-xs text-title">
+                                <span className="flex items-center gap-1">
+                                  <Percent size={12} className="text-secondary" />
+                                  {member.commissionRate}% de comissão
+                                </span>
+                                {member.phone && (
+                                  <span className="flex items-center gap-1">
+                                    <Phone size={12} />
+                                    {formatPhone(member.phone)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 self-end sm:self-center">
+                            <button
+                              onClick={() => openAvailabilityForm(member)}
+                              className="flex items-center gap-1 py-1.5 px-3 rounded-lg bg-secondary/10 hover:bg-secondary/20 active:scale-95 text-[11px] font-bold text-secondary border border-secondary/15 transition-all"
+                            >
+                              <Clock size={12} />
+                              <span>Horários</span>
+                            </button>
+                            <button
+                              onClick={() => openEditForm(member)}
+                              className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-white"
+                              title="Editar profissional"
+                            >
+                              <Edit2 size={12} />
+                            </button>
+                            {!isOwner && (
+                              <button
+                                onClick={() => {
+                                  setStaffToRemove(member);
+                                  setRemoveError(null);
+                                }}
+                                title="Remover profissional"
+                                className="w-8 h-8 rounded-lg bg-red-500/10 hover:bg-red-500/20 active:scale-95 flex items-center justify-center text-red-500 transition-all"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
                           </div>
                         </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
-                        <div className="flex items-center gap-2 self-end sm:self-center">
-                          <button
-                            onClick={() => openAvailabilityForm(member)}
-                            className="flex items-center gap-1 py-1.5 px-3 rounded-lg bg-secondary/10 hover:bg-secondary/20 active:scale-95 text-[11px] font-bold text-secondary border border-secondary/15 transition-all"
-                          >
-                            <Clock size={12} />
-                            <span>Horários</span>
-                          </button>
-                          <button
-                            onClick={() => openEditForm(member)}
-                            className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-white"
-                          >
-                            <Edit2 size={12} />
-                          </button>
-                          {!isOwner && (
+              {/* Seção 2: Inativos ou Removidos */}
+              {inactiveStaffList.length > 0 && (
+                <div className="pt-4 border-t border-white/10 space-y-3">
+                  <div>
+                    <span className="text-[10px] font-black text-red-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <AlertTriangle size={12} />
+                      Inativos ou Removidos ({inactiveStaffList.length})
+                    </span>
+                    <p className="text-[11px] text-title/70 mt-0.5">
+                      Estes profissionais estão fora da agenda ativa. Atendimentos passados e comissões continuam preservados.
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    {inactiveStaffList.map((member) => {
+                      const isReactivating = reactivatingStaffId === member.id;
+                      const memberPhoto = member.photo;
+
+                      return (
+                        <div 
+                          key={member.id}
+                          className="bg-white/[0.02] border border-white/5 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 opacity-80 hover:opacity-100 transition-opacity"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-11 h-11 rounded-full bg-white/10 text-white/50 flex items-center justify-center font-bold text-base shrink-0 overflow-hidden border border-white/10 grayscale">
+                              {memberPhoto ? (
+                                <img src={memberPhoto} alt={member.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              ) : (
+                                member.name.substring(0, 2).toUpperCase()
+                              )}
+                            </div>
+                            <div>
+                              <h4 className="text-sm font-bold text-white/80 flex flex-wrap items-center gap-2">
+                                <span>{member.name}</span>
+                                <span className="bg-red-500/10 text-red-400 border border-red-500/20 text-[10px] font-black uppercase px-2 py-0.5 rounded-full">
+                                  Inativo
+                                </span>
+                              </h4>
+                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-xs text-title/70">
+                                <span>{member.commissionRate}% de comissão</span>
+                                {member.phone && (
+                                  <span>{formatPhone(member.phone)}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 self-end sm:self-center">
                             <button
-                              onClick={() => {
-                                setStaffToRemove(member);
-                                setRemoveError(null);
-                              }}
-                              title="Remover profissional"
-                              className="w-8 h-8 rounded-lg bg-red-500/10 hover:bg-red-500/20 active:scale-95 flex items-center justify-center text-red-500 transition-all"
+                              onClick={() => handleReactivateStaff(member)}
+                              disabled={isReactivating}
+                              className="flex items-center gap-1.5 py-1.5 px-3 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 active:scale-95 text-[11px] font-bold text-emerald-300 border border-emerald-500/20 transition-all disabled:opacity-50"
+                              title="Reativar profissional na barbearia"
                             >
-                              <Trash2 size={12} />
+                              <RotateCcw size={12} className={isReactivating ? 'animate-spin' : ''} />
+                              <span>{isReactivating ? 'Reativando...' : 'Reativar'}</span>
                             </button>
-                          )}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -681,15 +855,21 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
               </div>
 
             {selectedStaffMember && (
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-title uppercase tracking-wider">Status do Profissional</label>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-title uppercase tracking-wider">Status do Profissional</label>
+                {isOwnerMember(selectedStaffMember) ? (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2">
+                    <Shield size={14} className="text-amber-400 shrink-0" />
+                    <span>O proprietário da barbearia é sempre ativo e não pode ser inativado.</span>
+                  </div>
+                ) : (
                   <div className="grid grid-cols-2 gap-3">
                     <button
                       type="button"
                       onClick={() => setStatus('active')}
                       className={`py-3 rounded-xl font-bold text-xs border transition-all ${
                         status === 'active' 
-                          ? 'bg-primary/20 border-primary text-white' 
+                          ? 'bg-primary/20 border-primary text-white shadow-lg shadow-primary/10 ring-1 ring-primary/40' 
                           : 'bg-black/10 border-white/5 text-title hover:bg-black/20'
                       }`}
                     >
@@ -700,91 +880,100 @@ export const StaffConfigModal: React.FC<StaffConfigModalProps> = ({ onClose }) =
                       onClick={() => setStatus('inactive')}
                       className={`py-3 rounded-xl font-bold text-xs border transition-all ${
                         status === 'inactive' 
-                          ? 'bg-red-500/20 border-red-500 text-white' 
+                          ? 'bg-red-500/20 border-red-500 text-white shadow-lg shadow-red-500/10 ring-1 ring-red-500/40' 
                           : 'bg-black/10 border-white/5 text-title hover:bg-black/20'
                       }`}
                     >
                       Inativo (Bloqueia Agenda)
                     </button>
                   </div>
-                </div>
-              )}
-
-              <div className="pt-4 flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFormError(null);
-                    setView('list');
-                  }}
-                  className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-white/5 hover:bg-white/10 active:scale-95 transition-all border border-white/5"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-primary hover:bg-primary/95 active:scale-95 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
-                >
-                  <Save size={16} />
-                  <span>{isSubmitting ? 'Salvando...' : 'Salvar Dados'}</span>
-                </button>
+                )}
               </div>
-            </form>
-          )}
+            )}
 
-        </div>
-      </motion.div>
-
-      {/* MODAL DE CONFIRMAÇÃO DE REMOÇÃO DE PROFISSIONAL */}
-      <AnimatePresence>
-        {staffToRemove && (
-          <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/70 backdrop-blur-md p-4">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-[#1E1B4B] w-full max-w-md rounded-[2rem] p-6 shadow-2xl border border-white/15 text-left space-y-4"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-2xl bg-red-500/20 text-red-400 flex items-center justify-center shrink-0 border border-red-500/30">
-                  <AlertTriangle size={24} />
-                </div>
-                <div>
-                  <h3 className="text-base font-black text-white uppercase tracking-tight">Remover Profissional</h3>
-                  <p className="text-xs text-white/60 font-medium">Revogar acesso à barbearia</p>
-                </div>
+            {formError && (
+              <div className="p-3.5 rounded-xl bg-red-500/15 border border-red-500/30 text-red-200 text-xs flex items-start gap-2.5 animate-in fade-in">
+                <AlertCircle size={16} className="text-red-400 shrink-0 mt-0.5" />
+                <span className="leading-relaxed font-medium">{formError}</span>
               </div>
+            )}
 
-              <div className="p-4 rounded-2xl bg-white/5 border border-white/10 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-secondary/20 flex items-center justify-center font-bold text-secondary text-sm overflow-hidden shrink-0">
-                  {staffToRemove.photo ? (
-                    <img src={staffToRemove.photo} alt={staffToRemove.name} className="w-full h-full object-cover" />
-                  ) : (
-                    staffToRemove.name.substring(0, 2).toUpperCase()
-                  )}
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-bold text-white truncate">{staffToRemove.name}</p>
-                  <p className="text-xs text-title/70">{staffToRemove.phone || 'Sem telefone'}</p>
-                </div>
+            <div className="pt-4 flex gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setFormError(null);
+                  setView('list');
+                }}
+                className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-white/5 hover:bg-white/10 active:scale-95 transition-all border border-white/5"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="flex-1 py-3.5 rounded-xl text-white font-bold text-sm bg-primary hover:bg-primary/95 active:scale-95 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+              >
+                <Save size={16} />
+                <span>{isSubmitting ? 'Salvando...' : 'Salvar Dados'}</span>
+              </button>
+            </div>
+          </form>
+        )}
+
+      </div>
+    </motion.div>
+
+    {/* MODAL DE CONFIRMAÇÃO DE REMOÇÃO DE PROFISSIONAL */}
+    <AnimatePresence>
+      {staffToRemove && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/70 backdrop-blur-md p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="bg-[#1E1B4B] w-full max-w-md rounded-[2rem] p-6 shadow-2xl border border-white/15 text-left space-y-4"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-red-500/20 text-red-400 flex items-center justify-center shrink-0 border border-red-500/30">
+                <AlertTriangle size={24} />
               </div>
+              <div>
+                <h3 className="text-base font-black text-white uppercase tracking-tight">Remover Profissional</h3>
+                <p className="text-xs text-white/60 font-medium">Revogar acesso à barbearia</p>
+              </div>
+            </div>
 
-              <p className="text-sm text-gray-300 leading-relaxed">
-                Este profissional perderá o acesso a esta barbearia. O histórico, atendimentos e comissões serão mantidos. Agendamentos futuros precisarão ser tratados separadamente.
+            <div className="p-4 rounded-2xl bg-white/5 border border-white/10 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-secondary/20 flex items-center justify-center font-bold text-secondary text-sm overflow-hidden shrink-0">
+                {staffToRemove.photo ? (
+                  <img src={staffToRemove.photo} alt={staffToRemove.name} className="w-full h-full object-cover" />
+                ) : (
+                  staffToRemove.name.substring(0, 2).toUpperCase()
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-white truncate">{staffToRemove.name}</p>
+                <p className="text-xs text-title/70">{staffToRemove.phone || 'Sem telefone'}</p>
+              </div>
+            </div>
+
+            <p className="text-sm text-gray-300 leading-relaxed">
+              Este profissional perderá o acesso a esta barbearia. O histórico, atendimentos e comissões serão mantidos. Agendamentos futuros precisarão ser tratados separadamente.
+            </p>
+
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs space-y-1">
+              <p className="font-bold flex items-center gap-1.5 text-amber-300">
+                <AlertTriangle size={14} />
+                O que acontece com os dados:
               </p>
-
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs space-y-1">
-                <p className="font-bold flex items-center gap-1.5 text-amber-300">
-                  <AlertTriangle size={14} />
-                  O que acontece com os dados:
-                </p>
-                <ul className="list-disc list-inside text-[11px] text-white/80 space-y-0.5">
-                  <li>O profissional não aparecerá mais para novos agendamentos</li>
-                  <li>Atendimentos anteriores continuam no histórico e no caixa</li>
-                  <li>A conta de usuário do profissional permanece preservada</li>
-                </ul>
-              </div>
+              <ul className="list-disc list-inside text-[11px] text-white/80 space-y-0.5">
+                <li>O profissional será transferido para a seção &quot;Inativos ou Removidos&quot;</li>
+                <li>Não receberá novos agendamentos nesta barbearia</li>
+                <li>Atendimentos anteriores e comissões continuam no histórico e no caixa</li>
+                <li>A conta de login permanece intacta e pode ser reativada a qualquer momento</li>
+              </ul>
+            </div>
 
               {removeError && (
                 <div className="p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-200 text-xs font-medium">

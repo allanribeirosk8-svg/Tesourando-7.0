@@ -54,6 +54,82 @@ function handleNetworkError(methodName: string, err: any, fallbackValue: any) {
   return fallbackValue;
 }
 
+function timeStrToMinutes(t: string): number {
+  const norm = normalizeTime(t);
+  if (norm === '24:00') return 24 * 60;
+  const [h, m] = norm.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function minutesToTimeStr(mins: number): string {
+  if (mins >= 24 * 60) return '24:00';
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+export function mergeBreakSlotsToIntervals(slots: string[]): Array<{ start_time: string; end_time: string }> {
+  if (!slots || slots.length === 0) return [];
+  const sortedMins = Array.from(
+    new Set(
+      slots
+        .map(s => normalizeTime(s))
+        .filter(Boolean)
+        .map(timeStrToMinutes)
+    )
+  ).sort((a, b) => a - b);
+
+  if (sortedMins.length === 0) return [];
+
+  const intervals: Array<{ start_time: string; end_time: string }> = [];
+  let curStart = sortedMins[0];
+  let curEnd = sortedMins[0] + 30;
+
+  for (let i = 1; i < sortedMins.length; i++) {
+    const m = sortedMins[i];
+    if (m <= curEnd) {
+      curEnd = Math.max(curEnd, m + 30);
+    } else {
+      intervals.push({
+        start_time: minutesToTimeStr(curStart),
+        end_time: minutesToTimeStr(curEnd)
+      });
+      curStart = m;
+      curEnd = m + 30;
+    }
+  }
+
+  intervals.push({
+    start_time: minutesToTimeStr(curStart),
+    end_time: minutesToTimeStr(curEnd)
+  });
+
+  return intervals;
+}
+
+export function expandBreakRowToSlots(row: { time?: string | null; start_time?: string | null; end_time?: string | null }): string[] {
+  const rawStart = row.start_time || row.time;
+  if (!rawStart) return [];
+  const normStart = normalizeTime(rawStart);
+  if (!normStart) return [];
+
+  if (row.end_time) {
+    const normEnd = row.end_time.startsWith('24:00') ? '24:00' : normalizeTime(row.end_time);
+    const startMins = timeStrToMinutes(normStart);
+    const endMins = timeStrToMinutes(normEnd);
+    if (endMins > startMins && endMins - startMins <= 24 * 60) {
+      const slots: string[] = [];
+      for (let m = startMins; m < endMins; m += 30) {
+        slots.push(minutesToTimeStr(m));
+      }
+      return slots;
+    }
+  }
+
+  return [normStart];
+}
+
+
 // Define database types to fix lint errors
 export const supabaseService = {
   // Helper to get current user ID
@@ -94,6 +170,35 @@ export const supabaseService = {
   },
 
   // Profiles
+  async getUserProfile(userId?: string): Promise<BarberProfile | null> {
+    try {
+      const idToUse = userId || await this.getUserId();
+      if (!idToUse) return null;
+
+      const { data, error } = await supabase.from('profiles').select('*').eq('id', idToUse).maybeSingle();
+      if (error || !data) return null;
+
+      isNetworkOffline = false;
+      const d = data as any;
+      return {
+        name: d.name || '',
+        personalPhone: d.personal_phone || '',
+        photo: d.photo || '',
+        shopName: d.shop_name || 'Meu Corte',
+        businessPhone: d.business_phone || '',
+        address: d.address || '',
+        logo: d.logo || '',
+        description: d.description || '',
+        instagram: d.instagram || '',
+        website: d.website || '',
+        onboarding_seen: !!d.onboarding_seen,
+        slug: d.slug || ''
+      };
+    } catch (err: any) {
+      return handleNetworkError('getUserProfile', err, null);
+    }
+  },
+
   async getProfile(targetUserIdOrShopId?: string) {
     try {
       const idToUse = targetUserIdOrShopId || await this.getUserId();
@@ -733,6 +838,9 @@ export const supabaseService = {
           duration: a.duration,
           status: a.status,
           observation: a.observation,
+          isExceptional: !!a.is_exceptional,
+          exceptionalBy: a.exceptional_by ?? null,
+          exceptionalAt: a.exceptional_at ?? null,
           createdAt: new Date(a.created_at).getTime()
         } as Appointment;
       });
@@ -789,6 +897,9 @@ export const supabaseService = {
           duration: a.duration,
           status: a.status,
           observation: a.observation,
+          isExceptional: !!a.is_exceptional,
+          exceptionalBy: a.exceptional_by ?? null,
+          exceptionalAt: a.exceptional_at ?? null,
           createdAt: new Date(a.created_at).getTime()
         } as Appointment;
       });
@@ -1147,16 +1258,20 @@ export const supabaseService = {
       throw new Error(`[saveAppointment] Profissional (staff_id) obrigatório não fornecido ou não encontrado.`);
     }
 
-    // Validar se effectiveStaffId é um staff_profiles.id real pertencente a este barbershop_id
+    // Validar se effectiveStaffId é um staff_profiles.id real pertencente a este barbershop_id e está ATIVO
     const { data: staffRow, error: staffErr } = await supabase
       .from('staff_profiles')
-      .select('id, barbershop_id')
+      .select('id, barbershop_id, status')
       .or(`id.eq.${effectiveStaffId},user_id.eq.${effectiveStaffId}`)
       .eq('barbershop_id', barbershopId)
       .maybeSingle();
 
     if (staffErr || !staffRow) {
       throw new Error(`[saveAppointment] Profissional id="${effectiveStaffId}" não é um staff_profiles válido da barbearia ${barbershopId}.`);
+    }
+
+    if (staffRow.status === 'inactive') {
+      throw new Error(`[saveAppointment] Não é permitido agendar para um profissional inativo.`);
     }
 
     effectiveStaffId = staffRow.id;
@@ -1176,7 +1291,8 @@ export const supabaseService = {
       price: appointment.price,
       duration: appointment.duration,
       status: appointment.status,
-      observation: appointment.observation
+      observation: appointment.observation,
+      is_exceptional: appointment.isExceptional === true
     };
 
     if (isUUID(appointment.id)) {
@@ -1203,6 +1319,9 @@ export const supabaseService = {
       duration: a.duration,
       status: a.status,
       observation: a.observation,
+      isExceptional: !!a.is_exceptional,
+      exceptionalBy: a.exceptional_by ?? null,
+      exceptionalAt: a.exceptional_at ?? null,
       createdAt: new Date(a.created_at).getTime()
     } as Appointment;
   },
@@ -1236,15 +1355,19 @@ export const supabaseService = {
       const { data: breaks, error: bError } = await supabase
         .from('weekly_breaks')
         .select('*')
-        .eq('barbershop_id', barbershopId);
+        .eq('barbershop_id', barbershopId)
+        .is('staff_id', null);
       if (sError || bError) throw sError || bError;
+
+      const allBreaks = (breaks as any[]) || [];
 
       const result: Record<number, DayConfig> = {};
       (schedule as any[])?.forEach(s => {
-        const dayBreaks = (breaks as any[])
-          ?.filter(b => b.day_of_week === s.day_of_week)
-          .map(b => normalizeTime(b.time)) || [];
-        const uniqueDayBreaks = Array.from(new Set(dayBreaks.filter(Boolean)));
+        const dayBreaks = allBreaks
+          .filter(b => b.day_of_week === s.day_of_week && b.staff_id == null)
+          .flatMap(b => expandBreakRowToSlots(b))
+          .filter(Boolean);
+        const uniqueDayBreaks = Array.from(new Set(dayBreaks));
 
         result[s.day_of_week] = {
           start: normalizeTime(s.start_time),
@@ -1275,8 +1398,18 @@ export const supabaseService = {
       throw new Error('Barbershop ID obrigatório para salvar agenda semanal.');
     }
 
+    // Verificar se já existe registro em weekly_schedule para preservar o user_id pai (evitando conflito com FK legada)
+    const { data: existingRow } = await supabase
+      .from('weekly_schedule')
+      .select('id, user_id')
+      .eq('barbershop_id', barbershopId)
+      .eq('day_of_week', day)
+      .maybeSingle();
+
+    const effectiveUserId = existingRow?.user_id || userId;
+
     const payload: any = {
-      user_id: userId,
+      user_id: effectiveUserId,
       barbershop_id: barbershopId,
       day_of_week: day,
       start_time: normalizeTime(config.start),
@@ -1284,45 +1417,56 @@ export const supabaseService = {
       is_open: config.isOpen
     };
 
-    const { error } = await supabase.from('weekly_schedule').upsert(payload as any).select();
-    
-    if (error) throw error;
+    if (existingRow?.id) {
+      const { error: updErr } = await supabase
+        .from('weekly_schedule')
+        .update(payload as any)
+        .eq('id', existingRow.id);
+      if (updErr) throw updErr;
+    } else {
+      const { error } = await supabase
+        .from('weekly_schedule')
+        .upsert(payload as any, { onConflict: 'barbershop_id,day_of_week' })
+        .select();
 
-    // Handle breaks - deduplicate and normalize
-    const rawBreaks = config.breaks || [];
-    const uniqueBreaks = Array.from(
-      new Set(rawBreaks.map(time => normalizeTime(time)).filter(Boolean))
-    );
+      if (error) {
+        const { error: insErr } = await supabase
+          .from('weekly_schedule')
+          .insert(payload as any);
+        if (insErr) throw insErr;
+      }
+    }
 
-    // Delete existing breaks for this day and barbershop
+    // Handle breaks - deduplicate, normalize, and merge contiguous 30-min blocks into clean intervals
+    const rawBreaks = config.isOpen ? (config.breaks || []) : [];
+    const mergedIntervals = mergeBreakSlotsToIntervals(rawBreaks);
+
+    // Delete existing general breaks for this day and barbershop
     const { error: delError } = await supabase
       .from('weekly_breaks')
       .delete()
       .eq('day_of_week', day)
-      .eq('barbershop_id', barbershopId);
+      .eq('barbershop_id', barbershopId)
+      .is('staff_id', null);
     if (delError) {
       console.warn('[saveWeeklySchedule] Aviso ao limpar breaks anteriores:', delError);
     }
 
-    if (uniqueBreaks.length > 0) {
-      const breakPayloads = uniqueBreaks.map(time => ({
-        user_id: userId,
+    if (mergedIntervals.length > 0) {
+      const breakPayloads = mergedIntervals.map(interval => ({
+        user_id: effectiveUserId,
         barbershop_id: barbershopId,
         staff_id: null,
         day_of_week: day,
-        time: normalizeTime(time)
+        time: interval.start_time,
+        start_time: interval.start_time,
+        end_time: interval.end_time
       }));
 
-      const { error: bError } = await supabase
-        .from('weekly_breaks')
-        .upsert(breakPayloads as any, { onConflict: 'day_of_week,time,barbershop_id', ignoreDuplicates: true });
-      
-      if (bError && (bError as any).code !== '23505') {
-        const { error: insertErr } = await supabase.from('weekly_breaks').insert(breakPayloads as any);
-        if (insertErr && (insertErr as any).code !== '23505') {
-          console.error('[saveWeeklySchedule] Erro ao inserir breaks semanais:', insertErr);
-          throw insertErr;
-        }
+      const { error: insertErr } = await supabase.from('weekly_breaks').insert(breakPayloads as any);
+      if (insertErr && (insertErr as any).code !== '23505') {
+        console.error('[saveWeeklySchedule] Erro ao inserir breaks semanais:', insertErr);
+        throw insertErr;
       }
     }
   },
@@ -1621,13 +1765,89 @@ export const supabaseService = {
     }
   },
 
+  async updateStaffProfileByAdminOwner(params: {
+    barbershopId: string;
+    staffProfileId: string;
+    name: string;
+    phone?: string;
+    photo?: string | null;
+    commissionRate: number;
+    status: 'active' | 'inactive';
+  }): Promise<any> {
+    const { barbershopId, staffProfileId, name, phone, photo, commissionRate, status } = params;
+
+    if (!barbershopId) {
+      throw new Error('Identificador da barbearia (barbershopId) é obrigatório.');
+    }
+    if (!staffProfileId) {
+      throw new Error('Identificador do perfil do profissional (staffProfileId) é obrigatório.');
+    }
+    if (!name || !name.trim()) {
+      throw new Error('Nome do profissional é obrigatório.');
+    }
+
+    const commRateNum = Number(commissionRate);
+    if (!Number.isFinite(commRateNum) || commRateNum < 0 || commRateNum > 100) {
+      throw new Error('Taxa de comissão inválida (deve estar entre 0 e 100).');
+    }
+
+    if (status !== 'active' && status !== 'inactive') {
+      throw new Error('Status inválido. Permitido apenas "active" ou "inactive".');
+    }
+
+    const rpcPayload = {
+      p_barbershop_id: barbershopId,
+      p_staff_profile_id: staffProfileId,
+      p_name: name.trim(),
+      p_phone: phone !== undefined ? phone.trim() : null,
+      p_photo: photo !== undefined ? (photo || null) : null,
+      p_commission_rate: commRateNum,
+      p_status: status
+    };
+
+    const { data, error } = await supabase.rpc('update_staff_profile_by_admin_owner', rpcPayload);
+
+    if (error) {
+      console.error('[updateStaffProfileByAdminOwner] Erro retornado pela RPC:', error);
+      throw error;
+    }
+
+    if (!data) {
+      throw new Error('A operação não retornou dados do profissional atualizado.');
+    }
+
+    return data;
+  },
+
+  async updateMyStaffProfile(params: {
+    barbershopId: string;
+    name?: string;
+    phone?: string;
+    photo?: string | null;
+  }): Promise<any> {
+    const { barbershopId, name, phone, photo } = params;
+    const rpcPayload = {
+      p_barbershop_id: barbershopId,
+      p_name: name ? name.trim() : null,
+      p_phone: phone !== undefined ? phone.trim() : null,
+      p_photo: photo !== undefined ? (photo || null) : null
+    };
+
+    const { data, error } = await supabase.rpc('update_my_staff_profile', rpcPayload);
+    if (error) {
+      console.error('[updateMyStaffProfile] Erro retornado pela RPC:', error);
+      throw error;
+    }
+    return data;
+  },
+
   async saveStaff(staff: Omit<Staff, 'id' | 'tenantId' | 'role'> & { id?: string; tenantId?: string; role?: MembershipRole | 'admin_owner'; barbershopId?: string }) {
     const { role } = await this.getUserRoleAndTenant();
     const currentUserId = await this.getUserId();
     const isSelf = !!(currentUserId && (staff.userId === currentUserId || staff.id === currentUserId));
 
-    if (role !== 'admin_owner' && !isSelf) {
-      throw new Error('Apenas o proprietário do salão (admin_owner) pode gerenciar ou salvar equipe.');
+    if (role !== 'admin_owner' && role !== 'admin' && !isSelf) {
+      throw new Error('Apenas o proprietário ou administradores podem gerenciar ou salvar equipe.');
     }
 
     // Resolver barbershopId real
@@ -1651,110 +1871,49 @@ export const supabaseService = {
       throw new Error('Contexto da barbearia (barbershop_id) não encontrado.');
     }
 
-    const { data: shop } = await supabase
-      .from('barbershops')
-      .select('id, owner_id')
-      .eq('id', barbershopId)
-      .maybeSingle();
+    if (!staff.id) {
+      throw new Error('Para cadastrar novos colaboradores com login, utilize o fluxo createStaffDirectly.');
+    }
 
     const staffRole = staff.role === 'admin' || staff.role === 'owner' || (staff.role as any) === 'admin_owner' ? 'admin' : 'staff';
     let resultData: any = null;
 
-    if (role === 'admin_owner' && !isSelf) {
-      const staffId = staff.id || crypto.randomUUID();
-      const payload: any = {
-        id: staffId,
-        barbershop_id: barbershopId,
-        user_id: staff.userId || null,
+    if (isSelf && role === 'staff') {
+      // Funcionário comum atualizando seus próprios dados pessoais
+      resultData = await this.updateMyStaffProfile({
+        barbershopId,
         name: staff.name,
-        phone: staff.phone || '',
-        photo: staff.photo !== undefined ? (staff.photo || null) : null,
-        status: staff.status || 'active',
-        commission_rate: staff.commissionRate !== undefined ? Number(staff.commissionRate) : 0
-      };
+        phone: staff.phone,
+        photo: staff.photo
+      });
+    } else {
+      // Admin ou Owner atualizando perfil de profissional via RPC autorizada
+      const commRate = staff.commissionRate !== undefined && Number.isFinite(Number(staff.commissionRate))
+        ? Number(staff.commissionRate)
+        : 0;
 
-      const { data, error } = await supabase
-        .from('staff_profiles')
-        .upsert(payload)
-        .select()
-        .single();
+      resultData = await this.updateStaffProfileByAdminOwner({
+        barbershopId,
+        staffProfileId: staff.id,
+        name: staff.name,
+        phone: staff.phone,
+        photo: staff.photo,
+        commissionRate: commRate,
+        status: staff.status || 'active'
+      });
 
-      if (error) {
-        console.error('[saveStaff] Erro ao fazer upsert em staff_profiles:', error);
-        throw error;
-      }
-      resultData = data;
-
-      // Sincronizar role em barbershop_members se houver user_id
-      if (staff.userId) {
+      // Se houver alteração de papel administrativo para o usuário
+      if (staff.userId && staff.role && (staff.role === 'staff' || staff.role === 'admin')) {
         try {
-          const { data: existingMember } = await supabase
-            .from('barbershop_members')
-            .select('id, role')
-            .eq('barbershop_id', barbershopId)
-            .eq('user_id', staff.userId)
-            .maybeSingle();
-
-          if (existingMember) {
-            if (existingMember.role !== 'owner' && existingMember.role !== staffRole) {
-              await supabase
-                .from('barbershop_members')
-                .update({ role: staffRole })
-                .eq('barbershop_id', barbershopId)
-                .eq('user_id', staff.userId);
-            }
-          } else {
-            await supabase
-              .from('barbershop_members')
-              .insert({
-                barbershop_id: barbershopId,
-                user_id: staff.userId,
-                role: staffRole
-              });
-          }
-        } catch (memberErr) {
-          console.warn('[saveStaff] Aviso ao sincronizar papel em barbershop_members:', memberErr);
+          await supabase.rpc('change_member_role', {
+            p_barbershop_id: barbershopId,
+            p_target_user_id: staff.userId,
+            p_new_role: staff.role
+          });
+        } catch (roleErr) {
+          console.warn('[saveStaff] Aviso ao atualizar papel do membro via RPC:', roleErr);
         }
       }
-    } else if (currentUserId) {
-      // Fluxo restrito: funcionário atualizando a própria foto
-      const userId = currentUserId;
-      if (staff.userId && staff.userId !== userId) {
-        throw new Error('Operação não permitida: user_id não corresponde ao funcionário autenticado');
-      }
-
-      let staffProfileId = staff.id;
-      const { data: existingStaffRow } = await supabase
-        .from('staff_profiles')
-        .select('id, user_id, barbershop_id')
-        .eq('user_id', userId)
-        .maybeSingle();
-
-      if (existingStaffRow) {
-        staffProfileId = existingStaffRow.id;
-      }
-
-      if (!staffProfileId) {
-        throw new Error('staff_profile id não encontrado para o funcionário');
-      }
-
-      const photoValue = staff.photo !== undefined ? (staff.photo || null) : null;
-      const updatePayload = { photo: photoValue };
-
-      const { data, error } = await supabase
-        .from('staff_profiles')
-        .update(updatePayload)
-        .eq('id', staffProfileId)
-        .eq('user_id', userId)
-        .eq('barbershop_id', barbershopId)
-        .select()
-        .single();
-
-      if (error) {
-        console.error('[saveStaff_self_photo] Erro ao atualizar foto:', error);
-        throw error;
-      }
-      resultData = data;
     }
 
     if (!resultData) {
@@ -1762,15 +1921,15 @@ export const supabaseService = {
     }
 
     return {
-      id: resultData.id,
+      id: resultData.id || staff.id,
       tenantId: resultData.barbershop_id || barbershopId,
       barbershopId: resultData.barbershop_id || barbershopId,
-      userId: resultData.user_id,
-      name: resultData.name,
-      phone: resultData.phone || '',
-      photo: resultData.photo || null,
-      status: resultData.status || 'active',
-      commissionRate: Number(resultData.commission_rate || 0),
+      userId: resultData.user_id || staff.userId,
+      name: resultData.name || staff.name,
+      phone: resultData.phone ?? staff.phone ?? '',
+      photo: resultData.photo ?? staff.photo ?? null,
+      status: resultData.status || staff.status || 'active',
+      commissionRate: Number(resultData.commission_rate ?? staff.commissionRate ?? 0),
       role: staffRole
     };
   },
@@ -1789,85 +1948,100 @@ export const supabaseService = {
       throw new Error('Usuário não autenticado.');
     }
 
-    if (!barbershopId) {
+    let resolvedBarbershopId = barbershopId;
+    if (!resolvedBarbershopId) {
+      const bs = await this.getBarbershop();
+      resolvedBarbershopId = bs?.id || '';
+    }
+
+    if (!resolvedBarbershopId) {
       throw new Error('Identificador da barbearia (barbershopId) é obrigatório.');
     }
 
-    // 1. Validar se o solicitante é owner ou admin autorizado desta barbearia
-    const { data: bs, error: bsErr } = await supabase
-      .from('barbershops')
-      .select('id, owner_id')
-      .eq('id', barbershopId)
-      .maybeSingle();
-
-    if (bsErr) {
-      throw new Error(`Erro ao verificar barbearia: ${bsErr.message}`);
+    if (!staffProfileId) {
+      throw new Error('Identificador do perfil do profissional (staffProfileId) é obrigatório.');
     }
 
-    let isAuthorized = bs?.owner_id === currentUserId;
-    if (!isAuthorized) {
-      const { data: memberRow, error: memberErr } = await supabase
-        .from('barbershop_members')
-        .select('role')
-        .eq('barbershop_id', barbershopId)
-        .eq('user_id', currentUserId)
-        .maybeSingle();
+    // Chamar a RPC segura remove_staff_from_barbershop
+    const { data, error } = await supabase.rpc('remove_staff_from_barbershop', {
+      p_barbershop_id: resolvedBarbershopId,
+      p_staff_profile_id: staffProfileId,
+      p_staff_user_id: staffUserId || null
+    });
 
-      if (!memberErr && memberRow && (memberRow.role === 'owner' || memberRow.role === 'admin')) {
-        isAuthorized = true;
-      }
+    if (error) {
+      console.error('[removeStaffFromBarbershop] Erro retornado pela RPC:', error);
+      throw error;
     }
 
-    if (!isAuthorized) {
-      throw new Error('Apenas o proprietário ou administradores podem desvincular profissionais desta barbearia.');
+    if (!data || data.success !== true) {
+      throw new Error(data?.message || 'Falha ao desvincular profissional da barbearia.');
     }
 
-    // 2. Definir staff_profiles.status = 'inactive'
-    // Preserva o histórico operacional, atendimentos passados e comissões
-    const { error: updateErr } = await supabase
-      .from('staff_profiles')
-      .update({ status: 'inactive' })
-      .eq('id', staffProfileId);
+    console.info(`[removeStaffFromBarbershop] Profissional ${staffProfileId} desvinculado com sucesso da barbearia ${resolvedBarbershopId}.`);
+  },
 
-    if (updateErr) {
-      console.error('[removeStaffFromBarbershop] Erro ao desativar registro de staff:', updateErr);
-      throw new Error(`Falha ao desativar o profissional: ${updateErr.message}`);
+  async reactivateStaff({
+    staffProfileId,
+    barbershopId
+  }: {
+    staffProfileId: string;
+    barbershopId: string;
+  }): Promise<void> {
+    const currentUserId = await this.getUserId();
+    if (!currentUserId) {
+      throw new Error('Usuário não autenticado.');
     }
 
-    // 3. Remover ou revogar SOMENTE o membership desta barbearia específica
-    if (staffUserId) {
-      const { error: memberDelErr } = await supabase
-        .from('barbershop_members')
-        .delete()
-        .eq('barbershop_id', barbershopId)
-        .eq('user_id', staffUserId);
-
-      if (memberDelErr) {
-        console.error('[removeStaffFromBarbershop] Erro ao revogar membership da barbearia:', memberDelErr);
-        throw new Error(`Falha ao revogar vínculo de acesso do membro: ${memberDelErr.message}`);
-      }
+    let resolvedBarbershopId = barbershopId;
+    if (!resolvedBarbershopId) {
+      const bs = await this.getBarbershop();
+      resolvedBarbershopId = bs?.id || '';
     }
 
-    // Preservar: auth.users, profiles, staff_profiles, appointments, transactions.
-    console.info(`[removeStaffFromBarbershop] Profissional ${staffProfileId} desvinculado com sucesso da barbearia ${barbershopId}.`);
+    if (!resolvedBarbershopId) {
+      throw new Error('Identificador da barbearia (barbershopId) é obrigatório.');
+    }
+
+    if (!staffProfileId) {
+      throw new Error('Identificador do perfil do profissional (staffProfileId) é obrigatório.');
+    }
+
+    // Chamar a RPC segura reactivate_staff
+    const { data, error } = await supabase.rpc('reactivate_staff', {
+      p_barbershop_id: resolvedBarbershopId,
+      p_staff_profile_id: staffProfileId
+    });
+
+    if (error) {
+      console.error('[reactivateStaff] Erro retornado pela RPC:', error);
+      throw error;
+    }
+
+    if (!data || data.success !== true) {
+      throw new Error(data?.message || 'Falha ao reativar profissional na barbearia.');
+    }
+
+    console.info(`[reactivateStaff] Profissional ${staffProfileId} reativado com sucesso na barbearia ${resolvedBarbershopId}.`);
   },
 
   async deleteStaff(id: string, barbershopId?: string) {
-    // Buscar registro do staff para obter barbershopId e userId
-    const { data: staffData } = await supabase
-      .from('staff_profiles')
-      .select('id, user_id, barbershop_id')
-      .eq('id', id)
-      .maybeSingle();
+    let targetShopId = barbershopId;
+    if (!targetShopId) {
+      const { data: staffData } = await supabase
+        .from('staff_profiles')
+        .select('id, user_id, barbershop_id')
+        .eq('id', id)
+        .maybeSingle();
+      targetShopId = staffData?.barbershop_id || (await this.getBarbershop())?.id;
+    }
 
-    const targetShopId = barbershopId || staffData?.barbershop_id;
     if (!targetShopId) {
       throw new Error('Não foi possível identificar a barbearia deste profissional para desvinculá-lo.');
     }
 
     await this.removeStaffFromBarbershop({
       staffProfileId: id,
-      staffUserId: staffData?.user_id,
       barbershopId: targetShopId
     });
   },
@@ -2131,11 +2305,11 @@ export const supabaseService = {
     }
   },
 
-  async getUserRoleAndTenant(): Promise<{ role: 'admin_owner' | 'staff' | 'client'; tenantId: string | null; userId: string | null }> {
+  async getUserRoleAndTenant(): Promise<{ role: 'admin_owner' | 'staff' | 'client'; tenantId: string | null; userId: string | null; barbershopId: string | null }> {
     try {
       const userId = await this.getUserId();
       if (!userId) {
-        return { role: 'client', tenantId: null, userId: null };
+        return { role: 'client', tenantId: null, userId: null, barbershopId: null };
       }
 
       // 1. Tenta buscar nas novas tabelas de membros da barbearia
@@ -2148,19 +2322,20 @@ export const supabaseService = {
         const memberData = members[0];
         const role = (memberData as any).role === 'owner' ? 'admin_owner' : 'staff';
         const ownerId = (memberData as any).barbershops?.owner_id || userId;
-        return { role, tenantId: ownerId, userId };
+        const bId = (memberData as any).barbershop_id || null;
+        return { role, tenantId: bId || ownerId, userId, barbershopId: bId };
       }
 
       // Fallback legado
       const tenantId = await this.getTenantIdForUser(userId);
       if (tenantId === userId) {
-        return { role: 'admin_owner', tenantId, userId };
+        return { role: 'admin_owner', tenantId, userId, barbershopId: tenantId };
       } else {
-        return { role: 'staff', tenantId, userId };
+        return { role: 'staff', tenantId, userId, barbershopId: tenantId };
       }
     } catch (err) {
       console.warn('[getUserRoleAndTenant] Erro ao obter papel:', err);
-      return { role: 'client', tenantId: null, userId: null };
+      return { role: 'client', tenantId: null, userId: null, barbershopId: null };
     }
   },
 
@@ -2168,99 +2343,118 @@ export const supabaseService = {
     try {
       const { barbershopId } = await this.getUserRoleAndTenant();
       
-      // 1. Prioritize reading from weekly_schedule and weekly_breaks by staff_id & barbershop_id
-      let scheduleQuery = supabase.from('weekly_schedule').select('*').eq('staff_id', staffId);
-      let breaksQuery = supabase.from('weekly_breaks').select('*').eq('staff_id', staffId);
-      
-      if (barbershopId) {
-        scheduleQuery = scheduleQuery.eq('barbershop_id', barbershopId);
-        breaksQuery = breaksQuery.eq('barbershop_id', barbershopId);
+      let targetShopId = barbershopId;
+      if (!targetShopId) {
+        const { data: spRow } = await supabase
+          .from('staff_profiles')
+          .select('barbershop_id')
+          .eq('id', staffId)
+          .maybeSingle();
+        if (spRow?.barbershop_id) {
+          targetShopId = spRow.barbershop_id;
+        }
       }
 
-      const [scheduleRes, breaksRes] = await Promise.all([
-        scheduleQuery,
-        breaksQuery
-      ]);
+      // Carregar pausas salvas localmente como fallback complementar caso o RPC tenha usado fallback sem breaks
+      const localKey = `meucorte_availability_${staffId}`;
+      const localBreaksMap: Record<number, string[]> = {};
+      try {
+        const rawLocal = localStorage.getItem(localKey);
+        if (rawLocal) {
+          const parsedLocal = JSON.parse(rawLocal);
+          if (Array.isArray(parsedLocal)) {
+            parsedLocal.forEach((l: any) => {
+              if (typeof l.dayOfWeek === 'number' && Array.isArray(l.breaks)) {
+                localBreaksMap[l.dayOfWeek] = l.breaks.map((b: string) => normalizeTime(b)).filter(Boolean);
+              }
+            });
+          }
+        }
+      } catch {}
 
-      if (!scheduleRes.error && scheduleRes.data && scheduleRes.data.length > 0) {
-        const breaks = breaksRes.data || [];
-        const result: StaffAvailability[] = scheduleRes.data.map((s: any) => {
-          const dayBreaks = (breaks as any[])
-            .filter((b: any) => b.day_of_week === s.day_of_week)
-            .map((b: any) => normalizeTime(b.time))
-            .filter(Boolean);
-          const uniqueDayBreaks = Array.from(new Set(dayBreaks));
+      // 1. Tentar ler primeiro da tabela de horários individuais (staff_availability)
+      try {
+        const { data: indAvail, error: indErr } = await supabase
+          .from('staff_availability')
+          .select('*')
+          .eq('staff_id', staffId);
 
-          return {
-            id: s.id || `${staffId}_${s.day_of_week}`,
-            staffId: s.staff_id,
-            dayOfWeek: s.day_of_week,
-            startTime: normalizeTime(s.start_time),
-            endTime: normalizeTime(s.end_time),
-            breaks: uniqueDayBreaks,
-            isOpen: s.is_open,
-            createdAt: s.created_at
-          };
-        });
+        if (!indErr && indAvail && indAvail.length > 0) {
+          // Buscar pausas individuais do profissional
+          let breaksQuery = supabase.from('weekly_breaks').select('*').eq('staff_id', staffId);
+          if (targetShopId) breaksQuery = breaksQuery.eq('barbershop_id', targetShopId);
+          const { data: breaksData } = await breaksQuery;
+          const breaks = breaksData || [];
 
-        // Update local storage cache
-        const localKey = `meucorte_availability_${staffId}`;
-        try {
-          localStorage.setItem(localKey, JSON.stringify(result));
-        } catch {}
+          const result: StaffAvailability[] = (indAvail as any[]).map(item => {
+            const dayBreaks = (breaks as any[])
+              .filter((b: any) => b.day_of_week === item.day_of_week)
+              .flatMap((b: any) => expandBreakRowToSlots(b))
+              .filter(Boolean);
+            const colBreaks = (item.breaks || []).map((b: string) => normalizeTime(b)).filter(Boolean);
+            const dbBreaks = Array.from(new Set([...colBreaks, ...dayBreaks]));
+            const fallbackLocalBreaks = dbBreaks.length > 0 ? dbBreaks : (item.is_open ? (localBreaksMap[item.day_of_week] || []) : []);
+            const allBreaks = Array.from(new Set(fallbackLocalBreaks));
 
-        return result;
+            return {
+              id: item.id || `${staffId}_${item.day_of_week}`,
+              staffId: staffId,
+              dayOfWeek: item.day_of_week,
+              startTime: normalizeTime(item.start_time),
+              endTime: normalizeTime(item.end_time),
+              breaks: allBreaks,
+              isOpen: item.is_open,
+              createdAt: item.created_at
+            };
+          });
+
+          try { localStorage.setItem(localKey, JSON.stringify(result)); } catch {}
+          return result;
+        }
+      } catch (availReadErr) {
+        console.warn('[getStaffAvailability] Aviso ao consultar staff_availability:', availReadErr);
       }
 
-      // 2. Fallback to staff_availability table if weekly_schedule had no rows for this staff
-      const { data, error } = await supabase
-        .from('staff_availability')
-        .select('*')
-        .eq('staff_id', staffId);
+      // 2. HERANÇA DA GRADE GERAL: Se o profissional não possui horários individuais específicos,
+      // herda o horário de funcionamento da barbearia (weekly_schedule) e pausas gerais (staff_id IS NULL).
+      if (targetShopId) {
+        const [scheduleRes, breaksRes] = await Promise.all([
+          supabase.from('weekly_schedule').select('*').eq('barbershop_id', targetShopId),
+          supabase.from('weekly_breaks').select('*').eq('barbershop_id', targetShopId).is('staff_id', null)
+        ]);
 
-      if (!error && data && data.length > 0) {
-        const result: StaffAvailability[] = (data as any[]).map(item => ({
-          id: item.id,
-          staffId: item.staff_id,
-          dayOfWeek: item.day_of_week,
-          startTime: normalizeTime(item.start_time),
-          endTime: normalizeTime(item.end_time),
-          breaks: (item.breaks || []).map((b: string) => normalizeTime(b)).filter(Boolean),
-          isOpen: item.is_open,
-          createdAt: item.created_at
-        }));
+        if (!scheduleRes.error && scheduleRes.data && scheduleRes.data.length > 0) {
+          const breaks = breaksRes.data || [];
+          const result: StaffAvailability[] = scheduleRes.data.map((s: any) => {
+            const dayBreaks = (breaks as any[])
+              .filter((b: any) => b.day_of_week === s.day_of_week)
+              .flatMap((b: any) => expandBreakRowToSlots(b))
+              .filter(Boolean);
 
-        const localKey = `meucorte_availability_${staffId}`;
-        try {
-          localStorage.setItem(localKey, JSON.stringify(result));
-        } catch {}
+            return {
+              id: `${staffId}_${s.day_of_week}`,
+              staffId: staffId,
+              dayOfWeek: s.day_of_week,
+              startTime: normalizeTime(s.start_time),
+              endTime: normalizeTime(s.end_time),
+              breaks: Array.from(new Set(dayBreaks)),
+              isOpen: s.is_open,
+              createdAt: s.created_at
+            };
+          });
 
-        return result;
+          return result;
+        }
       }
 
       return [];
     } catch (err: any) {
       console.warn('[getStaffAvailability] Erro ao carregar disponibilidade:', err);
-      
-      // Try local storage fallback
       const localKey = `meucorte_availability_${staffId}`;
       try {
         const stored = localStorage.getItem(localKey);
-        if (stored) {
-          const data = JSON.parse(stored) as any[];
-          return data.map(item => ({
-            id: item.id || crypto.randomUUID(),
-            staffId: item.staff_id || item.staffId || staffId,
-            dayOfWeek: item.day_of_week ?? item.dayOfWeek,
-            startTime: normalizeTime(item.start_time || item.startTime),
-            endTime: normalizeTime(item.end_time || item.endTime),
-            breaks: (item.breaks || []).map((b: string) => normalizeTime(b)).filter(Boolean),
-            isOpen: item.is_open ?? item.isOpen,
-            createdAt: item.created_at || item.createdAt
-          }));
-        }
+        if (stored) return JSON.parse(stored);
       } catch {}
-      
       return [];
     }
   },
@@ -2275,11 +2469,24 @@ export const supabaseService = {
         throw new Error('Não autorizado.');
       }
 
-      // Security check for staff: can only edit own schedule
+      const { data: spRow } = await supabase
+        .from('staff_profiles')
+        .select('id, barbershop_id, user_id, status')
+        .eq('id', staffId)
+        .maybeSingle();
+
+      const targetShopId = barbershopId || spRow?.barbershop_id || null;
+      const targetStaffUserId = spRow?.user_id || userId;
+
+      if (!targetShopId) {
+        throw new Error('Identificador da barbearia não encontrado ao salvar disponibilidade.');
+      }
+
+      // Security check for staff: can only edit own schedule and must be active
       if (role === 'staff') {
         const { data: staffMember, error: staffErr } = await supabase
           .from('staff_profiles')
-          .select('id')
+          .select('id, status')
           .eq('user_id', userId)
           .maybeSingle();
 
@@ -2287,107 +2494,192 @@ export const supabaseService = {
           throw staffErr;
         } else if (!staffMember || (staffMember as any).id !== staffId) {
           throw new Error('Apenas permitido editar sua própria disponibilidade.');
+        } else if (staffMember.status === 'inactive') {
+          throw new Error('Profissional inativo não pode editar horários. Solicite reativação primeiro.');
         }
       }
 
-      // 1. Update weekly_schedule for this staff
-      let delScheduleQuery = supabase.from('weekly_schedule').delete().eq('staff_id', staffId);
-      if (barbershopId) {
-        delScheduleQuery = delScheduleQuery.eq('barbershop_id', barbershopId);
-      }
-      const { error: delSchedErr } = await delScheduleQuery;
-      if (delSchedErr) {
-        console.warn('[saveStaffAvailability] Aviso ao limpar weekly_schedule anterior:', delSchedErr);
-      }
+      const saveLocalAvailabilityCache = () => {
+        const localKey = `meucorte_availability_${staffId}`;
+        try {
+          const cachedData = availabilities.map(a => ({
+            id: `${staffId}_${a.dayOfWeek}`,
+            staffId: a.staffId,
+            dayOfWeek: a.dayOfWeek,
+            startTime: normalizeTime(a.startTime),
+            endTime: normalizeTime(a.endTime),
+            breaks: a.isOpen ? Array.from(new Set((a.breaks || []).map((b: string) => normalizeTime(b)).filter(Boolean))) : [],
+            isOpen: a.isOpen
+          }));
+          localStorage.setItem(localKey, JSON.stringify(cachedData));
+        } catch {}
+      };
 
-      const scheduleRows = availabilities.map(a => {
-        const row: any = {
-          staff_id: a.staffId,
-          user_id: userId,
-          day_of_week: a.dayOfWeek,
-          start_time: normalizeTime(a.startTime),
-          end_time: normalizeTime(a.endTime),
-          is_open: a.isOpen
-        };
-        if (barbershopId) {
-          row.barbershop_id = barbershopId;
-        }
-        return row;
-      });
+      // PASSO CRÍTICO: Garantir que os registros pai em weekly_schedule existam para os 7 dias (0..6)
+      // ANTES de inserir/atualizar weekly_breaks (evitando erro 23503 de FK weekly_breaks_day_of_week_fkey)
+      const ensureParentScheduleAndGetUserMap = async (): Promise<Map<number, string>> => {
+        const [{ data: existingWsRows }, { data: shopRow }] = await Promise.all([
+          supabase
+            .from('weekly_schedule')
+            .select('id, day_of_week, user_id')
+            .eq('barbershop_id', targetShopId),
+          supabase
+            .from('barbershops')
+            .select('owner_id')
+            .eq('id', targetShopId)
+            .maybeSingle()
+        ]);
 
-      const { error: schedInsertErr } = await supabase.from('weekly_schedule').insert(scheduleRows as any);
-      if (schedInsertErr) {
-        console.error('[saveStaffAvailability] Erro ao inserir weekly_schedule:', schedInsertErr);
-        throw schedInsertErr;
-      }
+        const fallbackOwnerUserId =
+          shopRow?.owner_id ||
+          (existingWsRows && existingWsRows.length > 0 ? existingWsRows[0].user_id : null) ||
+          targetStaffUserId ||
+          userId;
 
-      // 2. Update weekly_breaks for this staff
-      let delBreaksQuery = supabase.from('weekly_breaks').delete().eq('staff_id', staffId);
-      if (barbershopId) {
-        delBreaksQuery = delBreaksQuery.eq('barbershop_id', barbershopId);
-      }
-      const { error: delBreaksErr } = await delBreaksQuery;
-      if (delBreaksErr) {
-        console.warn('[saveStaffAvailability] Aviso ao limpar weekly_breaks anterior:', delBreaksErr);
-      }
-
-      const breakRows: any[] = [];
-      availabilities.forEach(a => {
-        const rawBreaks = a.breaks || [];
-        const uniqueBreaks = Array.from(new Set(rawBreaks.map(t => normalizeTime(t)).filter(Boolean)));
-        uniqueBreaks.forEach(time => {
-          const bRow: any = {
-            staff_id: a.staffId,
-            user_id: userId,
-            day_of_week: a.dayOfWeek,
-            time: normalizeTime(time)
-          };
-          if (barbershopId) {
-            bRow.barbershop_id = barbershopId;
+        const wsUserByDay = new Map<number, string>();
+        (existingWsRows || []).forEach((row: any) => {
+          if (typeof row.day_of_week === 'number' && row.user_id) {
+            wsUserByDay.set(row.day_of_week, row.user_id);
           }
-          breakRows.push(bRow);
         });
+
+        const missingDays: any[] = [];
+        for (let d = 0; d <= 6; d++) {
+          if (!wsUserByDay.has(d) && fallbackOwnerUserId) {
+            const refDay = availabilities.find(a => a.dayOfWeek === d);
+            missingDays.push({
+              user_id: fallbackOwnerUserId,
+              barbershop_id: targetShopId,
+              day_of_week: d,
+              start_time: refDay ? normalizeTime(refDay.startTime) : '09:00',
+              end_time: refDay ? normalizeTime(refDay.endTime) : '18:00',
+              is_open: refDay ? refDay.isOpen : d !== 0
+            });
+            wsUserByDay.set(d, fallbackOwnerUserId);
+          }
+        }
+
+        if (missingDays.length > 0) {
+          const { error: upsertWsErr } = await supabase
+            .from('weekly_schedule')
+            .upsert(missingDays as any, { onConflict: 'barbershop_id,day_of_week' });
+
+          if (upsertWsErr) {
+            // Fallback individual caso a constraint de conflito seja diferente
+            for (const row of missingDays) {
+              await supabase.from('weekly_schedule').insert(row as any);
+            }
+          }
+        }
+
+        return wsUserByDay;
+      };
+
+      const wsUserByDay = await ensureParentScheduleAndGetUserMap();
+
+      const syncBreaksWithUserId = async () => {
+        // 1. Atualizar a coluna breaks em staff_availability com os slots de 30min
+        await Promise.all(
+          availabilities.map(a => {
+            const cleanBreaks = a.isOpen
+              ? Array.from(new Set((a.breaks || []).map((b: string) => normalizeTime(b)).filter(Boolean)))
+              : [];
+            return supabase
+              .from('staff_availability')
+              .update({ breaks: cleanBreaks } as any)
+              .eq('barbershop_id', targetShopId)
+              .eq('staff_id', staffId)
+              .eq('day_of_week', a.dayOfWeek);
+          })
+        );
+
+        // 2. Limpar pausas anteriores deste profissional em weekly_breaks
+        await supabase
+          .from('weekly_breaks')
+          .delete()
+          .eq('staff_id', staffId)
+          .eq('barbershop_id', targetShopId);
+
+        // 3. Converter blocos contínuos de 30min em intervalos limpos (start_time, end_time)
+        const breakRows: any[] = [];
+        availabilities.forEach(a => {
+          if (!a.isOpen) return;
+          const scheduleUserId = wsUserByDay.get(a.dayOfWeek);
+          if (!scheduleUserId) return;
+
+          const mergedIntervals = mergeBreakSlotsToIntervals(a.breaks || []);
+          mergedIntervals.forEach(interval => {
+            breakRows.push({
+              user_id: scheduleUserId,
+              staff_id: a.staffId,
+              barbershop_id: targetShopId,
+              day_of_week: a.dayOfWeek,
+              time: interval.start_time,
+              start_time: interval.start_time,
+              end_time: interval.end_time
+            });
+          });
+        });
+
+        if (breakRows.length > 0) {
+          const { error: wbInsErr } = await supabase.from('weekly_breaks').insert(breakRows as any);
+          if (wbInsErr && (wbInsErr as any).code !== '23505' && (wbInsErr as any).code !== '23503') {
+            console.warn('[saveStaffAvailability] Aviso ao sincronizar weekly_breaks diretamente:', wbInsErr);
+          }
+        }
+      };
+
+      // 1. Salvar a grade base em staff_availability via RPC transacional atômica (passando breaks: [] para que
+      // a RPC legada no banco não falhe em weekly_breaks antes da mesclagem de intervalos)
+      const rpcPayloadWithoutBreaks = availabilities.map(a => ({
+        day_of_week: a.dayOfWeek,
+        start_time: normalizeTime(a.startTime),
+        end_time: normalizeTime(a.endTime),
+        is_open: a.isOpen,
+        breaks: []
+      }));
+
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc('save_staff_schedule_atomic', {
+        p_barbershop_id: targetShopId,
+        p_staff_id: staffId,
+        p_schedule: rpcPayloadWithoutBreaks
       });
 
-      if (breakRows.length > 0) {
-        const { error: breaksInsertErr } = await supabase.from('weekly_breaks').insert(breakRows as any);
-        if (breaksInsertErr) {
-          console.error('[saveStaffAvailability] Erro ao inserir weekly_breaks:', breaksInsertErr);
-          throw breaksInsertErr;
-        }
+      if (!rpcErr && rpcRes && rpcRes.success === true) {
+        await syncBreaksWithUserId();
+        saveLocalAvailabilityCache();
+        return;
       }
 
-      // 3. Sync staff_availability table for backwards compatibility
-      try {
-        await supabase.from('staff_availability').delete().eq('staff_id', staffId);
-        const legacyPayloads = availabilities.map(a => ({
-          id: crypto.randomUUID(),
-          staff_id: a.staffId,
-          day_of_week: a.dayOfWeek,
-          start_time: normalizeTime(a.startTime),
-          end_time: normalizeTime(a.endTime),
-          breaks: a.breaks || [],
-          is_open: a.isOpen
-        }));
-        await supabase.from('staff_availability').insert(legacyPayloads as any);
-      } catch (legacyErr) {
-        console.warn('[saveStaffAvailability] Aviso ao sincronizar staff_availability legado:', legacyErr);
+      if (rpcErr) {
+        console.warn('[saveStaffAvailability] Aviso na RPC save_staff_schedule_atomic, aplicando fallback direto:', rpcErr.message);
       }
 
-      // 4. Update local storage cache
-      const localKey = `meucorte_availability_${staffId}`;
-      try {
-        const cachedData = availabilities.map(a => ({
-          id: `${staffId}_${a.dayOfWeek}`,
-          staffId: a.staffId,
-          dayOfWeek: a.dayOfWeek,
-          startTime: normalizeTime(a.startTime),
-          endTime: normalizeTime(a.endTime),
-          breaks: a.breaks || [],
-          isOpen: a.isOpen
-        }));
-        localStorage.setItem(localKey, JSON.stringify(cachedData));
-      } catch {}
+      // 2. Fallback direto caso a RPC não esteja disponível ou falhe
+      await supabase
+        .from('staff_availability')
+        .delete()
+        .eq('staff_id', staffId)
+        .eq('barbershop_id', targetShopId);
+
+      const availabilityRows = availabilities.map(a => ({
+        id: crypto.randomUUID(),
+        barbershop_id: targetShopId,
+        staff_id: staffId,
+        day_of_week: a.dayOfWeek,
+        start_time: normalizeTime(a.startTime),
+        end_time: normalizeTime(a.endTime),
+        is_open: a.isOpen,
+        breaks: a.isOpen ? Array.from(new Set((a.breaks || []).map((b: string) => normalizeTime(b)).filter(Boolean))) : []
+      }));
+
+      const { error: directInsErr } = await supabase.from('staff_availability').insert(availabilityRows as any);
+      if (directInsErr) {
+        throw new Error(directInsErr.message || 'Erro ao salvar horários do profissional no banco de dados.');
+      }
+
+      await syncBreaksWithUserId();
+      saveLocalAvailabilityCache();
     } catch (err: any) {
       console.error('[saveStaffAvailability] Erro ao salvar disponibilidade:', err);
       throw err;
@@ -2625,6 +2917,13 @@ export const supabaseService = {
             ownerId: directShop.owner_id,
             name: directShop.name,
             slug: directShop.slug,
+            phone: directShop.phone || directShop.business_phone || '',
+            businessPhone: directShop.business_phone || directShop.phone || '',
+            address: directShop.address || '',
+            logo: directShop.logo || '',
+            description: directShop.description || '',
+            instagram: directShop.instagram || '',
+            website: directShop.website || '',
             createdAt: directShop.created_at
           };
         }
@@ -2647,6 +2946,13 @@ export const supabaseService = {
           ownerId: data.owner_id,
           name: data.name,
           slug: data.slug,
+          phone: data.phone || data.business_phone || '',
+          businessPhone: data.business_phone || data.phone || '',
+          address: data.address || '',
+          logo: data.logo || '',
+          description: data.description || '',
+          instagram: data.instagram || '',
+          website: data.website || '',
           createdAt: data.created_at
         };
       }
@@ -2671,6 +2977,13 @@ export const supabaseService = {
             ownerId: data.owner_id,
             name: data.name,
             slug: data.slug,
+            phone: data.phone || data.business_phone || '',
+            businessPhone: data.business_phone || data.phone || '',
+            address: data.address || '',
+            logo: data.logo || '',
+            description: data.description || '',
+            instagram: data.instagram || '',
+            website: data.website || '',
             createdAt: data.created_at
           };
         }
@@ -2927,6 +3240,7 @@ export const supabaseService = {
       // 4. Construir contexts do usuário
       const contexts: TenantContext[] = [];
       let hasInconsistentStaff = false;
+      let hasInactiveStaff = false;
 
       for (const m of memberRows) {
         const shop = barbershopsMap.get(m.barbershop_id);
@@ -2938,6 +3252,7 @@ export const supabaseService = {
         const staff = staffRows.find((s: any) => s.barbershop_id === m.barbershop_id);
 
         if (!isOwner && staff && staff.status === 'inactive') {
+          hasInactiveStaff = true;
           continue;
         }
 
@@ -2969,6 +3284,14 @@ export const supabaseService = {
 
       // 6. Avaliar status
       if (contexts.length === 0) {
+        if (hasInactiveStaff || staffRows.some((s: any) => s.status === 'inactive')) {
+          return {
+            authenticatedUserId: userId,
+            contexts: [],
+            activeContext: null,
+            status: 'access_revoked'
+          };
+        }
         return {
           authenticatedUserId: userId,
           contexts: [],
@@ -3024,6 +3347,14 @@ export const supabaseService = {
     }
 
     const authCtx = await this.resolveAuthContexts(userId);
+
+    if (authCtx.status === 'access_revoked') {
+      return {
+        kind: 'access_revoked',
+        userId,
+        reason: 'Seu perfil de profissional nesta barbearia está inativo no momento. Entre em contato com a administração da barbearia para solicitar sua reativação.'
+      };
+    }
 
     if (authCtx.status === 'needs_onboarding') {
       return {
@@ -3212,6 +3543,21 @@ export const supabaseService = {
 
       // 4. Avaliar accessKind
       if (userContexts.length === 0) {
+        const hasInactiveStaff = staffRows.some((s: any) => s.status === 'inactive') || memberRows.length > 0;
+        if (hasInactiveStaff) {
+          return {
+            userId,
+            profile: profileObj,
+            memberships,
+            ownedBarbershops,
+            userContexts: [],
+            activeMembership: null,
+            activeBarbershopId: null,
+            activeBarbershop: null,
+            staffProfile: null,
+            accessKind: 'access_revoked'
+          };
+        }
         // Usuário com conta, mas sem barbearia própria e sem membership
         return {
           userId,
